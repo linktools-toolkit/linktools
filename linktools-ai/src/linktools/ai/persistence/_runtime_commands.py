@@ -3,14 +3,15 @@
 """Named state commands for multi-record Runtime checkpoints."""
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 from uuid import uuid4
 
 from linktools.core import environ
-from ..model import StoredUserInput
+from ..agent import AgentBindingContract
 
 from ..core import (
     ApprovalStatus,
@@ -21,6 +22,8 @@ from ..core import (
     ExternalCallStatus,
     IdempotencyStatus,
     OperationLedgerInput,
+    OperationLedgerRecord,
+    Principal,
     SessionStatus,
     ToolOperationStatus,
     canonical_sha256,
@@ -30,11 +33,11 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..storage import StoredPayload, TurnCoordination, TurnScopeIdentity, sql_observation_phase
 from ..steps import native_store_key
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 from ..model.messages import encode_model_messages
 from ._execution_content import restore_native_text_payload
 from ._native_tool_error import NativeToolErrorReference
-from ._message_root import NativeMessageRoot, NativeTextReference
+from ._message_root import NativeMessageRoot, NativeTextReference, NativeUserInputReference
 from .contracts import ArchivedContextBlock
 from ._archive import ContentArchive, PreparedArchive, archive_content_scope
 from ..session import SessionTurnRef
@@ -51,6 +54,7 @@ from .contracts import (
     ExecutionCancelRequestCommit,
     ExecutionEventAppend,
     ExecutionRecord,
+    ExecutionHistorySealRecord,
     ResultRecord,
     ExecutionRepository,
     ExecutionStartClaim,
@@ -88,6 +92,7 @@ from .durability import (
     run_durable_commit,
 )
 from ._execution_commands import _execution_history_seal
+from .graph_turns import GraphDeferredWait as _GraphDeferredWait
 from ._execution_repositories import ExecutionRepositoryImpl, IdempotencyRepositoryImpl
 from .turns import SourceTurnWriteFence, StateTurnCoordination, _duration, _TurnGraphReadError
 from ._model_interaction_store import ModelInteractionStateStepArchive
@@ -105,13 +110,14 @@ from ._step_contracts import (
     StepEvent,
 )
 from ._step_archive import (
+    ExecutionTerminalSealPlan,
     PreparedExecutionProjection,
     PreparedAgentRunCheckpoint,
     PreparedAgentRunCheckpointBatch,
     StateStepArchive,
 )
 from ._repository_common import operation_identity_matches, validate_recovery_operation
-from .state import Observed, GroupRecordReader, StateGroupTransaction, StateStore, StateTransaction
+from .state import Observed, GroupRecordReader, RecordQuery, StateGroupTransaction, StateStore, StateTransaction, StoredRecord, state_store_key
 
 _logger = environ.get_logger("ai.runtime.state.commands")
 
@@ -170,7 +176,14 @@ def _timeline_turn_message_range(
 
 if TYPE_CHECKING:
     from ._execution_authority import ExecutionAuthority, InitialExecutionAuthority
+    from ..core import JsonValue
+    from ._session_turn_sql import SessionTurnKey, SqlSessionTurns, TerminalState
+    from ._step_store import SqlStepStore
     from .capabilities import RuntimeCapabilityWrites, PreparedCapabilityWrites
+    from ._task_repository import TaskRepositoryImpl, _TaskGraphCancelOwner
+    from ..task._graph import TaskLease
+
+    _GraphLaunch = tuple[SqlSessionTurns, SessionTurnKey, int, TaskRepositoryImpl, TaskLease]
 
 
 class _GroupedStartUnavailable(AIError):
@@ -178,6 +191,14 @@ class _GroupedStartUnavailable(AIError):
 
     def __init__(self) -> None:
         super().__init__(ErrorCode.STORAGE_CONFLICT)
+
+
+class _NativeChildResume(Protocol):
+    async def guard_deferred_resume(
+        self, child_store: StateStore, write: Callable[[StateTransaction], Awaitable[ExecutionRecord]],
+    ) -> ExecutionRecord: ...
+
+    def require_deferred_child(self, child: ExecutionRecord) -> None: ...
 
 
 class StateCommands:
@@ -293,6 +314,7 @@ class StateCommands:
         background_tasks: "set[asyncio.Task[object]] | None" = None,
         producer_generation: int | None = None,
         turn_fence: SourceTurnWriteFence | None = None,
+        _graph_wait: _GraphDeferredWait | None = None,
     ) -> ExecutionRecord:
         self._require_checkpoint()
         approvals = self._checkpoint.approvals
@@ -366,10 +388,45 @@ class StateCommands:
             for item in continuation.calls
         ):
             raise ValueError("external record ids do not match continuation")
+        graph_stores = ()
+        if _graph_wait is not None:
+            from sqlalchemy import select
+            from ._session_turn_sql import CanonicalDeferredFrontier
+            from ._step_store import SqlStepStore
+
+            graph = _graph_wait
+            if (turn_fence is not None or _graph_wait.key.turn_id != execution_id
+                    or producer_generation is None or producer_generation < 1
+                    or type(graph.step_store) is not SqlStepStore or not graph.checkpoint_id
+                    or graph.task_lease is None):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            graph.turns._require_checkpoint_store(graph.step_store)
+            launch = (graph.turns, graph.key, graph.generation, graph.task_repository, graph.task_lease)
+            graph_stores = self._canonical_graph_launch_stores(execution_id, launch)
+            turn_store, predicate, occupied = self._canonical_graph_turn_owner(graph.turns, graph.key, graph.generation)
+            row = graph.turns._turns
+            frontier = CanonicalDeferredFrontier.from_json(graph.key, graph.generation, {
+                "checkpoint_id": graph.checkpoint_id,
+                "approval_operation_ids": [item.operation_id for item in continuation.approvals],
+                "external_operation_ids": [item.operation_id for item in continuation.calls],
+                "operation_metadata": {
+                    item.operation_id: dict(item.metadata) for item in (*continuation.approvals, *continuation.calls)
+                },
+            }).to_json()
+            if len(canonical_json_bytes(frontier)) > graph.max_bytes:
+                raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
+            state_query = select(row.c.state, row.c.result_json, row.c.lease_until, occupied).where(*predicate)
+
+            async def read_graph(group: StateGroupTransaction):
+                async def read(session):
+                    return (await session.execute(state_query)).one_or_none()
+                return await group.transaction(turn_store).run_sql(graph.turns._context, read)
+
         stores = _dedupe_stores(
             (
                 self._execution.state_store,
                 *((turn_fence.store,) if turn_fence is not None else ()),
+                *graph_stores,
                 approvals.state_store,
                 external_calls.state_store,
             )
@@ -408,6 +465,21 @@ class StateCommands:
                     != continuation.source_agent_run_id
                 ):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
+                if _graph_wait is not None:
+                    if (current_execution.root_execution_id != execution_id
+                            or current_execution.session_id is not None
+                            or current_execution.parent_execution_id is not None
+                            or current_execution.parent_invocation_id is not None
+                            or not current_execution.requires_task_invocation_capture
+                            or not current_execution.restart_checkpoints
+                            or current_execution.native_step_source is None
+                            or current_execution.native_step_source != graph.step_store.backup_source
+                            or expected_agent_run_seq < 1
+                            or continuation.source_agent_run_id != agent_run_id(
+                                namespace=self._namespace, tenant_id=self._tenant_id, execution_id=execution_id,
+                                agent_run_seq=expected_agent_run_seq,
+                            )):
+                        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
                 for record in approval_values:
                     await approvals.create_in_transaction(recovery_tx, record)
                 for record in external_values:
@@ -426,6 +498,24 @@ class StateCommands:
                         recovery=replace(current_checkpoint.recovery, pending_tools=continuation),
                     )
                 )
+                if _graph_wait is not None:
+                    async def park(session):
+                        snapshot = await graph.step_store._capture_turn_checkpoint_row(
+                            session, run_id=continuation.source_agent_run_id,
+                            conversation_id=graph.step_conversation_id, replay_key=graph.checkpoint_id,
+                        )
+                        if snapshot is None or snapshot[0]["state"] != "interrupted" or not snapshot[1].count:
+                            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                        changed = await session.execute(row.update().where(
+                            *predicate, occupied, row.c.state == "accepted", row.c.lease_until > graph.turns._now,
+                        ).values(state="waiting", lease_until=None, result_json=frontier))
+                        if changed.rowcount != 1:
+                            raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+                    await group.transaction(turn_store).run_sql(graph.turns._context, park)
+                    await graph.task_repository._guard_bound_execution_in_transaction(
+                        group.transaction(graph.task_repository.state_store), graph.task_lease, execution_id=execution_id,
+                    )
                 return updated_execution
 
             return await stores[0].storage_group.mutate(stores, mutate)
@@ -486,6 +576,10 @@ class StateCommands:
                 ):
                     # Other owners may resolve or pre-create members. This command
                     # atomically publishes its members and execution frontier.
+                    if _graph_wait is not None:
+                        previous = await read_graph(group)
+                        if previous is None or previous[0] != "accepted" or not previous[3]:
+                            return _partial_integrity()
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
                 if (
                     execution.status is ExecutionStatus.WAITING_DEFERRED
@@ -495,6 +589,10 @@ class StateCommands:
                 ):
                     if not complete_members:
                         return _partial_integrity()
+                    if _graph_wait is not None:
+                        parked = await read_graph(group)
+                        if parked is None or tuple(parked) != ("waiting", frontier, None, True):
+                            return _partial_integrity()
                     return CommitObservation(DurableCommitState.COMMITTED, value=execution)
                 return CommitObservation(DurableCommitState.UNRESOLVED)
 
@@ -514,14 +612,42 @@ class StateCommands:
         *,
         expected_pending_tools: PendingToolContinuation,
         background_tasks: "set[asyncio.Task[object]] | None" = None,
+        _graph_wait: "tuple[SqlSessionTurns, SessionTurnKey, int, str] | None" = None,
     ) -> ExecutionRecord:
         self._require_checkpoint()
         approvals = self._checkpoint.approvals
         external_calls = self._checkpoint.external_calls
+        graph_store = None
+        if _graph_wait is not None:
+            from sqlalchemy import select
+            from ._session_turn_sql import CanonicalDeferredFrontier
+
+            turns, key, generation, checkpoint_id = _graph_wait
+            if key.turn_id != commit.execution_id:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            graph_store, predicate, occupied = self._canonical_graph_turn_owner(turns, key, generation)
+            frontier = CanonicalDeferredFrontier.from_json(key, generation, {
+                "checkpoint_id": checkpoint_id,
+                "approval_operation_ids": [item.operation_id for item in expected_pending_tools.approvals],
+                "external_operation_ids": [item.operation_id for item in expected_pending_tools.calls],
+                "operation_metadata": {
+                    item.operation_id: dict(item.metadata)
+                    for item in (*expected_pending_tools.approvals, *expected_pending_tools.calls)
+                },
+            }).to_json()
+            row = turns._turns
+            graph_statement = select(row.c.state, row.c.result_json, row.c.lease_until, occupied).where(*predicate)
+
+            async def graph_state(group: StateGroupTransaction):
+                async def read(session):
+                    return (await session.execute(graph_statement)).one_or_none()
+
+                return await group.transaction(graph_store).run_sql(turns._context, read)
+
         stores = _dedupe_stores(
             (
                 self._execution.state_store,
-                self._execution.state_store,
+                *((graph_store,) if graph_store is not None else ()),
                 approvals.state_store,
                 external_calls.state_store,
             )
@@ -570,6 +696,19 @@ class StateCommands:
                     or checkpoint.recovery.pending_tools != expected_pending_tools
                 ):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
+                if _graph_wait is not None:
+                    if (execution.root_execution_id != commit.execution_id
+                            or execution.session_id is not None or execution.parent_execution_id is not None
+                            or execution.parent_invocation_id is not None or not execution.requires_task_invocation_capture
+                            or execution.agent_run_seq < 1
+                            or expected_pending_tools.source_agent_run_id != agent_run_id(
+                                namespace=self._namespace, tenant_id=self._tenant_id, execution_id=commit.execution_id,
+                                agent_run_seq=execution.agent_run_seq,
+                            )):
+                        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                    prior = await graph_state(group)
+                    if prior is None or tuple(prior) != ("waiting", frontier, None, True):
+                        raise AIError(ErrorCode.STORAGE_CONFLICT)
                 await approvals.cancel_pending_in_transaction(
                     recovery_tx,
                     approval_ids,
@@ -590,6 +729,16 @@ class StateCommands:
                     expected_status=ExecutionStatus.WAITING_DEFERRED,
                     recovery=replace(checkpoint.recovery, pending_tools=None),
                 )
+                if graph_store is not None:
+                    async def stop_graph(session):
+                        stopped = await session.execute(row.update().where(
+                            *predicate, occupied, row.c.state == "waiting", row.c.lease_until.is_(None),
+                            row.c.result_json["checkpoint_id"].as_string() == checkpoint_id,
+                        ).values(state="cancelling", lease_until=turns._now))
+                        if stopped.rowcount != 1:
+                            raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+                    await group.transaction(graph_store).run_sql(turns._context, stop_graph)
                 return updated
 
             return await stores[0].storage_group.mutate(stores, mutate)
@@ -661,6 +810,10 @@ class StateCommands:
                 ):
                     # Member resolution has its own owner and does not prove
                     # that this atomic cancellation command was published.
+                    if _graph_wait is not None:
+                        prior = await graph_state(group)
+                        if prior is None or tuple(prior) != ("waiting", frontier, None, True):
+                            return _partial_integrity()
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
                 if not own_cancellation:
                     if items:
@@ -687,6 +840,14 @@ class StateCommands:
                 ):
                     if pending_members:
                         return _partial_integrity()
+                    if _graph_wait is not None:
+                        observed = await graph_state(group)
+                        if observed is None:
+                            return CommitObservation(DurableCommitState.UNRESOLVED)
+                        graph_phase, graph_payload, lease, active = observed
+                        if (execution.status is not ExecutionStatus.CANCELLING or graph_phase != "cancelling"
+                                or graph_payload != frontier or lease is None or not active):
+                            return CommitObservation(DurableCommitState.UNRESOLVED)
                     return CommitObservation(DurableCommitState.COMMITTED, value=execution)
                 return CommitObservation(DurableCommitState.UNRESOLVED)
 
@@ -701,6 +862,204 @@ class StateCommands:
         )
         return _require_durable_record(outcome)
 
+    async def _mark_canonical_graph_deferred_ready(
+        self, expected_execution: ExecutionRecord, *, graph: _GraphDeferredWait,
+        _queued_task: tuple[str, str, int] | None = None,
+    ) -> bool:
+        """Make only a fully settled parked Graph frontier eligible for reacquisition."""
+        from sqlalchemy import select
+        from ._session_turn_sql import CanonicalDeferredFrontier
+        from ._step_store import SqlStepStore
+        from ._task_repository import TaskRepositoryImpl
+
+        self._require_checkpoint()
+        repository, tools = self._execution, self._tools
+        execution = expected_execution
+        if (type(repository) is not ExecutionRepositoryImpl or type(tools) is not ToolRepositoryImpl
+                or type(graph.step_store) is not SqlStepStore or type(graph.task_repository) is not TaskRepositoryImpl
+                or (graph.task_lease is None) != (_queued_task is not None)
+                or execution.execution_id != graph.key.turn_id or execution.root_execution_id != graph.key.turn_id
+                or execution.session_id is not None or execution.parent_execution_id is not None
+                or execution.parent_invocation_id is not None or not execution.requires_task_invocation_capture
+                or execution.status is not ExecutionStatus.WAITING_DEFERRED
+                or execution.recovery_state is not ExecutionRecoveryState.WAITING
+                or execution.recovery is None or execution.recovery.pending_tools is None
+                or execution.agent_run_seq < 1 or execution.producer_generation < 1
+                or execution.native_step_source != graph.step_store.backup_source):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        pending = execution.recovery.pending_tools
+        if pending.source_agent_run_id != agent_run_id(
+            namespace=self._namespace, tenant_id=self._tenant_id, execution_id=execution.execution_id,
+            agent_run_seq=execution.agent_run_seq,
+        ):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        graph.turns._require_checkpoint_store(graph.step_store)
+        approvals, calls = self._checkpoint.approvals, self._checkpoint.external_calls
+        execution_store = repository.state_store
+        turn_store, predicate, occupied = self._canonical_graph_turn_owner(graph.turns, graph.key, graph.generation)
+        task_store = graph.task_repository.state_store
+        if graph.task_lease is not None:
+            launch = (graph.turns, graph.key, graph.generation, graph.task_repository, graph.task_lease)
+            self._canonical_graph_launch_stores(execution.execution_id, launch)
+        stores = _dedupe_stores((execution_store, turn_store, task_store,
+                                 approvals.state_store, calls.state_store, tools.state_store))
+        if not _same_group(stores):
+            raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+        row = graph.turns._turns
+        exact = CanonicalDeferredFrontier.from_json(graph.key, graph.generation, {
+            "checkpoint_id": graph.checkpoint_id,
+            "approval_operation_ids": [item.operation_id for item in pending.approvals],
+            "external_operation_ids": [item.operation_id for item in pending.calls],
+            "operation_metadata": {item.operation_id: dict(item.metadata) for item in (*pending.approvals, *pending.calls)},
+        }).to_json()
+        statement = select(row.c.result_json).where(
+            *predicate, occupied, row.c.state == "waiting", row.c.lease_until.is_(None),
+        )
+
+        async def mark(group: StateGroupTransaction) -> bool:
+            transaction = group.transaction(execution_store)
+            observed = await repository.get_observed_in_transaction(transaction, execution.execution_id, tenant_id=self._tenant_id)
+            if observed is None or observed.value != execution:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+            tool_tx = group.transaction(tools.state_store)
+            settlements: list[tuple[ToolOperationRecord, StoredPayload | None, str | None, StoredPayload | None]] = []
+
+            async def original(item) -> ToolOperationRecord:
+                effect = await tools.get_operation_in_transaction(tool_tx, item.operation_id, tenant_id=self._tenant_id)
+                if (effect is None or effect.execution_id != execution.execution_id
+                        or effect.agent_run_id != pending.source_agent_run_id or effect.tool_call_id != item.tool_call_id
+                        or effect.tool_name != item.tool_name or effect.arguments_digest != item.arguments_payload.digest):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return effect
+
+            def settle_known(effect, result_payload, error_code, error_payload) -> bool:
+                target = ToolOperationStatus.FAILED if result_payload is None else ToolOperationStatus.COMPLETED
+                if effect.status is ToolOperationStatus.PENDING and effect.owner is None:
+                    settlements.append((effect, result_payload, error_code, error_payload))
+                    return True
+                if effect.status is not target:
+                    return False
+
+                def identity(payload):
+                    return None if payload is None else (payload.digest, payload.size)
+
+                if (identity(effect.result_payload) != identity(result_payload)
+                        or effect.error_code != error_code or identity(effect.error_payload) != identity(error_payload)):
+                    raise AIError(ErrorCode.TOOL_RESULT_CONFLICT)
+                return True
+
+            def failure(message: str) -> StoredPayload:
+                return StoredPayload.inline_bytes(canonical_json_bytes({
+                    "version": 1, "kind": "tool_call_failed", "message": message,
+                }))
+
+            for item in pending.approvals:
+                approval_id = deferred_resource_id(
+                    "approval-v1", self._tenant_id, execution.execution_id, pending.source_agent_run_id, item.tool_call_id,
+                )
+                record = await approvals.get_in_transaction(
+                    group.transaction(approvals.state_store), approval_id, tenant_id=self._tenant_id,
+                )
+                if (record is None or record.execution_id != execution.execution_id or record.approval_id != approval_id):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if record.status not in {ApprovalStatus.APPROVED, ApprovalStatus.DENIED}:
+                    return False
+                effect = await original(item)
+                if record.status is ApprovalStatus.APPROVED:
+                    if not ((effect.status is ToolOperationStatus.PENDING and effect.owner is None)
+                            or effect.status in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}):
+                        return False
+                elif effect.status is not ToolOperationStatus.CANCELLED and not settle_known(
+                    effect, None, ErrorCode.TOOL_EXECUTION_FAILED.value,
+                    failure(record.decision_message or "The tool call was denied."),
+                ):
+                    return False
+
+            for item in pending.calls:
+                call_id = deferred_resource_id(
+                    "external-call-v1", self._tenant_id, execution.execution_id, pending.source_agent_run_id, item.tool_call_id,
+                )
+                record = await calls.get_in_transaction(
+                    group.transaction(calls.state_store), call_id, tenant_id=self._tenant_id,
+                )
+                if record is None or record.execution_id != execution.execution_id or record.call_id != call_id:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if record.status is not ExternalCallStatus.SUPPLIED or record.resolution_kind not in {"succeeded", "failed"}:
+                    return False
+                effect = await original(item)
+                descriptor = record.result_payload
+                if descriptor is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if descriptor.kind != "inline" or descriptor.encoding not in {"json", "base64", "utf-8"}:
+                    # This transaction never opens ObjectStore to hydrate a
+                    # decision. The existing external settlement route does.
+                    terminal = (ToolOperationStatus.COMPLETED if record.resolution_kind == "succeeded"
+                                else ToolOperationStatus.FAILED)
+                    if effect.status is not terminal:
+                        return False
+                    continue
+                try:
+                    value = descriptor.decode()
+                    if descriptor.encoding == "base64":
+                        value = json.loads(value)
+                except (TypeError, ValueError) as error:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                if record.resolution_kind == "succeeded":
+                    if record.supplied_at is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    payload = StoredPayload.inline_bytes(encode_model_messages((ModelRequest(parts=[ToolReturnPart(
+                        "runtime", value, tool_call_id=effect.tool_operation_id, timestamp=record.supplied_at,
+                    )]),)))
+                    if not settle_known(effect, payload, None, None):
+                        return False
+                elif not isinstance(value, str):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                elif not settle_known(effect, None, ErrorCode.TOOL_EXECUTION_FAILED.value, failure(value)):
+                    return False
+
+            execution_key = repository._key("execution", (execution.execution_id,))
+            if await transaction.guard_record_revision(execution_key,
+                    expected_storage_revision=observed.storage_revision) is None:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+            async def ready(session):
+                retained = await graph.step_store._capture_turn_checkpoint_row(
+                    session, run_id=pending.source_agent_run_id,
+                    conversation_id=graph.step_conversation_id, replay_key=graph.checkpoint_id,
+                )
+                if retained is None or retained[0]["state"] != "interrupted" or not retained[1].count:
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                if await session.scalar(statement) != exact:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                changed = await session.execute(row.update().where(
+                    *predicate, occupied, row.c.state == "waiting", row.c.lease_until.is_(None),
+                ).values(state="ready"))
+                if changed.rowcount != 1:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+            # Only apply outcomes once all members are ready; a partially
+            # resolved frontier does not commit standalone settlements.
+            for effect, payload, code, error in settlements:
+                await tools.settle_deferred_result_in_transaction(
+                    tool_tx, effect, result_payload=payload, error_code=code, error_payload=error,
+                )
+            await group.transaction(turn_store).run_sql(graph.turns._context, ready)
+            task_tx = group.transaction(task_store)
+            if _queued_task is None:
+                assert graph.task_lease is not None
+                await graph.task_repository._guard_bound_execution_in_transaction(
+                    task_tx, graph.task_lease, execution_id=execution.execution_id,
+                )
+            else:
+                graph_id, node_id, fence = _queued_task
+                await graph.task_repository._mark_bound_graph_deferred_ready_in_transaction(
+                    task_tx, graph_id=graph_id, node_id=node_id, expected_fence=fence, execution_id=execution.execution_id,
+                )
+            return True
+
+        return await execution_store.storage_group.mutate(stores, mark)
+
     async def claim_deferred_resume_checkpoint(
         self,
         *,
@@ -712,9 +1071,41 @@ class StateCommands:
         expected_pending_tools: PendingToolContinuation,
         background_tasks: "set[asyncio.Task[object]] | None" = None,
         recovery_operation: OperationLedgerInput | None = None,
+        _graph_ready: "tuple[_GraphDeferredWait, int] | None" = None,
+        _native_child: _NativeChildResume | None = None,
     ) -> ExecutionRecord:
         stores = [self._execution.state_store]
         operations = self._operations
+        if _native_child is not None and (_graph_ready is not None or recovery_operation is not None):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if _graph_ready is not None:
+            from sqlalchemy import select
+            from ._session_turn_sql import CanonicalDeferredFrontier
+            from ._step_store import SqlStepStore
+
+            graph, lease_seconds = _graph_ready
+            if (type(graph.step_store) is not SqlStepStore or graph.key.turn_id != execution_id
+                    or type(lease_seconds) is not int or lease_seconds < 1
+                    or tenant_id != self._tenant_id or graph.task_lease is None):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            graph.turns._require_checkpoint_store(graph.step_store)
+            launch = (graph.turns, graph.key, graph.generation, graph.task_repository, graph.task_lease)
+            stores.extend(self._canonical_graph_launch_stores(execution_id, launch))
+            turn_store, predicate, occupied = self._canonical_graph_turn_owner(graph.turns, graph.key, graph.generation)
+            row = graph.turns._turns
+            expected_run = agent_run_id(namespace=self._namespace, tenant_id=tenant_id, execution_id=execution_id,
+                                        agent_run_seq=expected_agent_run_seq)
+            if expected_pending_tools.source_agent_run_id != expected_run:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            frontier = CanonicalDeferredFrontier.from_json(graph.key, graph.generation, {
+                "checkpoint_id": graph.checkpoint_id,
+                "approval_operation_ids": [item.operation_id for item in expected_pending_tools.approvals],
+                "external_operation_ids": [item.operation_id for item in expected_pending_tools.calls],
+                "operation_metadata": {item.operation_id: dict(item.metadata)
+                    for item in (*expected_pending_tools.approvals, *expected_pending_tools.calls)},
+            }).to_json()
+            ready_slot = (*predicate, occupied, row.c.state == "ready", row.c.lease_until.is_(None))
+
         if recovery_operation is not None:
             if operations is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -723,6 +1114,9 @@ class StateCommands:
         if not _same_group(stores):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         next_sequence = expected_agent_run_seq + 1
+        # Automatic Graph continuation already has the committed READY
+        # frontier and live bound task lease. Its producer CAS creates the
+        # unique claim; an explicit recovery operation still follows its ledger.
         producer_claim_id = recovery_operation.result_ref if recovery_operation is not None else uuid4().hex
         producer_generation = expected_execution_revision + 1
         next_agent_run_id = agent_run_id(
@@ -734,9 +1128,8 @@ class StateCommands:
 
         async def operation() -> ExecutionRecord:
             async def mutate(
-                group: StateGroupTransaction,
+                execution_tx: StateTransaction, group: StateGroupTransaction | None,
             ) -> ExecutionRecord:
-                execution_tx = group.transaction(self._execution.state_store)
                 execution = await self._execution.get_in_transaction(
                     execution_tx,
                     execution_id,
@@ -748,6 +1141,10 @@ class StateCommands:
                         recovery_operation.operation_id, tenant_id=tenant_id,
                     )
                     if existing is not None:
+                        if _graph_ready is not None:
+                            # A previous producer receipt does not make this
+                            # different invocation its dispatch owner.
+                            raise AIError(ErrorCode.STORAGE_CONFLICT, retryable=False)
                         if not operation_identity_matches(existing, recovery_operation):
                             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
                         if execution is None:
@@ -770,6 +1167,15 @@ class StateCommands:
                     or checkpoint.recovery.pending_tools != expected_pending_tools
                 ):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
+                if _native_child is not None:
+                    _native_child.require_deferred_child(execution)
+                if _graph_ready is not None and (
+                    execution.root_execution_id != execution_id or execution.session_id is not None
+                    or execution.parent_execution_id is not None or execution.parent_invocation_id is not None
+                    or not execution.requires_task_invocation_capture or not execution.restart_checkpoints
+                    or execution.native_step_source is None or execution.native_step_source != graph.step_store.backup_source
+                ):
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
                 updated_execution = (
                     await self._execution.claim_deferred_resume_in_transaction(
                         execution_tx,
@@ -787,11 +1193,42 @@ class StateCommands:
                     await operations.append_in_transaction(
                         group.transaction(operations.state_store), recovery_operation,
                     )
+                if _graph_ready is not None:
+                    async def claim_turn(session):
+                        if await session.scalar(select(row.c.result_json).where(*ready_slot)) != frontier:
+                            raise AIError(ErrorCode.STORAGE_CONFLICT)
+                        retained = await graph.step_store._capture_turn_checkpoint_row(
+                            session, run_id=expected_run, conversation_id=graph.step_conversation_id,
+                            replay_key=graph.checkpoint_id,
+                        )
+                        if retained is None or retained[0]["state"] != "interrupted" or not retained[1].count:
+                            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                        changed = await session.execute(row.update().where(*ready_slot).values(
+                            state="accepted", generation=graph.generation + 1,
+                            lease_until=graph.turns._now + lease_seconds, result_json=None,
+                        ))
+                        if changed.rowcount != 1:
+                            raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+                    await group.transaction(turn_store).run_sql(graph.turns._context, claim_turn)
+                    await graph.task_repository._guard_bound_execution_in_transaction(
+                        group.transaction(graph.task_repository.state_store), graph.task_lease, execution_id=execution_id,
+                    )
                 return updated_execution
 
-            return await stores[0].storage_group.mutate(stores, mutate)
+            if _native_child is not None:
+                return await _native_child.guard_deferred_resume(
+                    self._execution.state_store, lambda transaction: mutate(transaction, None),
+                )
+            return await stores[0].storage_group.mutate(
+                stores, lambda group: mutate(group.transaction(self._execution.state_store), group),
+            )
 
         async def readback() -> CommitObservation[ExecutionRecord]:
+            if _graph_ready is not None or _native_child is not None:
+                # A lost ACK must not launch a producer or replay any effect.
+                # The caller can reconcile through the existing exact ledgers.
+                return CommitObservation(DurableCommitState.UNRESOLVED)
             if recovery_operation is not None:
                 existing = await operations.get(recovery_operation.operation_id, tenant_id=tenant_id)
                 if existing is None:
@@ -1065,14 +1502,13 @@ class StateCommands:
         self, authority: StateTurnCoordination, reservation: ExecutionStartReservation, expected_session: SessionRecord,
     ) -> tuple[StateStore, ...] | None:
         initial = reservation.execution
-        if (type(authority) is not StateTurnCoordination
+        if (type(authority) is not StateTurnCoordination or authority._coowned
                 or type(self._conversation) is not SessionRepositoryImpl
                 or type(self._execution) is not ExecutionRepositoryImpl
                 or initial.session_id is None or initial.session_id != expected_session.session_id
                 or not initial.conversation or initial.parent_execution_id is not None or initial.input_context is not None
                 or initial.stored_user_input is None or initial.stored_user_input.codec != "text"
-                or initial.budget_scope_id is not None or reservation.budget is not None
-                or reservation.idempotency.request_identity_version != 2):
+                or initial.budget_scope_id is not None or reservation.budget is not None):
             return None
         execution_store = self._execution.state_store
         session_store = self._conversation.state_store
@@ -1107,14 +1543,13 @@ class StateCommands:
         await self._execution.prepare_content(initial)
         claim = ExecutionStartClaim(initial.execution_id, initial.revision, initial.event_seq,
                                     identity.scope, identity.idempotency_key, identity.request_digest,
-                                    initial.created_at, identity.request_identity_version)
+                                    initial.created_at)
 
         async def find_receipt() -> ExecutionStartReservationResult | None:
             existing = await self._execution.get_start_idempotency(claim)
             if existing is None:
                 return None
             if (existing.request_digest != identity.request_digest
-                    or existing.request_identity_version != identity.request_identity_version
                     or existing.resource_kind is not identity.resource_kind):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             record = await self._execution.get(existing.resource_id, tenant_id=self._tenant_id)
@@ -1162,7 +1597,8 @@ class StateCommands:
                         or (replay.execution.status is ExecutionStatus.STARTED and replay.execution.agent_run_seq == 0)):
                     # Original replay/launch owns these incomplete start paths.
                     raise _GroupedStartUnavailable()
-                return None, replay
+                else:
+                    return None, replay
             if session.continuation != expected_session.continuation:
                 raise AIError(ErrorCode.SESSION_BUSY)
             if session.history_quality == "unavailable":
@@ -1176,9 +1612,7 @@ class StateCommands:
                 if stale.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
                     # Leave guarded recovery/old actor replay to its established entry point.
                     raise AIError(ErrorCode.SESSION_BUSY)
-            saved = None
-
-            async def reserve(source: "InitialExecutionAuthority | None") -> ExecutionStartReservationResult:
+            async def reserve() -> ExecutionStartReservationResult:
                 if stale is not None:
                     await self._conversation.release_execution_in_transaction(
                         session_tx, initial.session_id, tenant_id=self._tenant_id, execution_id=stale.execution_id,
@@ -1186,7 +1620,7 @@ class StateCommands:
                     )
                 result = await self._reserve_start_in_transaction(
                     group, reservation, claim, expected_cursor=expected_session.continuation,
-                    expected_session=expected_session, authority=source,
+                    expected_session=expected_session,
                 )
                 if result is None:
                     raise _GroupedStartUnavailable()
@@ -1194,28 +1628,16 @@ class StateCommands:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 return result
 
-            async def publish(insertion: "InitialExecutionAuthority") -> int:
-                nonlocal saved
-                saved = await reserve(insertion)
-                if insertion.control_id is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                return insertion.control_id
-
-            coowned = authority._coowned and sql_coordination is not None
             coordinated = await authority._claim_in_transaction(
                 authority_tx, local_scope, session_key=session_key, request_key=request_key,
                 request_digest=identity.request_digest, execution_id=initial.execution_id,
-                duration=duration, owner_id=owner_id, token=token, publish=publish if coowned else None,
+                duration=duration, owner_id=owner_id, token=token,
             )
             if coordinated is None:
                 raise AIError(ErrorCode.SESSION_BUSY)
             if coordinated.lease is None:
                 return coordinated, None
-            if not coowned:
-                saved = await reserve(None)
-            if saved is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return coordinated, saved
+            return coordinated, await reserve()
 
         async def readback(group: StateGroupTransaction) -> tuple[TurnCoordination | None, ExecutionStartReservationResult | None] | None:
             replay = await find_receipt()
@@ -1223,9 +1645,9 @@ class StateCommands:
                 return None
             graph = None
             if sql_coordination is not None:
-                coordinated = await sql_coordination.confirm_turn_admission(
-                    scope, execution_id=initial.execution_id, receipt=token, kind="claim",
-                    expected_claim=(session_key, request_key, identity.request_digest, owner_id), coowned=authority._coowned,
+                coordinated = await authority._confirmed(
+                    local_scope, initial.execution_id, receipt=token, kind="claim",
+                    expected_claim=(session_key, request_key, identity.request_digest, owner_id),
                 )
                 if not isinstance(coordinated, TurnCoordination) or coordinated.lease is None:
                     return None
@@ -1280,6 +1702,524 @@ class StateCommands:
             await asyncio.sleep(0)
         raise AssertionError("unreachable grouped admission attempt")
 
+    async def _reserve_canonical_graph_start(
+        self, reservation: ExecutionStartReservation, *, turns: "SqlSessionTurns", key: "SessionTurnKey",
+        expected_revision: int, context_from: int, context_through: int,
+        request_key: str, request: "dict[str, JsonValue]", lease_seconds: int,
+        task_repository: "TaskRepositoryImpl", task_lease: "TaskLease",
+        instruction_scopes: tuple[str, ...] | None = None,
+    ) -> ExecutionStartReservationResult:
+        """Reserve the root Graph owner and its exact canonical turn in one group."""
+        from ._task_repository import TaskRepositoryImpl
+
+        repository = self._execution
+        execution = reservation.execution
+        binding = execution.binding
+        if (
+            type(repository) is not ExecutionRepositoryImpl
+            or type(task_repository) is not TaskRepositoryImpl or task_lease.tenant_id != self._tenant_id
+            or turns._scope != state_store_key(self._namespace, self._tenant_id, "regenerable-session")
+            or execution.execution_id != key.turn_id or execution.root_execution_id != key.turn_id
+            or execution.session_id is not None or execution.parent_execution_id is not None
+            or execution.parent_invocation_id is not None or not execution.requires_task_invocation_capture
+            or not isinstance(binding, AgentBindingContract)
+        ):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if execution.input_context is not None or execution.context_imported or "input" in request:
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        from ..model import native_graph_input_content, native_graph_input_metadata
+
+        prompt = native_graph_input_content(execution.stored_user_input)
+        if (
+            prompt is None or request.get("prompt") != (prompt if isinstance(prompt, str) else "")
+            or request.get("principal") != {
+                "principal_id": execution.principal_id, "tenant_id": self._tenant_id,
+                "kind": execution.principal_kind,
+            }
+            or "graph_execution" in request
+        ):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        transcript_store = turns._transcript_write_binding
+        if transcript_store is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        store, archive_provider, native = transcript_store
+        if not _same_group((repository.state_store, store, task_repository.state_store)):
+            raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+        archive = await archive_provider(create=True)
+        if not _same_group((store, archive.store)):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        metadata = native_graph_input_metadata(execution.stored_user_input)
+        if metadata is not None and not archive.supports_attachment_objects:
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        prepared = PreparedArchive()
+        source = NativeUserInputReference(await native.prepare_archived_messages(
+            (ModelRequest(
+                parts=[UserPromptPart(content=prompt, timestamp=execution.created_at)],
+                metadata=metadata,
+            ),), prepared,
+        ), 0)
+        admission = await turns._prepare_accept(
+            key, expected_revision=expected_revision, context_from=context_from, context_through=context_through,
+            request_key=request_key, request={
+                **request, "graph_execution": execution.execution_id, "prompt": "", "input": source.to_json(),
+            },
+            binding=binding.to_payload(), lease_seconds=lease_seconds, budget=None, instruction_scopes=instruction_scopes,
+        )
+        stores = tuple(dict.fromkeys((repository.state_store, archive.store, task_repository.state_store, *admission.stores)))
+
+        async def mutate(group: StateGroupTransaction) -> ExecutionStartReservationResult:
+            from ._native_content_index import stage_owner
+            from ._session_transcript import SESSION_TURN_TABLE
+
+            reserved = await repository.reserve_started(reservation, _admitted_input_source=source)
+            if not reserved.created:
+                return reserved
+            if not await turns._accept_in_group(group, admission):
+                raise AIError(ErrorCode.SESSION_CONFLICT)
+            await task_repository.bind_execution(
+                task_lease, tenant_id=self._tenant_id, execution_id=key.turn_id,
+            )
+            values = turns._turn_values(key)
+
+            async def stage(session) -> None:
+                stage_owner(session, SESSION_TURN_TABLE, turns._scope,
+                            (values["session_key"], values["turn_id"]), source.root)
+
+            await group.transaction(store).run_sql(turns._context, stage)
+            await archive.publish(group.transaction(archive.store), prepared)
+            return reserved
+
+        # An unknown commit is deliberately not retried or promoted into a claim.
+        result = await stores[0].storage_group.mutate(stores, mutate)
+        if result.created:
+            turns._note_accepted(admission)
+        return result
+
+    def _canonical_graph_turn_owner(self, turns: "SqlSessionTurns", key: "SessionTurnKey", generation: int):
+        """The linked row and active Session slot are the Graph turn lease authority."""
+        from sqlalchemy import select
+
+        binding = turns._transcript_write_binding
+        if (type(self._execution) is not ExecutionRepositoryImpl
+                or turns._scope != state_store_key(self._namespace, self._tenant_id, "regenerable-session")
+                or binding is None):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        store = binding[0]
+        if not _same_group((self._execution.state_store, store)):
+            raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+        if generation < 1:
+            raise ValueError("Graph turn generation must be positive")
+        sessions, rows = turns._sessions, turns._turns
+        values = turns._turn_values(key)
+        occupied = select(sessions.c.active_turn_id).filter_by(
+            **turns._session_values(key.session_id), active_turn_id=values["turn_id"],
+        ).exists()
+        predicate = (
+            *(rows.c[name] == value for name, value in values.items()),
+            rows.c.generation == generation,
+            rows.c.request_json["graph_execution"].as_string() == key.turn_id,
+        )
+        return store, predicate, occupied
+
+    def _canonical_graph_launch_stores(
+        self, execution_id: str, launch: "tuple[SqlSessionTurns, SessionTurnKey, int, TaskRepositoryImpl, TaskLease | _TaskGraphCancelOwner]",
+    ) -> tuple[StateStore, StateStore]:
+        from ._task_repository import TaskRepositoryImpl
+
+        turns, key, generation, task_repository, lease = launch
+        store, _, _ = self._canonical_graph_turn_owner(turns, key, generation)
+        if (type(task_repository) is not TaskRepositoryImpl or key.turn_id != execution_id
+                or lease.tenant_id != self._tenant_id):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if not _same_group((store, task_repository.state_store)):
+            raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+        return store, task_repository.state_store
+
+    def _canonical_graph_producer_boundary(
+        self, *, turns: "SqlSessionTurns", key: "SessionTurnKey", generation: int, cancelling: bool = False,
+    ) -> tuple[StateStore, Callable[[StateGroupTransaction], Awaitable[None]]]:
+        """Return the exact linked live turn fence for a producer's grouped write."""
+        store, predicate, occupied = self._canonical_graph_turn_owner(turns, key, generation)
+        row = turns._turns
+
+        async def guard(group: StateGroupTransaction) -> None:
+            async def write(session):
+                result = await session.execute(row.update().where(
+                    *predicate, occupied, row.c.state == ("cancelling" if cancelling else "accepted"),
+                    row.c.lease_until > turns._now,
+                ).values(lease_until=row.c.lease_until))
+                if result.rowcount != 1:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+            await group.transaction(store).run_sql(turns._context, write)
+
+        return store, guard
+
+    async def _guard_canonical_graph_launch(
+        self, group: StateGroupTransaction, execution_id: str, launch: "_GraphLaunch",
+    ) -> None:
+        turns, key, generation, task_repository, lease = launch
+        _, guard = self._canonical_graph_producer_boundary(turns=turns, key=key, generation=generation)
+        await guard(group)
+        await task_repository._guard_bound_execution_in_transaction(
+            group.transaction(task_repository.state_store), lease, execution_id=execution_id,
+        )
+
+    async def _renew_canonical_graph_turn(
+        self, *, turns: "SqlSessionTurns", key: "SessionTurnKey", generation: int,
+        lease_seconds: int, cancelling: bool = False,
+    ) -> bool:
+        from sqlalchemy import case
+
+        if lease_seconds < 1:
+            raise ValueError("the turn lease must be positive")
+        _, predicate, occupied = self._canonical_graph_turn_owner(turns, key, generation)
+        row = turns._turns
+        expires = turns._now + lease_seconds
+
+        async def renew(session):
+            updated = await session.execute(row.update().where(
+                *predicate, occupied, row.c.state == ("cancelling" if cancelling else "accepted"),
+                row.c.lease_until > turns._now,
+            ).values(lease_until=case((row.c.lease_until < expires, expires), else_=row.c.lease_until)))
+            return updated.rowcount == 1
+
+        return await turns._context.run_mutation(renew, domain="session.renew")
+
+    async def _request_canonical_graph_cancel(
+        self, commit: ExecutionCancelRequestCommit, *, turns: "SqlSessionTurns", key: "SessionTurnKey",
+        generation: int, expected_status: ExecutionStatus, producer_generation: int | None,
+        audit_events: Sequence[ExecutionEventAppend] = (),
+        _group: StateGroupTransaction | None = None,
+    ) -> ExecutionRecord:
+        """Stop both authorities or neither, without making an expired producer live."""
+        if commit.execution_id != key.turn_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if (expected_status not in {ExecutionStatus.PENDING_START, ExecutionStatus.STARTED}
+                or (expected_status is ExecutionStatus.PENDING_START) != (producer_generation is None)
+                or (producer_generation is not None
+                    and (type(producer_generation) is not int or producer_generation < 0))):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        store, predicate, occupied = self._canonical_graph_turn_owner(turns, key, generation)
+        repository = cast(ExecutionRepositoryImpl, self._execution)
+        execution_store = repository.state_store
+        row = turns._turns
+
+        async def stop(group: StateGroupTransaction) -> ExecutionRecord:
+            tx = group.transaction(execution_store)
+            if producer_generation:
+                await repository.require_execution_producer_in_transaction(
+                    tx, key.turn_id, expected_producer_generation=producer_generation, allow_cancelling=False,
+                )
+            execution = await repository.request_cancel_in_transaction(
+                tx, commit, expected_status=expected_status, pending_events=audit_events,
+            )
+            if execution.producer_generation != (producer_generation or 0):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+            async def cancel(session):
+                updated = await session.execute(row.update().where(
+                    *predicate, occupied, row.c.state == "accepted", row.c.lease_until > turns._now,
+                ).values(state="cancelling"))
+                if updated.rowcount != 1:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+            await group.transaction(store).run_sql(turns._context, cancel)
+            return execution
+
+        if _group is not None:
+            return await stop(_group)
+        return await execution_store.storage_group.mutate(_dedupe_stores((execution_store, store)), stop)
+
+    async def _request_linked_graph_cancel(
+        self, commit: ExecutionCancelRequestCommit, *, turns: "SqlSessionTurns",
+        task_repository: "TaskRepositoryImpl", task_lease: "TaskLease",
+        expected_status: ExecutionStatus, producer_generation: int | None,
+        audit_events: Sequence[ExecutionEventAppend] = (),
+    ) -> ExecutionRecord | None:
+        """Resolve the real Execution by its existing unique turn key and stop both owners."""
+        from ._task_repository import TaskRepositoryImpl
+
+        binding = turns._transcript_write_binding
+        if (type(self._execution) is not ExecutionRepositoryImpl or type(task_repository) is not TaskRepositoryImpl
+                or turns._scope != state_store_key(self._namespace, self._tenant_id, "regenerable-session")
+                or task_lease.tenant_id != self._tenant_id or binding is None):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        execution_store, store, task_store = self._execution.state_store, binding[0], task_repository.state_store
+        stores = _dedupe_stores((execution_store, store, task_store))
+        if not _same_group(stores):
+            raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+
+        execution_id = commit.execution_id
+
+        async def stop(group: StateGroupTransaction) -> ExecutionRecord | None:
+            linked = await turns._linked_graph_turn(execution_id, transaction=group.transaction(store))
+            if linked is None:
+                return None
+            key, generation = linked
+            execution = await self._request_canonical_graph_cancel(
+                commit, turns=turns, key=key, generation=generation, expected_status=expected_status,
+                producer_generation=producer_generation, audit_events=audit_events, _group=group,
+            )
+            # The two cancellation writes remain provisional until the exact task
+            # lease and its real bound Execution are revision-fenced as well.
+            await task_repository._guard_bound_execution_in_transaction(
+                group.transaction(task_store), task_lease, execution_id=execution_id,
+            )
+            return execution
+
+        return await execution_store.storage_group.mutate(stores, stop)
+
+    async def _guard_cold_graph_task(
+        self, group: StateGroupTransaction, repository: "TaskRepositoryImpl",
+        authority: "TaskLease | _TaskGraphCancelOwner", *, execution_id: str,
+    ) -> None:
+        from ._task_repository import _TaskGraphCancelOwner
+
+        task_tx = group.transaction(repository.state_store)
+        if isinstance(authority, _TaskGraphCancelOwner):
+            await repository._guard_cancelled_execution_in_transaction(task_tx, authority, execution_id=execution_id)
+        else:
+            await repository._guard_bound_execution_in_transaction(task_tx, authority, execution_id=execution_id)
+
+    async def _claim_expired_undispatched_graph_turn(
+        self, expected_execution: ExecutionRecord, *, turns: "SqlSessionTurns", key: "SessionTurnKey",
+        generation: int, task_repository: "TaskRepositoryImpl", task_lease: "TaskLease",
+        recovery_operation: OperationLedgerRecord, lease_seconds: int,
+        _native_step: "SqlStepStore | None" = None,
+    ) -> tuple[ExecutionRecord, int]:
+        """Move the accepted turn to its recovering task without starting a model."""
+        if lease_seconds < 1:
+            raise ValueError("the turn lease must be positive")
+        execution = expected_execution
+        if (execution.execution_id != key.turn_id or execution.root_execution_id != key.turn_id
+                or execution.session_id is not None or execution.parent_execution_id is not None
+                or execution.parent_invocation_id is not None or not execution.requires_task_invocation_capture
+                or execution.status is not ExecutionStatus.STARTED):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if (execution.producer_generation != 0 or execution.producer_claim_id is not None
+                or execution.agent_run_seq != 0 or execution.recovery_state is not ExecutionRecoveryState.ADMITTED
+                or execution.recovery is None or execution.recovery.pending_tools is not None
+                or execution.recovery.source_agent_run_id is not None
+                or execution.restart_checkpoints != (_native_step is not None)
+                or execution.history_seal_digest is not None):
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        launch = (turns, key, generation, task_repository, task_lease)
+        repository = self._execution
+        execution_store = repository.state_store
+        tools = None
+        if _native_step is not None:
+            from ._step_store import SqlStepStore
+
+            tools = self._tools
+            if (type(_native_step) is not SqlStepStore or type(tools) is not ToolRepositoryImpl
+                    or execution.native_step_source is None or execution.native_step_source != _native_step.backup_source):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            turns._require_checkpoint_store(_native_step)
+            if not _same_group((execution_store, tools.state_store)):
+                raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+        stores = _dedupe_stores((execution_store, *self._canonical_graph_launch_stores(key.turn_id, launch),
+                                 *((tools.state_store,) if tools is not None else ())))
+        store, predicate, occupied = self._canonical_graph_turn_owner(turns, key, generation)
+        row = turns._turns
+
+        async def claim(group: StateGroupTransaction) -> tuple[ExecutionRecord, int]:
+            tx = group.transaction(execution_store)
+            current = await repository.get_in_transaction(tx, key.turn_id, tenant_id=self._tenant_id)
+            if current is None or current != execution:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            # Invalidate the stale attempt CAS without fabricating an agent run
+            # or treating this turn handover as model dispatch authority.
+            now = await tx.now()
+            renewed = await repository.compare_and_swap_in_transaction(
+                tx, key.turn_id, tenant_id=self._tenant_id, expected_revision=current.revision,
+                next_record=replace(current, revision=current.revision + 1, updated_at=max(current.updated_at, now)),
+            )
+
+            async def take_over(session):
+                updated = await session.execute(row.update().where(
+                    *predicate, occupied, row.c.state == "accepted", row.c.lease_until <= turns._now,
+                ).values(generation=generation + 1, lease_until=turns._now + lease_seconds))
+                if updated.rowcount != 1:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+            await group.transaction(store).run_sql(turns._context, take_over)
+            await task_repository._guard_recovering_bound_execution_in_transaction(
+                group.transaction(task_repository.state_store), task_lease, recovery_operation,
+                execution_id=key.turn_id,
+            )
+            if _native_step is not None:
+                assert tools is not None
+                first_run = agent_run_id(namespace=self._namespace, tenant_id=self._tenant_id,
+                                         execution_id=key.turn_id, agent_run_seq=1)
+                if await _native_step.get_run_in_transaction(tx, run_id=first_run) is not None:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                existing_effects = await group.transaction(tools.state_store).list_records(RecordQuery(
+                    kind="tool_operation", parent_key=tools._parent("tool_operation", "execution", (key.turn_id,)), limit=1,
+                ))
+                if existing_effects:
+                    raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+            return renewed, generation + 1
+
+        # An unknown commit cannot grant launch or a second takeover.
+        return await execution_store.storage_group.mutate(stores, claim)
+
+    def _cold_graph_step_store(
+        self, execution: ExecutionRecord, turns: "SqlSessionTurns",
+        native: "SqlStepStore", run_id: str, authority: "_TaskGraphCancelOwner",
+    ) -> ToolRepositoryImpl:
+        from ._step_store import SqlStepStore
+        from ._task_repository import _TaskGraphCancelOwner
+
+        tools = self._tools
+        if (type(native) is not SqlStepStore or not isinstance(authority, _TaskGraphCancelOwner)
+                or type(tools) is not ToolRepositoryImpl
+                or execution.native_step_source is None or execution.native_step_source != native.backup_source
+                or execution.agent_run_seq < 1
+                or run_id != agent_run_id(namespace=self._namespace, tenant_id=self._tenant_id,
+                                           execution_id=execution.execution_id, agent_run_seq=execution.agent_run_seq)):
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        turns._require_checkpoint_store(native)
+        if not _same_group((self._execution.state_store, tools.state_store)):
+            raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+        return tools
+
+    async def _require_cold_cancelled_graph_step(
+        self, group: StateGroupTransaction, execution_id: str, *, tools: ToolRepositoryImpl,
+        native: "SqlStepStore", run_id: str, conversation_id: str, _write_if_missing: bool = False,
+    ) -> None:
+        from ..steps import NativeLifecycleEvent
+
+        execution_tx = group.transaction(self._execution.state_store)
+        key = (run_id, NativeLifecycleEvent.source_key())
+        marker = (await native.read_fixed_events((key,), transaction=execution_tx)).get(key)
+        unresolved = await group.transaction(tools.state_store).list_records(RecordQuery(
+            kind="tool_operation", parent_key=tools._parent("tool_operation", "execution", (execution_id,)),
+            states=frozenset({
+                ToolOperationStatus.PENDING.value, ToolOperationStatus.CLAIMED.value,
+                ToolOperationStatus.EFFECT_UNKNOWN.value,
+            }), limit=1,
+        ))
+        if unresolved:
+            raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+        if marker is None and _write_if_missing:
+            await native._record_cold_cancelled_lifecycle(
+                execution_tx, run_id=run_id, conversation_id=conversation_id, occurred_at=await execution_tx.now(),
+            )
+        elif (not isinstance(marker, NativeLifecycleEvent) or marker.outcome != "cancelled"
+                or marker.conversation_id != conversation_id):
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+
+    async def _claim_expired_linked_graph_cancellation(
+        self, expected_execution: ExecutionRecord, *, turns: "SqlSessionTurns", key: "SessionTurnKey",
+        generation: int, task_repository: "TaskRepositoryImpl", task_lease: "TaskLease | _TaskGraphCancelOwner",
+        lease_seconds: int,
+        _cold_step: "tuple[SqlStepStore, str, str] | None" = None,
+    ) -> tuple[ExecutionRecord, int]:
+        """Rotate both producers of an expired Stop, without creating a new model attempt."""
+        if lease_seconds < 1:
+            raise ValueError("the turn lease must be positive")
+        if (expected_execution.execution_id != key.turn_id
+                or expected_execution.root_execution_id != key.turn_id
+                or expected_execution.session_id is not None
+                or expected_execution.parent_execution_id is not None
+                or expected_execution.parent_invocation_id is not None
+                or not expected_execution.requires_task_invocation_capture
+                or expected_execution.status is not ExecutionStatus.CANCELLING):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if (expected_execution.restart_checkpoints != (_cold_step is not None)
+                or expected_execution.recovery_state in {ExecutionRecoveryState.HANDOFF, ExecutionRecoveryState.WAITING}
+                or (expected_execution.recovery is not None and expected_execution.recovery.pending_tools is not None)):
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        launch = (turns, key, generation, task_repository, task_lease)
+        repository = self._execution
+        execution_store = repository.state_store
+        cold_tools = (None if _cold_step is None else self._cold_graph_step_store(
+            expected_execution, turns, _cold_step[0], _cold_step[1], task_lease,
+        ))
+        stores = _dedupe_stores((execution_store, *self._canonical_graph_launch_stores(key.turn_id, launch),
+                                 *((cold_tools.state_store,) if cold_tools is not None else ())))
+        store, predicate, occupied = self._canonical_graph_turn_owner(turns, key, generation)
+        row = turns._turns
+        claim_id = uuid4().hex
+
+        async def claim(group: StateGroupTransaction) -> tuple[ExecutionRecord, int]:
+            tx = group.transaction(execution_store)
+            current = await repository.get_in_transaction(tx, key.turn_id, tenant_id=self._tenant_id)
+            if (current is None or current != expected_execution
+                    or current.producer_generation >= current.revision + 1):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            now = await tx.now()
+            rotated = await repository.compare_and_swap_in_transaction(
+                tx, key.turn_id, tenant_id=self._tenant_id, expected_revision=current.revision,
+                next_record=replace(
+                    current, revision=current.revision + 1, producer_generation=current.revision + 1,
+                    producer_claim_id=claim_id, updated_at=max(current.updated_at, now),
+                ),
+            )
+
+            async def take_over(session):
+                updated = await session.execute(row.update().where(
+                    *predicate, occupied, row.c.state == "cancelling", row.c.lease_until <= turns._now,
+                ).values(generation=generation + 1, lease_until=turns._now + lease_seconds))
+                if updated.rowcount != 1:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+            await group.transaction(store).run_sql(turns._context, take_over)
+            await self._guard_cold_graph_task(group, task_repository, task_lease, execution_id=key.turn_id)
+            if _cold_step is not None:
+                assert cold_tools is not None
+                native, run_id, conversation_id = _cold_step
+                await self._require_cold_cancelled_graph_step(
+                    group, key.turn_id, tools=cold_tools, native=native, run_id=run_id,
+                    conversation_id=conversation_id, _write_if_missing=True,
+                )
+            return rotated, generation + 1
+
+        # Unknown commit doesn't confer a permission to settle/dispatch.
+        return await execution_store.storage_group.mutate(stores, claim)
+
+    async def _observe_canonical_graph_turn(
+        self, *, turns: "SqlSessionTurns", key: "SessionTurnKey", generation: int,
+    ) -> tuple[ExecutionRecord, str] | None:
+        """Read an exact grouped outcome; an unknown commit is not permission to retry."""
+        from sqlalchemy import select
+
+        store, predicate, occupied = self._canonical_graph_turn_owner(turns, key, generation)
+        repository = self._execution
+        execution_store = repository.state_store
+        row = turns._turns
+        statement = select(row.c.state, occupied).where(*predicate)
+
+        async def observe(group: StateGroupTransaction) -> tuple[ExecutionRecord, str] | None:
+            async def turn_state(session):
+                return (await session.execute(statement)).one_or_none()
+
+            turn = await group.transaction(store).run_sql(turns._context, turn_state)
+            if turn is None:
+                return None
+            state, active = turn
+            execution = await repository.get_in_transaction(
+                group.transaction(execution_store), key.turn_id, tenant_id=self._tenant_id,
+            )
+            compatible = {
+                "accepted": {ExecutionStatus.PENDING_START, ExecutionStatus.STARTED, ExecutionStatus.FINALIZING},
+                "cancelling": {ExecutionStatus.CANCELLING},
+                "succeeded": {ExecutionStatus.SUCCEEDED},
+                "failed": {ExecutionStatus.FAILED},
+                "cancelled": {ExecutionStatus.CANCELLED},
+            }
+            if (
+                execution is None or execution.root_execution_id != key.turn_id
+                or execution.session_id is not None or not execution.requires_task_invocation_capture
+                or execution.status not in compatible.get(state, ())
+                or active != (state in {"accepted", "cancelling"})
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return execution, state
+
+        return await execution_store.storage_group.read_many(_dedupe_stores((execution_store, store)), observe)
+
     async def reserve_start_checkpoint(
         self, reservation: ExecutionStartReservation, *,
         expected_cursor: ConversationCursor | None,
@@ -1303,11 +2243,12 @@ class StateCommands:
         identity = reservation.idempotency
         claim = ExecutionStartClaim(initial.execution_id, initial.revision, initial.event_seq,
                                     identity.scope, identity.idempotency_key,
-                                    identity.request_digest, initial.created_at, identity.request_identity_version)
+                                    identity.request_digest, initial.created_at)
 
         async def mutate(group: StateGroupTransaction) -> ExecutionStartReservationResult | None:
             return await self._reserve_start_in_transaction(
-                group, reservation, claim, expected_cursor=expected_cursor, expected_session=expected_session, authority=authority,
+                group, reservation, claim, expected_cursor=expected_cursor, expected_session=expected_session,
+                authority=authority,
             )
 
         for attempt in range(2):
@@ -1325,7 +2266,6 @@ class StateCommands:
                         continue
                     raise
                 if (observed_identity.request_digest != identity.request_digest
-                        or observed_identity.request_identity_version != identity.request_identity_version
                         or observed_identity.resource_kind != identity.resource_kind):
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
                 if observed_identity.resource_id != initial.execution_id:
@@ -1340,7 +2280,7 @@ class StateCommands:
                 if started is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                 session = (None if initial.session_id is None else
-                           await self._load_session(initial.session_id, tenant_id=self._tenant_id))
+                       await self._load_session(initial.session_id, tenant_id=self._tenant_id))
                 if initial.session_id is not None and (session is None or session.active_execution_id != initial.execution_id):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                 return ExecutionStartReservationResult(started, observed_identity, True, session=session)
@@ -1522,10 +2462,11 @@ class StateCommands:
         source_agent_run_id: str | None = None,
         completed_tool_call_ids: frozenset[str] = frozenset(),
         turn_fence: SourceTurnWriteFence | None = None,
+        _graph_launch: "_GraphLaunch | None" = None,
     ) -> Observed[ExecutionRecord]:
         return await self._commit_agent_attempt_checkpoint(
             claim, recovery_operation=recovery_operation, source_agent_run_id=source_agent_run_id,
-            completed_tool_call_ids=completed_tool_call_ids, turn_fence=turn_fence,
+            completed_tool_call_ids=completed_tool_call_ids, turn_fence=turn_fence, _graph_launch=_graph_launch,
         )
 
     async def commit_prepared_agent_attempt_checkpoint(
@@ -1533,10 +2474,11 @@ class StateCommands:
         context_write: tuple[ContentArchive, PreparedArchive] | None = None,
         observed: Observed[ExecutionRecord] | None = None,
         turn_fence: SourceTurnWriteFence | None = None,
+        _graph_launch: "_GraphLaunch | None" = None,
     ) -> Observed[ExecutionRecord]:
         return await self._commit_agent_attempt_checkpoint(
             claim, prepared_input_context=input_context, context_write=context_write, observed=observed,
-            turn_fence=turn_fence,
+            turn_fence=turn_fence, _graph_launch=_graph_launch,
         )
 
     async def _commit_agent_attempt_checkpoint(
@@ -1549,11 +2491,16 @@ class StateCommands:
         observed: Observed[ExecutionRecord] | None = None,
         producer_claim_id: str | None = None,
         turn_fence: SourceTurnWriteFence | None = None,
+        _graph_launch: "_GraphLaunch | None" = None,
     ) -> Observed[ExecutionRecord]:
         """Atomically publish the execution sequence and active recovery run."""
         stores = [self._execution.state_store]
         if turn_fence is not None:
             stores.append(turn_fence.store)
+        if _graph_launch is not None:
+            if turn_fence is not None or recovery_operation is not None:
+                raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+            stores.extend(self._canonical_graph_launch_stores(claim.execution_id, _graph_launch))
         operations = self._operations
         if recovery_operation is not None:
             if operations is None:
@@ -1698,6 +2645,9 @@ class StateCommands:
                 )
             if confirmed is None or confirmed.value != updated_execution:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if _graph_launch is not None:
+                # Match Graph admission's lock order: Execution -> Session -> Task.
+                await self._guard_canonical_graph_launch(group, claim.execution_id, _graph_launch)
             return confirmed
 
         if recovery_operation is not None:
@@ -1757,6 +2707,9 @@ class StateCommands:
         try:
             return await stores[0].storage_group.mutate(stores, callback)
         except AIError as error:
+            if _graph_launch is not None:
+                # An unconfirmed grouped producer claim is not dispatch authority.
+                raise
             if error.code is ErrorCode.STORAGE_CONFLICT and observed is not None:
                 return await self._commit_agent_attempt_checkpoint(
                     claim, prepared_input_context=prepared_input_context, context_write=context_write,
@@ -1811,6 +2764,109 @@ class StateCommands:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             return await stores[0].storage_group.mutate(stores, callback)
 
+    async def commit_native_subagent_start(
+        self, claim: ExecutionStartClaim, *, turns: "SqlSessionTurns", key: "SessionTurnKey", generation: int,
+        tools: ToolRepositoryImpl, operation_id: str, owner: str, fence: int, invocation_id: str,
+        principal: Principal,
+    ) -> ExecutionRecord:
+        """Fence the child start CAS with the same native owner that reserved it."""
+        if (tools is not self._tools or claim.scope != "execution.subagent"
+                or claim.idempotency_key != canonical_sha256({
+                    "kind": "subagent", "parent_execution_id": key.turn_id, "invocation_id": invocation_id,
+                })):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        repository = self._execution
+
+        async def start(transaction: StateTransaction) -> ExecutionRecord:
+            child = await repository.claim_start_in_transaction(transaction, claim)
+            if (child.lineage_kind is not ExecutionLineageKind.SUBAGENT or child.session_id is not None
+                    or (child.parent_execution_id, child.root_execution_id, child.parent_invocation_id,
+                        child.principal_id, child.principal_kind)
+                    != (key.turn_id, key.turn_id, invocation_id, principal.principal_id, principal.kind)):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            return child
+
+        return await turns.with_claimed_subagent_parent(
+            key, generation=generation, tools=tools, operation_id=operation_id, owner=owner, fence=fence,
+            invocation_id=invocation_id, child_store=repository.state_store, principal=principal, write=start,
+        )
+
+    async def commit_recovered_native_subagent_start(
+        self, turns: "SqlSessionTurns", key: "SessionTurnKey", *, generation: int, principal: Principal,
+        original: ToolOperationRecord, claim: ExecutionStartClaim,
+    ) -> ExecutionRecord:
+        """First-start an existing child only under its successor's retained exact claim."""
+        tools = self._tools
+        repository = self._execution
+        store = turns.transcript_state_store
+        if type(tools) is not ToolRepositoryImpl or type(repository) is not ExecutionRepositoryImpl or store is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        if (principal.tenant_id != self._tenant_id or original.execution_id != key.turn_id
+                or original.agent_run_id != key.turn_id or original.tool_name != "delegate_task"
+                or original.replay_safe or original.owner is None or original.fence < 1
+                or original.status not in {ToolOperationStatus.CLAIMED, ToolOperationStatus.EFFECT_UNKNOWN}
+                or original.producer_generation is None or original.producer_generation >= generation
+                or claim.scope != "execution.subagent" or claim.idempotency_key != canonical_sha256({
+                    "kind": "subagent", "parent_execution_id": key.turn_id, "invocation_id": original.tool_call_id,
+                })):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        members = _dedupe_stores((store, tools.state_store, repository.state_store))
+        if not _same_group(members):
+            raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+
+        async def start(group: StateGroupTransaction) -> ExecutionRecord:
+            await turns.guard_step_in_transaction(
+                group.transaction(store), key, generation=generation, principal=principal, _ordinary_only=True,
+            )
+            await tools.guard_recovered_subagent_start_in_transaction(group.transaction(tools.state_store), original)
+            return await repository.claim_existing_native_subagent_in_transaction(
+                group.transaction(repository.state_store), claim, parent_id=key.turn_id,
+                invocation_id=original.tool_call_id, principal=principal,
+            )
+
+        # Unlike generic recovery, every exception (including an unknown ACK)
+        # leaves the caller without launch authority. Never issue a second CAS.
+        return await store.storage_group.mutate(members, start)
+
+    async def settle_native_subagent_result(
+        self, turns: "SqlSessionTurns", key: "SessionTurnKey", *, generation: int, principal: Principal,
+        original: ToolOperationRecord, child: ExecutionRecord, result_payload: StoredPayload | None,
+        error_code: str | None, error_payload: StoredPayload | None,
+    ) -> ToolOperationRecord:
+        """Settle the original native tool receipt from exact durable child evidence."""
+        tools = self._tools
+        execution_store = self._execution.state_store
+        store = turns.transcript_state_store
+        if tools is None or store is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if (principal.tenant_id != self._tenant_id or original.execution_id != key.turn_id
+                or original.agent_run_id != key.turn_id or original.tool_name != "delegate_task"
+                or original.status not in {ToolOperationStatus.CLAIMED, ToolOperationStatus.EFFECT_UNKNOWN}
+                or original.owner is None or original.producer_generation is None
+                or original.producer_generation >= generation):
+            raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+        members = _dedupe_stores((store, tools.state_store, execution_store))
+        if not _same_group(members):
+            raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+
+        async def settle(group: StateGroupTransaction) -> ToolOperationRecord:
+            await turns.guard_step_in_transaction(
+                group.transaction(store), key, generation=generation, principal=principal,
+            )
+            verified = await self._execution.require_native_subagent_terminal(
+                group.transaction(execution_store), parent_id=key.turn_id,
+                invocation_id=original.tool_call_id, principal=principal, expected=child,
+            )
+            terminal_at = verified.completed_at
+            if terminal_at is None or (verified.status is ExecutionStatus.SUCCEEDED) != (result_payload is not None):
+                raise AIError(ErrorCode.TOOL_RESULT_CONFLICT)
+            return await tools.settle_recovered_subagent_in_transaction(
+                group.transaction(tools.state_store), original, result_payload=result_payload,
+                error_code=error_code, error_payload=error_payload, terminal_at=terminal_at,
+            )
+
+        return await store.storage_group.mutate(members, settle)
+
     async def commit_start_attempt_checkpoint(
         self,
         claim: ExecutionStartClaim,
@@ -1819,8 +2875,22 @@ class StateCommands:
         expected_cursor: ConversationCursor | None = None,
         expected_session: SessionRecord | None = None,
         admitted_turn: Callable[[SessionTurnRef], None] | None = None,
+        _graph_launch: "_GraphLaunch | None" = None,
     ) -> ExecutionRecord:
         """Commit the initial execution start and optional recovery admission."""
+        if _graph_launch is not None:
+            if session_id is not None:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            repository = self._execution
+            store = repository.state_store
+            members = _dedupe_stores((store, *self._canonical_graph_launch_stores(claim.execution_id, _graph_launch)))
+
+            async def start(group: StateGroupTransaction) -> ExecutionRecord:
+                started = await repository.claim_start_in_transaction(group.transaction(store), claim)
+                await self._guard_canonical_graph_launch(group, claim.execution_id, _graph_launch)
+                return started
+
+            return await store.storage_group.mutate(members, start)
         return await self.commit_start_checkpoint(
             claim,
             session_id=session_id,
@@ -2224,6 +3294,7 @@ class StateCommands:
         readback_write: Callable[[], Awaitable[bool]] | None = None,
         stores: Sequence[StateStore] = (),
         turn_fence: SourceTurnWriteFence | None = None,
+        _graph_approval: bool = False,
     ) -> ToolBoundaryReceipt:
         """Fence final leaf admission and publish its prepared native event once."""
         tools = self._tools
@@ -2234,11 +3305,34 @@ class StateCommands:
                 or request.producer_generation != current.producer_generation
                 or request.owner != current.producer_claim_id):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
+        graph_approvals = None
+        if _graph_approval:
+            self._require_checkpoint()
+            continuation = None if current.recovery is None else current.recovery.pending_tools
+            approved = () if continuation is None else tuple(
+                item for item in continuation.approvals if item.tool_call_id == request.tool_call_id
+            )
+            if (type(tools) is not ToolRepositoryImpl or len(approved) != 1 or known_new or observed is not None
+                    or not current.requires_task_invocation_capture or current.session_id is not None
+                    or current.root_execution_id != current.execution_id or write is None or not stores
+                    or current.recovery is None or current.recovery.agent_run_id != request.agent_run_id
+                    or current.recovery.source_agent_run_id != continuation.source_agent_run_id
+                    or request.recovery_agent_run_id != continuation.source_agent_run_id
+                    or request.tool_operation_id != approved[0].operation_id
+                    or request.tool_name != approved[0].tool_name
+                    or request.arguments_digest != approved[0].arguments_payload.digest):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            graph_approvals = self._checkpoint.approvals
+            graph_approval_id = deferred_resource_id(
+                "approval-v1", self._tenant_id, current.execution_id, continuation.source_agent_run_id, request.tool_call_id,
+            )
+
         target = current if next_execution is None else next_execution
         budget = self._tool_budget_repository(current)
         participants = _dedupe_stores((self._execution.state_store, tools.state_store,
                                       *((budget.state_store,) if budget is not None else ()),
-                                      *((turn_fence.store,) if turn_fence is not None else ()), *stores))
+                                      *((turn_fence.store,) if turn_fence is not None else ()),
+                                      *((graph_approvals.state_store,) if graph_approvals is not None else ()), *stores))
         if not _same_group(participants):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
@@ -2261,8 +3355,23 @@ class StateCommands:
                 except AIError as error:
                     control_conflict = error.code is ErrorCode.STORAGE_CONFLICT
                     raise
+                tool_tx = group.transaction(tools.state_store)
+                expected_pending = None
+                if graph_approvals is not None:
+                    source = await graph_approvals.get_in_transaction(
+                        group.transaction(graph_approvals.state_store), graph_approval_id, tenant_id=self._tenant_id,
+                    )
+                    expected_pending = await tools.get_operation_in_transaction(
+                        tool_tx, request.tool_operation_id, tenant_id=self._tenant_id,
+                    )
+                    if (source is None or source.execution_id != request.execution_id
+                            or source.approval_id != graph_approval_id or source.status is not ApprovalStatus.APPROVED
+                            or expected_pending is None or expected_pending.status is not ToolOperationStatus.PENDING
+                            or expected_pending.owner is not None
+                            or expected_pending.agent_run_id != request.recovery_agent_run_id):
+                        raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
                 effect = await tools.admit_in_transaction(
-                    group.transaction(tools.state_store), request, observed=observed, known_new=known_new,
+                    tool_tx, request, observed=observed, known_new=known_new, expected_pending=expected_pending,
                 )
                 usage = None
                 if budget is not None and effect.value.status is ToolOperationStatus.CLAIMED:
@@ -2280,6 +3389,10 @@ class StateCommands:
 
         async def readback() -> CommitObservation[ToolBoundaryReceipt]:
             nonlocal retry_execution
+            if _graph_approval:
+                # Without a confirmed same-group approval+effect receipt the
+                # original side effect cannot be run or reclaimed speculatively.
+                return CommitObservation(DurableCommitState.UNRESOLVED)
             control = await self._execution.get_observed(current.execution_id, tenant_id=self._tenant_id)
             if control is None:
                 return _partial_integrity()
@@ -2690,7 +3803,9 @@ class StateCommands:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
         async def read(group: StateGroupTransaction) -> ExecutionTerminalCommitResult | None:
-            return await self._read_pending_turn_in_group(group, reservation, expected_session, tool_operations=tool_operations)
+            return await self._read_pending_turn_in_group(
+                group, reservation, expected_session, tool_operations=tool_operations,
+            )
 
         return await stores[0].storage_group.read_many(stores, read)
 
@@ -2783,14 +3898,13 @@ class StateCommands:
         if not _same_group(stores):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         claim = ExecutionStartClaim(initial.execution_id, 0, 0, identity.scope,
-                                    identity.idempotency_key, identity.request_digest, initial.created_at, identity.request_identity_version)
+                                    identity.idempotency_key, identity.request_digest, initial.created_at)
 
         async def read(group: StateGroupTransaction) -> ExecutionRecord | None:
             idempotency = await self._execution.get_start_idempotency(claim)
             if idempotency is None:
                 return None
             if (idempotency.request_digest != identity.request_digest
-                    or idempotency.request_identity_version != identity.request_identity_version
                     or idempotency.resource_kind != identity.resource_kind):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             if (idempotency.resource_id != initial.execution_id
@@ -2815,8 +3929,9 @@ class StateCommands:
                     or (not prepared and (execution.producer_claim_id is not None or execution.producer_generation != 0))):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if expected_session is not None:
+                transaction = group.transaction(self._conversation.state_store)
                 session = await self._conversation.get_in_transaction(
-                    group.transaction(self._conversation.state_store), expected_session.session_id, tenant_id=self._tenant_id,
+                    transaction, expected_session.session_id, tenant_id=self._tenant_id,
                 )
                 if (session.active_execution_id != initial.execution_id
                         or session.continuation != expected_session.continuation):
@@ -2867,16 +3982,16 @@ class StateCommands:
         identity = reservation.idempotency
         claim = ExecutionStartClaim(initial.execution_id, 0, 0, identity.scope,
                                     identity.idempotency_key, identity.request_digest,
-                                    initial.created_at, identity.request_identity_version)
+                                    initial.created_at)
         resolved: ExecutionRecord | None = None
         rejected = False
 
         async def mutate(group: StateGroupTransaction) -> ExecutionRecord:
             nonlocal resolved, rejected
             if expected_session is not None:
+                session_transaction = group.transaction(self._conversation.state_store)
                 session = await self._conversation.get_in_transaction(
-                    group.transaction(self._conversation.state_store),
-                    expected_session.session_id, tenant_id=self._tenant_id,
+                    session_transaction, expected_session.session_id, tenant_id=self._tenant_id,
                 )
                 if session != expected_session:
                     rejected = True
@@ -3081,7 +4196,9 @@ class StateCommands:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         repository = self._execution
 
-        existing = await self.read_pending_turn(reservation, expected_session=expected_session, tool_operations=tool_operations)
+        existing = await self.read_pending_turn(
+            reservation, expected_session=expected_session, tool_operations=tool_operations,
+        )
         if existing is not None:
             if self._capability_writes is not None:
                 prefix = await self._capability_writes.prepare_terminal(
@@ -3159,7 +4276,9 @@ class StateCommands:
                 # Mutable owners still use their CAS; immutable records still compare complete bytes.
                 await group.get_records(fresh_record_keys)
             execution_transaction = group.transaction(repository.state_store)
-            winner = await self._read_pending_turn_in_group(group, reservation, expected_session, tool_operations=tool_operations)
+            winner = await self._read_pending_turn_in_group(
+                group, reservation, expected_session, tool_operations=tool_operations,
+            )
             if winner is not None:
                 if capability_prefix is not None and not await capability_prefix.readback():
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -3251,7 +4370,9 @@ class StateCommands:
         async def readback() -> CommitObservation[object]:
             nonlocal resolved
             try:
-                resolved = await self.read_pending_turn(reservation, expected_session=expected_session, tool_operations=tool_operations)
+                resolved = await self.read_pending_turn(
+                    reservation, expected_session=expected_session, tool_operations=tool_operations,
+                )
             except AIError as error:
                 if error.code is ErrorCode.IDEMPOTENCY_CONFLICT:
                     return CommitObservation(DurableCommitState.NOT_COMMITTED, error=error)
@@ -3369,21 +4490,26 @@ class StateCommands:
         messages = prepared.context_messages
         if not messages or len(prepared.projection.items) != 1:
             return None
+        block = prepared.projection.items[0]
+        if not isinstance(block, ArchivedContextBlock) or not isinstance(block.root, NativeMessageRoot):
+            return None
+        return self._native_terminal_output_reference(output, block.root, messages)
+
+    def _native_terminal_output_reference(
+        self, output: StoredPayload, root: NativeMessageRoot, messages: Sequence[ModelMessage],
+    ) -> NativeTextReference | None:
+        opened = self._execution.state_store.storage_group.opened_archive
+        if (output.kind != "inline" or output.encoding != "json" or root.count != len(messages)
+                or opened is None or root.group_id != opened[0]
+                or root.store_key != native_store_key(self._namespace, self._tenant_id)):
+            return None
         response_index = next((index for index in range(len(messages) - 1, -1, -1)
                                if isinstance(messages[index], ModelResponse)), None)
         if response_index is None:
             return None
         message = messages[response_index]
         trailing = messages[response_index + 1:]
-        block = prepared.projection.items[0]
-        if (not isinstance(block, ArchivedContextBlock)
-                or not isinstance(block.root, NativeMessageRoot) or block.root.count != len(messages)):
-            return None
-        opened = self._execution.state_store.storage_group.opened_archive
-        if (opened is None or block.root.group_id != opened[0]
-                or block.root.store_key != native_store_key(self._namespace, self._tenant_id)):
-            return None
-        root = block.root.slice(response_index, response_index + 1)
+        root = root.slice(response_index, response_index + 1)
         raw = encode_model_messages((message,))
         expected = canonical_json_bytes(output.to_json())
         matches = []
@@ -3412,6 +4538,386 @@ class StateCommands:
                 if canonical_json_bytes(value.to_json()) == expected:
                     matches.append(reference)
         return matches[0] if len(matches) == 1 else None
+
+    async def _commit_canonical_graph_terminal(
+        self, commit: ExecutionTerminalCommit, *, expected_execution: ExecutionRecord,
+        turns: "SqlSessionTurns", key: "SessionTurnKey", generation: int, turn_no: int,
+        transcript: Sequence[ModelMessage] | None = None,
+        binding_refs: tuple[tuple[int, int | None], ...] = (),
+        output_ref: tuple[int, int] | None = None,
+        pending_events: Sequence[ExecutionEventAppend] = (),
+        start_identity: IdempotencyRecord | None = None,
+        _graph_trace_plan: ExecutionTerminalSealPlan | None = None,
+        _graph_trace_suffix: NativeMessageRoot | None = None,
+        _graph_trace_messages: Sequence[ModelMessage] = (),
+        _native_step_suffix: "tuple[NativeMessageRoot, Sequence[ModelMessage]] | None" = None,
+        _graph_step_checkpoint: "tuple[SqlStepStore, str, str, str | None, int] | None" = None,
+        _cold_graph_task: "tuple[TaskRepositoryImpl, TaskLease | _TaskGraphCancelOwner] | None" = None,
+    ) -> ExecutionTerminalCommitResult:
+        """Finalize the exact attached Graph and session owner together."""
+        from sqlalchemy import select
+
+        initial, terminal = expected_execution, commit.execution
+        if (type(self._execution) is not ExecutionRepositoryImpl
+                or turns._scope != state_store_key(self._namespace, self._tenant_id, "regenerable-session")
+                or any(value.execution_id != key.turn_id or value.root_execution_id != key.turn_id
+                       or value.session_id is not None or value.parent_execution_id is not None
+                       or value.parent_invocation_id is not None or value.binding_kind != "agent"
+                       or not value.requires_task_invocation_capture for value in (initial, terminal))
+                or commit.producer_generation != initial.producer_generation
+                or commit.expected_revision != initial.revision
+                or commit.expected_event_seq != initial.event_seq):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if (initial.restart_checkpoints != terminal.restart_checkpoints
+                or initial.restart_checkpoints != (_graph_step_checkpoint is not None)
+                or terminal.durable_trace != initial.durable_trace
+                or (terminal.durable_trace != (_graph_trace_plan is not None) and _cold_graph_task is None)):
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        state: "TerminalState"
+        result: "JsonValue"
+        if terminal.status is ExecutionStatus.SUCCEEDED:
+            state, result = "succeeded", None
+            if ((transcript is None and _graph_trace_suffix is None and _native_step_suffix is None)
+                    or commit.result.output is None):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        elif terminal.status is ExecutionStatus.CANCELLED:
+            if initial.status is not ExecutionStatus.CANCELLING:
+                raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
+            state, result = "cancelled", {"error_code": ErrorCode.EXECUTION_CANCELLED.value}
+        elif terminal.status is ExecutionStatus.FAILED and terminal.error_code is not None:
+            state, result = "failed", {"error_code": terminal.error_code}
+        else:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if state != "succeeded" and commit.result.output is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        if _native_step_suffix is not None and (
+            state != "succeeded" or initial.durable_trace or _graph_trace_plan is not None
+            or _graph_trace_suffix is not None or _graph_trace_messages
+            or _graph_step_checkpoint is None or _cold_graph_task is not None
+            or transcript is not None or binding_refs or commit.producer_generation is None
+        ):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+        cold_stores = ()
+        if _cold_graph_task is not None:
+            if (state != "cancelled" or generation < 2 or _graph_trace_plan is not None
+                    or _graph_trace_suffix is not None or _graph_trace_messages or pending_events
+                    or initial.producer_generation < 1 or not initial.producer_claim_id
+                    or terminal.producer_generation != initial.producer_generation
+                    or terminal.producer_claim_id != initial.producer_claim_id
+                    or initial.recovery_state in {ExecutionRecoveryState.HANDOFF, ExecutionRecoveryState.WAITING}
+                    or (initial.recovery is not None and initial.recovery.pending_tools is not None)):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            task_repository, task_lease = _cold_graph_task
+            cold_stores = self._canonical_graph_launch_stores(
+                key.turn_id, (turns, key, generation, task_repository, task_lease),
+            )
+
+        cold_tools = None
+        if _graph_step_checkpoint is not None:
+            from ._step_store import SqlStepStore
+
+            step_store, step_run, step_conversation, replay_key, prefix_count = _graph_step_checkpoint
+            if (type(step_store) is not SqlStepStore
+                    or (_cold_graph_task is not None and (state != "cancelled" or replay_key is not None or prefix_count != 0))
+                    or (replay_key is None and state == "succeeded")
+                    or (replay_key is not None and not replay_key)
+                    or (state == "succeeded") != (_graph_trace_suffix is not None or _native_step_suffix is not None)
+                    or (state != "succeeded" and initial.recovery is not None and (
+                        initial.recovery.pending_tools is not None
+                        or initial.recovery_state in {ExecutionRecoveryState.WAITING, ExecutionRecoveryState.HANDOFF}
+                    ))
+                    or type(prefix_count) is not int or prefix_count < 0
+                    or initial.native_step_source is None or initial.native_step_source != step_store.backup_source
+                    or terminal.native_step_source != initial.native_step_source or initial.agent_run_seq < 1
+                    or step_run != agent_run_id(namespace=self._namespace, tenant_id=self._tenant_id,
+                                                execution_id=key.turn_id, agent_run_seq=initial.agent_run_seq)):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            turns._require_checkpoint_store(step_store)
+            if _cold_graph_task is not None:
+                cold_tools = self._cold_graph_step_store(initial, turns, step_store, step_run, _cold_graph_task[1])
+                cold_stores = (*cold_stores, cold_tools.state_store)
+
+        binding = turns._transcript_write_binding
+        execution_store = self._execution.state_store
+        if binding is None or not _same_group((execution_store, binding[0])):
+            raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+        run_store = self._execution_run_store
+        trace_archive = trace_content = trace_suffix = seal = None
+        projections = ()
+        if _cold_graph_task is not None and initial.durable_trace:
+            if run_store is None or not _same_group((execution_store, *run_store.transaction_stores)):
+                raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+            cold_stores = (*cold_stores, *run_store.transaction_stores)
+        if _graph_trace_plan is not None:
+            plan = _graph_trace_plan
+            allowed_runs = {
+                agent_run_id(namespace=self._namespace, tenant_id=self._tenant_id,
+                             execution_id=key.turn_id, agent_run_seq=sequence)
+                for sequence in range(1, initial.agent_run_seq + 1)
+            }
+            tokens = dict(plan.seal_tokens)
+            projections = plan.projections
+            projection_ids = {value.run.agent_run_id for value in projections}
+            if (plan.execution_id != key.turn_id or plan.binding_digest != initial.binding_digest
+                    or initial.binding_digest != terminal.binding_digest
+                    or len(tokens) != len(plan.seal_tokens) or not tokens.keys() <= allowed_runs
+                    or any(not token or token != plan.terminal_attempt_token for token in tokens.values())
+                    or len(projection_ids) != len(projections) or not projection_ids <= tokens.keys()
+                    or any(value.producer_generation != commit.producer_generation for value in projections)
+                    or (projections and commit.producer_generation is None)):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            if run_store is None or not _same_group((execution_store, *run_store.transaction_stores)):
+                raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+            trace_archive = await run_store.transcript_repository.content_archive(create=True)
+            if (trace_archive.store.storage_group is not execution_store.storage_group
+                    or trace_archive.content_scope != archive_content_scope(self._namespace, self._tenant_id)):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            trace_content = _copy_archive_union(tuple(
+                content for projection in projections for content in (
+                    projection.archive,
+                    *(checkpoint.archive for checkpoint in projection.checkpoints),
+                    *((projection.observation.archive,) if projection.observation is not None else ()),
+                )
+            ))
+            if state == "succeeded":
+                if (_graph_trace_suffix is None or not _graph_trace_messages
+                        or transcript is not None or binding_refs or not projections):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                trace_suffix = (trace_archive, trace_content, _graph_trace_suffix)
+            seal = _execution_history_seal(
+                commit, audit_events=pending_events, projections=projections,
+                current_run=None, current_events=(), current_batch=None,
+            )
+            commit = replace(commit, execution=replace(terminal, history_seal_digest=seal.seal_digest))
+            projections = tuple(replace(
+                projection, archive=PreparedArchive(),
+                checkpoints=tuple(replace(item, archive=PreparedArchive()) for item in projection.checkpoints),
+                observation=(None if projection.observation is None else
+                             replace(projection.observation, archive=PreparedArchive())),
+            ) for projection in projections)
+        if trace_suffix is None and (_graph_trace_suffix is not None or _graph_trace_messages):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        native_suffix = None
+        native_messages: Sequence[ModelMessage] = ()
+        if _native_step_suffix is not None:
+            root, native_messages = _native_step_suffix
+            archive = await binding[1](create=True)
+            native_suffix = (archive, PreparedArchive(), root)
+        raw_source = trace_suffix or native_suffix
+        graph_messages = native_messages if native_suffix is not None else _graph_trace_messages
+        prepared = await turns._prepare_finish(
+            key, generation=generation, turn_no=turn_no, state=state, result=result,
+            transcript=transcript, binding_refs=binding_refs, output_ref=output_ref,
+            _graph_trace_suffix=raw_source, _graph_step_source=native_suffix is not None,
+            _graph_terminal_message=graph_messages[-1] if graph_messages else None,
+        )
+        result_source = None
+        if prepared.transcript is not None:
+            source_messages = (
+                (_graph_trace_messages if native_suffix is None else native_messages)
+                if raw_source is not None else transcript
+            )
+            assert source_messages is not None and commit.result.output is not None
+            archive, content, root = prepared.transcript
+            if archive.content_scope != archive_content_scope(self._namespace, self._tenant_id):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            result_source = self._native_terminal_output_reference(commit.result.output, root, source_messages)
+            if result_source is None:
+                raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+            await self._execution.prepare_terminal_content(commit, content, result_source=result_source)
+        elif trace_content is not None:
+            await self._execution.prepare_terminal_content(commit, trace_content)
+        else:
+            await self._execution.prepare_content(terminal)
+
+        row = turns._turns
+        relationship = select(row.c.turn_id).filter_by(
+            **turns._turn_values(key), generation=generation, turn_no=turn_no,
+            state="cancelling" if state == "cancelled" else "accepted",
+        ).where(row.c.request_json["graph_execution"].as_string() == key.turn_id)
+
+        attempted: ExecutionTerminalWriteReceipt | None = None
+
+        async def mutate(group: StateGroupTransaction) -> ExecutionTerminalCommitResult:
+            nonlocal attempted, seal
+            async def require_attached(session):
+                if await session.scalar(relationship) is None:
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+            await group.transaction(binding[0]).run_sql(turns._context, require_attached)
+            execution_tx = group.transaction(execution_store)
+            guard = None
+            if (seal is not None or _cold_graph_task is not None or _graph_step_checkpoint is not None
+                ) and commit.producer_generation is not None:
+                guard = await self._execution.require_execution_producer_in_transaction(
+                    execution_tx, key.turn_id, expected_producer_generation=commit.producer_generation,
+                )
+            effective = await self._effective_terminal_commit(
+                execution_tx, commit, expected_execution=initial, start_identity=start_identity,
+            )
+            if _graph_step_checkpoint is not None:
+                async def check_step(session):
+                    assert replay_key is not None
+                    return await step_store._capture_complete_turn_checkpoint_root(
+                        session, run_id=step_run, conversation_id=step_conversation, replay_key=replay_key,
+                    )
+
+                checkpoint_root = (None if replay_key is None else
+                    await group.transaction(binding[0]).run_sql(turns._context, check_step))
+                if state == "succeeded":
+                    assert checkpoint_root is not None
+                    suffix = _graph_trace_suffix if native_suffix is None else native_suffix[2]
+                    if suffix is None or checkpoint_root.count != prefix_count + suffix.count:
+                        raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+                    exact_suffix = checkpoint_root.slice(prefix_count, checkpoint_root.count)
+                    if native_suffix is not None and exact_suffix != suffix:
+                        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                    if native_suffix is None:
+                        await step_store._require_same_native_message_occurrences(execution_tx, exact_suffix, suffix)
+                    # Its official checkpoint already owns these exact physical
+                    # roots. Trace and Session may stage owner edges, not resave
+                    # the body; leave other interaction/payload roots untouched.
+                    if trace_content is not None:
+                        backing = {(part.first, part.count) for part in checkpoint_root.slices}
+                        published = tuple(sequence for sequence in trace_content.native_messages if sequence.slices
+                            and all((part.first, part.count) in backing for part in sequence.slices))
+                        for sequence in published:
+                            trace_content.native_messages.pop(sequence)
+                            trace_content.native_publishers.pop(sequence, None)
+                if cold_tools is not None:
+                    await self._require_cold_cancelled_graph_step(
+                        group, key.turn_id, tools=cold_tools, native=step_store, run_id=step_run,
+                        conversation_id=step_conversation,
+                    )
+                elif state != "succeeded":
+                    from ..steps import NativeLifecycleEvent
+
+                    # A complete checkpoint alone can predate a failed run. Match
+                    # the actual owned terminal marker, never an interrupted draft.
+                    event_key = (step_run, NativeLifecycleEvent.source_key())
+                    sources = await step_store.read_fixed_events((event_key,), transaction=execution_tx)
+                    marker = sources.get(event_key)
+                    if (not isinstance(marker, NativeLifecycleEvent) or marker.outcome != state
+                            or marker.conversation_id != step_conversation):
+                        raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+            if not await turns._finish_in_group(group, prepared):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if _cold_graph_task is not None:
+                task_repository, task_lease = _cold_graph_task
+                await self._guard_cold_graph_task(group, task_repository, task_lease, execution_id=key.turn_id)
+                if initial.durable_trace:
+                    assert run_store is not None
+                    # The original producer generation was revoked by the takeover.
+                    # Read existing durable heads with that Execution fenced; no
+                    # staged/provider messages or new run registration is needed.
+                    candidates = tuple(sorted(
+                        agent_run_id(namespace=self._namespace, tenant_id=self._tenant_id,
+                                     execution_id=key.turn_id, agent_run_seq=sequence)
+                        for sequence in range(1, initial.agent_run_seq + 1)
+                    ))
+                    existing = tuple([
+                        run_id for run_id in candidates if await run_store.get_agent_run(agent_run_id=run_id) is not None
+                    ])
+                    heads = await run_store.execution_history_heads(candidates)
+                    for run_id in set(candidates).difference(existing):
+                        head = heads[run_id]
+                        if (head.event_count or head.checkpoint_count or head.transcript_message_count
+                                or head.interaction_count or head.projection_digest != "empty"):
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    seal = ExecutionHistorySealRecord(
+                        key.turn_id, tuple(heads[run_id] for run_id in existing), effective.expected_event_seq + 1,
+                    )
+                    effective = replace(effective, execution=replace(effective.execution, history_seal_digest=seal.seal_digest))
+            elif seal is not None:
+                assert run_store is not None and trace_archive is not None and trace_content is not None
+                await run_store.transcript_repository.publish_archive(trace_content)
+                trace_tx = group.transaction(run_store.state_store)
+                for projection in projections:
+                    await run_store.sync_projection_in_transaction(
+                        trace_tx, projection.run, events=projection.events, checkpoints=projection.checkpoints,
+                        interactions=projection.interactions, observation=projection.observation,
+                        producer_generation=projection.producer_generation, execution_id=key.turn_id,
+                        execution_guard=guard,
+                    )
+                await run_store.transcript_repository.publish_native_archive(trace_tx, trace_content, owner_written=True)
+                for projection in projections:
+                    await run_store.share_published_content(
+                        projection.run, execution_id=key.turn_id, checkpoints=projection.checkpoints,
+                        observation=projection.observation, archive=trace_content,
+                    )
+            if seal is not None:
+                await self._execution.put_history_seal_in_transaction(execution_tx, seal)
+            committed = await self._execution.commit_terminal_in_transaction(
+                execution_tx, effective, pending_events=pending_events, result_source=result_source,
+            )
+
+            if not isinstance(committed, ExecutionTerminalWriteReceipt):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if seal is None:
+                attempted = committed
+                return committed
+            observed = await self._execution.confirm_terminal_write_in_transaction(execution_tx, committed)
+            if observed is None or observed.value != committed.execution:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            attempted = ExecutionTerminalPublication(
+                committed.execution, committed.result, observed=observed, session_released=True, history_seal=seal,
+            )
+            return attempted
+
+        trace_stores = () if trace_archive is None or run_store is None else (*run_store.transaction_stores, trace_archive.store)
+        stores = _dedupe_stores((execution_store, *prepared.stores, *trace_stores, *cold_stores))
+        try:
+            return await execution_store.storage_group.mutate(stores, mutate)
+        except AIError as error:
+            # Only a completed transaction body can supply the exact attempted
+            # owner receipt. An unknown ACK is never permission to retry.
+            if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or attempted is None:
+                raise
+
+        receipt = attempted
+        _, predicate, occupied = self._canonical_graph_turn_owner(turns, key, generation)
+        outcome = select(row.c.state, row.c.result_json, row.c.lease_until, occupied).where(
+            *predicate, row.c.turn_no == turn_no,
+        )
+        expected_result = prepared.result
+
+        async def observe(group: StateGroupTransaction) -> ExecutionTerminalCommitResult | None:
+            async def read_turn(session):
+                return (await session.execute(outcome)).one_or_none()
+
+            actual = await group.transaction(binding[0]).run_sql(turns._context, read_turn)
+            if actual is None:
+                return None
+            actual_state, result_json, lease, active = actual
+            if actual_state != state or lease is not None or active:
+                return None
+            if isinstance(result_json, dict) and "usage" in result_json and isinstance(expected_result, dict):
+                expected = {**expected_result, "usage": asdict(receipt.result.usage)}
+            else:
+                expected = expected_result
+            if result_json != expected:
+                return None
+            execution_tx = group.transaction(execution_store)
+            observed = await self._execution.get_observed_in_transaction(
+                execution_tx, key.turn_id, tenant_id=self._tenant_id,
+            )
+            if observed is None or not _same_execution_except_hold_metadata(observed.value, receipt.execution):
+                return None
+            if seal is not None and await self._execution._get_history_seal_in_transaction(
+                execution_tx, key.turn_id,
+            ) != seal:
+                return None
+            return replace(receipt, execution=observed.value, observed=observed)
+
+        try:
+            confirmed = await execution_store.storage_group.read_many(stores, observe)
+        except Exception as readback_error:
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from readback_error
+        if confirmed is None:
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+        return confirmed
 
     @sql_observation_phase("persistence.terminal.durable_commit")
     async def commit_terminal_checkpoint(
@@ -4703,7 +6209,7 @@ class StateCommands:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if session_id is not None:
             session = await self._load_session(session_id, tenant_id=self._tenant_id)
-            if (session is None or session.active_execution_id != claim.execution_id
+            if (session is None or session.session_id != session_id or session.active_execution_id != claim.execution_id
                     or session.continuation != expected_cursor):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if expected_session is not None:

@@ -164,7 +164,7 @@ async def test_late_pending_history_does_not_consume_durable_body(
         record = _record(ExecutionStatus.STARTED, 0)
         await repository.create_execution(record)
         async with repository.state_store.storage_group.context.engine.begin() as connection:
-            await connection.execute(text("DELETE FROM ai_step_messages"))
+            await connection.execute(text("DELETE FROM ai_messages"))
         calls = 0
 
         async def pending(execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:

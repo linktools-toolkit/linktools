@@ -24,7 +24,7 @@ from ..errors import AIError, ErrorCode
 from ..evaluation import EvidenceBundle, EvaluationReport, ComparisonReport
 from ..task import TaskGraphView, TaskNodeView
 from .contracts import ToolOperationRecord
-from ._message_root import NativeTextReference
+from ._message_root import NativeTextReference, NativeUserInputReference
 from .codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
@@ -174,11 +174,12 @@ class _RepositoryBase:
         self, kind: str, identity: Sequence[str], value: object, *, scope: bytes | None = None,
         parent: bytes | None = None, state: str | None = None,
         previous_value: ExecutionRecord | None = None,
+        _admitted_input_source: NativeUserInputReference | None = None,
     ) -> StoredRecord:
         if isinstance(value, ExecutionRecord):
             previous = None if previous_value is None else self._execution_content.projection(previous_value)
             encoded = await self._execution_content.encode(value, previous=previous,
-                observed_value=previous_value if previous is not None else None)
+                _admitted_input_source=_admitted_input_source, observed_value=previous_value if previous is not None else None)
             record = project_record(
                 namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain,
                 kind=kind, identity=identity, value=value, scope=scope, parent=parent,

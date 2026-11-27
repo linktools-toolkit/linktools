@@ -36,7 +36,7 @@ async def _owners(path: Path):
 
 
 async def _bodies(native: SqlStepStore) -> dict[tuple[str, str], ContentRecord]:
-    messages = build_step_sql_metadata().tables["ai_step_messages"]
+    messages = build_step_sql_metadata().tables["ai_messages"]
     async with native.storage_context.engine.connect() as connection:
         rows = (await connection.execute(select(messages))).mappings().all()
     return {(row["store_key"], row["sha256"]): ContentRecord.from_native_row(row) for row in rows}
@@ -60,11 +60,11 @@ async def test_only_offline_cleanup_releases_shared_content(
         await native.save_snapshot(_snapshot("run", 3))
         async with native.storage_context.engine.connect() as connection:
             assert await connection.scalar(text(
-                "SELECT count(*) FROM ai_step_messages WHERE store_key = :store"
+                "SELECT count(*) FROM ai_messages WHERE store_key = :store"
             ), {"store": native.store_key}) > 0
         await state.purge_unreferenced_objects((), exclusive=_Offline())
         async with native.storage_context.engine.connect() as connection:
-            for table in ("ai_step_sequences", "ai_step_messages"):
+            for table in ("ai_message_sequences", "ai_messages"):
                 assert await connection.scalar(text(
                     f"SELECT count(*) FROM {table} WHERE store_key = :store"
                 ), {"store": native.store_key}) == 0
@@ -72,7 +72,7 @@ async def test_only_offline_cleanup_releases_shared_content(
         await foreign.save_snapshot(_snapshot("foreign", 2))
         await state.purge_unreferenced_objects((), exclusive=_Offline())
         async with native.storage_context.engine.connect() as connection:
-            for table in ("ai_step_sequences", "ai_step_messages"):
+            for table in ("ai_message_sequences", "ai_messages"):
                 assert await connection.scalar(text(f"SELECT count(*) FROM {table}")) == 0
 
 
@@ -106,7 +106,7 @@ async def test_object_cleanup_preserves_shared_scopes_and_republishes_retired_bo
         assert result.retained == result.missing == result.blocked == ()
         assert await _bodies(native) == {}
         async with native.storage_context.engine.connect() as connection:
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 0
+            assert await connection.scalar(text("SELECT count(*) FROM ai_message_sequences")) == 0
         assert await objects.stat(reference.key) is None
 
         revived = replace(retired, run_id="revived")
@@ -145,7 +145,7 @@ async def test_native_cleanup_failure_never_deletes_objects_and_expires_write_pr
             return result
 
         def fail_delete(connection, cursor, statement, parameters, context, many):
-            if statement.lstrip().upper().startswith("DELETE FROM AI_STEP_MESSAGES"):
+            if statement.lstrip().upper().startswith("DELETE FROM AI_MESSAGES"):
                 raise RuntimeError("native body deletion rejected")
 
         if outcome == "rollback":
@@ -165,7 +165,7 @@ async def test_native_cleanup_failure_never_deletes_objects_and_expires_write_pr
         assert await objects.stat(reference.key) is not None
         assert await _bodies(native) == (before if outcome == "rollback" else {})
         async with context.engine.connect() as connection:
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == (1 if outcome == "rollback" else 0)
+            assert await connection.scalar(text("SELECT count(*) FROM ai_message_sequences")) == (1 if outcome == "rollback" else 0)
         revived = replace(retired, run_id="revived")
         await native.save_snapshot(revived)
         reader = SqlStepStore(context, namespace="native-gc", tenant_id="one", max_cached_messages=0)

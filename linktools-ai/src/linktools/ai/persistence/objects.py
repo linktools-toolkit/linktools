@@ -3,37 +3,17 @@
 """Runtime-owned opaque Object key derivation."""
 
 import hashlib
-import re
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 
-from ..core import RUNTIME_OBJECT_STORE_ID, validate_persistence_namespace, validate_tenant_id
+from ..core import RUNTIME_OBJECT_STORE_ID
 from ..errors import AIError, ErrorCode
 from ..storage import (
     ObjectRef,
     ObjectStore,
     read_object,
 )
+from ._object_key import ObjectKeyFactory
 from ._plan import PersistenceDomain
-
-_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
-
-
-@dataclass(frozen=True, slots=True)
-class ObjectKeyFactory:
-    namespace: str
-
-    def __post_init__(self) -> None:
-        validate_persistence_namespace(self.namespace)
-
-    def key(self, runtime_domain: PersistenceDomain, tenant_id: str, digest: str) -> str:
-        if not isinstance(runtime_domain, PersistenceDomain):
-            raise TypeError("domain must be PersistenceDomain")
-        tenant_id = validate_tenant_id(tenant_id)
-        if not isinstance(digest, str) or _DIGEST.fullmatch(digest) is None:
-            raise ValueError("Runtime object digest is invalid")
-        # Character lengths frame opaque components, including slashes and colons.
-        return f"v1/runtime/{len(self.namespace)}:{self.namespace}/{len(tenant_id)}:{tenant_id}/{digest}"
 
 
 async def put_runtime_object(

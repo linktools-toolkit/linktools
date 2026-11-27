@@ -7,7 +7,7 @@ import json
 import math
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Generic
@@ -31,6 +31,7 @@ from ..core import (
     validate_lease_owner,
     validate_tenant_id,
     validate_resource_id,
+    validate_task_graph_id,
 )
 from ..errors import AIError, ErrorCode
 from ..errors import ErrorDiagnostics
@@ -46,6 +47,13 @@ def _validate_task_id(value: str) -> None:
         validate_resource_id(value)
     except AIError as error:
         raise ValueError("task identity must be a valid resource id") from error
+
+
+def _validate_graph_id(value: str) -> None:
+    try:
+        validate_task_graph_id(value)
+    except AIError as error:
+        raise ValueError("task graph identity must be a valid graph id") from error
 
 
 def normalize_timeout_seconds(value: object) -> "float | None":
@@ -135,7 +143,7 @@ class TaskResultRef(Generic[_ResultT]):
     result_digest: str
 
     def __post_init__(self) -> None:
-        _validate_task_id(self.graph_id)
+        _validate_graph_id(self.graph_id)
         _validate_task_id(self.node_id)
         if any(
             not isinstance(value, str) or not value.strip()
@@ -456,10 +464,6 @@ class TaskNode(Generic[_ResultT]):
             value["reconcile"] = True
         return value
 
-    def request_identity_payload(self, *, request_identity_version: int) -> dict[str, JsonValue]:
-        """Project request semantics without interpreting generic Task input."""
-        return self.to_mapping()
-
     def dependency_status(self, dependency_states: Mapping[str, TaskStatus]) -> TaskStatus:
         """Return the dependency-derived state without changing persisted state."""
         statuses = tuple(dependency_states[dependency] for dependency in self.dependencies)
@@ -524,9 +528,11 @@ class TaskLease:
     fence: int
     lease_expires_at: datetime
     execution_id: "str | None" = None
+    recovery_operation_id: "str | None" = field(default=None, repr=False)
+    recovery_actor: "Principal | None" = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        _validate_task_id(self.graph_id)
+        _validate_graph_id(self.graph_id)
         _validate_task_id(self.node_id)
         try:
             validate_tenant_id(self.tenant_id)
@@ -538,6 +544,8 @@ class TaskLease:
             or not self.node_id.strip()
             or self.fence < 1
             or self.lease_expires_at.tzinfo is None
+            or (self.recovery_operation_id is None) != (self.recovery_actor is None)
+            or (self.recovery_actor is not None and self.recovery_actor.tenant_id != self.tenant_id)
             or (
                 self.execution_id is not None
                 and (
@@ -567,11 +575,16 @@ class TaskNodeView:
     error_origin: "str | None" = None
     safe_error_details: "Mapping[str, JsonValue]" = field(default_factory=dict)
 
+    recovery_operation_id: "str | None" = field(default=None, repr=False)
+    recovery_actor: "Principal | None" = field(default=None, repr=False)
+
     def __post_init__(self) -> None:
-        _validate_task_id(self.graph_id)
+        _validate_graph_id(self.graph_id)
         _validate_task_id(self.node_id)
         for dependency in self.dependencies:
             _validate_task_id(dependency)
+        if (self.recovery_operation_id is None) != (self.recovery_actor is None):
+            raise ValueError("task recovery authority is incomplete")
         if self.owner is not None:
             try:
                 validate_lease_owner(self.owner)
@@ -629,7 +642,7 @@ class TaskGraph:
     nodes: "tuple[TaskNode[object], ...]"
 
     def __post_init__(self) -> None:
-        _validate_task_id(self.graph_id)
+        _validate_graph_id(self.graph_id)
         object.__setattr__(self, "nodes", tuple(self.nodes))
         ids = {node.node_id for node in self.nodes}
         if len(ids) != len(self.nodes):
@@ -754,7 +767,6 @@ def _task_graph_request_digest(
     limits: TaskGraphLimits,
     budget: RunBudget | None = None,
     tool_effects: ToolEffects = "live",
-    request_identity_version: int = 2,
 ) -> str:
     identity: dict[str, JsonValue] = {
         "principal": principal_identity_payload(principal),
@@ -762,7 +774,7 @@ def _task_graph_request_digest(
         **({"budget": budget.digest_payload()} if budget is not None else {}),
         **({"tool_effects": tool_effects} if tool_effects != "live" else {}),
         "nodes": [
-            node.request_identity_payload(request_identity_version=request_identity_version)
+            node.to_mapping()
             for node in sorted(graph.nodes, key=lambda item: item.node_id)
         ],
         "limits": {
@@ -784,7 +796,7 @@ class TaskGraphLaunch:
     budget: RunBudget | None = None
 
     def __post_init__(self) -> None:
-        _validate_task_id(self.graph_id)
+        _validate_graph_id(self.graph_id)
         if self.budget is not None and not isinstance(self.budget, RunBudget):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
@@ -802,14 +814,9 @@ class TaskGraphAdmission:
     budget: RunBudget | None = None
     budget_scope_id: str | None = None
     tool_effects: ToolEffects = "live"
-    request_identity_version: int = 1
 
     def __post_init__(self) -> None:
-        _validate_task_id(self.graph_id)
-        if type(self.request_identity_version) is not int:
-            raise ValueError("task request identity version is invalid")
-        if self.request_identity_version not in (1, 2):
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        _validate_graph_id(self.graph_id)
         normalize_tool_effects(self.tool_effects)
         if self.budget is not None and not isinstance(self.budget, RunBudget):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -830,9 +837,7 @@ class TaskGraphAdmission:
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
 
     @classmethod
-    def from_request(
-        cls, request: TaskGraphRequest, *, request_identity_version: int = 2,
-    ) -> "TaskGraphAdmission":
+    def from_request(cls, request: TaskGraphRequest) -> "TaskGraphAdmission":
         return cls(
             1,
             request.graph.graph_id,
@@ -841,24 +846,11 @@ class TaskGraphAdmission:
             request.idempotency_key,
             _task_graph_request_digest(
                 request.graph, request.principal, request.limits, request.budget, request.tool_effects,
-                request_identity_version,
             ),
             request.correlation,
             request.budget,
             None if request.budget is None else "graph:" + request.graph.graph_id,
             request.tool_effects,
-            request_identity_version,
-        )
-
-    def with_request_identity(self, graph: TaskGraph, *, request_identity_version: int) -> "TaskGraphAdmission":
-        """Compare the original graph using its durable submission owner's rule."""
-        return replace(
-            self,
-            initial_request_digest=_task_graph_request_digest(
-                graph, self.principal, self.limits, self.budget, self.tool_effects,
-                request_identity_version,
-            ),
-            request_identity_version=request_identity_version,
         )
 
     def launch(self) -> TaskGraphLaunch:
@@ -879,7 +871,6 @@ class TaskGraphAdmission:
         if (
             _task_graph_request_digest(
                 graph, self.principal, self.limits, self.budget, self.tool_effects,
-                self.request_identity_version,
             )
             != self.initial_request_digest
         ):
@@ -946,7 +937,7 @@ class TaskResultRecord:
     execution_id: str
 
     def __post_init__(self) -> None:
-        _validate_task_id(self.graph_id)
+        _validate_graph_id(self.graph_id)
         _validate_task_id(self.node_id)
         if re.fullmatch(r"[0-9a-f]{64}", self.result_digest) is None:
             raise ValueError("task result digest is invalid")
@@ -1059,7 +1050,7 @@ class TaskGraphState:
 
 
     def __post_init__(self) -> None:
-        _validate_task_id(self.graph_id)
+        _validate_graph_id(self.graph_id)
         if not isinstance(self.status, TaskStatus):
             raise ValueError("task graph state status is invalid")
         if (

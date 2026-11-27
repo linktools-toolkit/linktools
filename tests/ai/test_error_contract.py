@@ -11,9 +11,8 @@ import pytest
 from linktools.ai.core import ExecutionStatus, ToolOperationStatus, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import ToolCallFailed, ToolCallRetry
-from linktools.ai.execution import ExecutionResult
+from linktools.ai.execution import ExecutionResult, terminal_error
 from linktools.ai.runtime._agent_executor import _execution_error
-from linktools.ai.runtime._execution import _terminal_error
 from linktools.ai.runtime._local import _secondary_execution_error
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef, StoredPayload
@@ -159,7 +158,7 @@ def test_persisted_cancelled_execution_requires_explicit_cancel_code() -> None:
         safe_error_details: tuple[tuple[str, object], ...] = ()
 
     with pytest.raises(AIError) as error:
-        _terminal_error(PersistedExecution())  # type: ignore[arg-type]
+        terminal_error(PersistedExecution())  # type: ignore[arg-type]
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 

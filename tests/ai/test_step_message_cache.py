@@ -31,10 +31,10 @@ class _SqlTraffic:
         verb = statement.split()[0].upper()
         # Recursive sequence reads start WITH but still consume one SELECT.
         self.statements["SELECT" if verb == "WITH" else verb] += 1
-        if verb in {"SELECT", "WITH"} and "ai_step_messages.message" in statement:
+        if verb in {"SELECT", "WITH"} and "ai_messages.message" in statement:
             self.statements["message_body_select"] += 1
         self.bound_bytes += self._bytes(parameters)
-        if statement.startswith("INSERT INTO ai_step_messages "):
+        if statement.startswith("INSERT INTO ai_messages "):
             self.statements["message_insert"] += 1
             # Codec, size, and manifest columns are bound alongside message
             # bodies; only the body column contributes to message_bytes.
@@ -43,7 +43,7 @@ class _SqlTraffic:
                 self.message_bytes += self._bytes(row["message"])
         elif statement.startswith("INSERT INTO ai_step_snapshots "):
             self.statements["snapshot_insert"] += 1
-        elif statement.startswith("INSERT INTO ai_step_sequences "):
+        elif statement.startswith("INSERT INTO ai_message_sequences "):
             self.statements["sequence_insert"] += 1
 
     @classmethod
@@ -66,7 +66,7 @@ def test_sql_traffic_counts_binary_message_rows_and_bound_bytes(many: bool) -> N
     rows = (("store", "one", memoryview(b"compressed"), "zlib", 1000, None),
             ("store", "two", None, "raw", 20, '{"name":"文"}'))
     statement = (
-        "INSERT INTO ai_step_messages "
+        "INSERT INTO ai_messages "
         "(store_key, sha256, message, compression, raw_size, payload_json) "
         "VALUES (?, ?, ?, ?, ?, ?)"
     )
@@ -111,7 +111,7 @@ async def test_repeated_snapshots_skip_only_confirmed_message_body_submissions(
         # Native owner guards may read bounded identities, never cached bodies.
         assert traffic.statements["message_body_select"] == 0
         async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 1
+            assert await connection.scalar(text("SELECT count(*) FROM ai_message_sequences")) == 1
         assert await store.latest_snapshot(run_id="run") == second
         await store.save_snapshot(first)
         assert traffic.message_rows == submitted
@@ -135,7 +135,7 @@ async def test_failed_publication_does_not_cache_uncommitted_messages(tmp_path: 
     event.listen(engine.sync_engine, "before_cursor_execute", traffic.capture)
 
     def fail(connection, cursor, statement, parameters, context, many) -> None:
-        if statement.startswith("INSERT INTO ai_step_sequences "):
+        if statement.startswith("INSERT INTO ai_message_sequences "):
             raise RuntimeError("publication failed")
 
     try:
@@ -199,8 +199,8 @@ async def test_lost_commit_ack_requires_readback_or_new_owner_before_reuse(
         assert traffic.message_rows == submitted
         assert await store.latest_snapshot(run_id="run") == warm
         async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 1
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 1
+            assert await connection.scalar(text("SELECT count(*) FROM ai_messages")) == 1
+            assert await connection.scalar(text("SELECT count(*) FROM ai_message_sequences")) == 1
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots")) == 3
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", traffic.capture)
@@ -239,7 +239,7 @@ async def test_clone_cache_is_scoped_and_cleared_on_close(tmp_path: Path) -> Non
         await other_tenant.close()
         await other_namespace.close()
         async with engine.begin() as connection:
-            await connection.execute(text("DELETE FROM ai_step_messages"))
+            await connection.execute(text("DELETE FROM ai_messages"))
         reopened = SqlStepStore(context, namespace="steps", tenant_id="one")
         await reopened.save_snapshot(replace(snapshot, idempotency_key="after-maintenance"))
         assert traffic.message_rows == 5

@@ -261,11 +261,11 @@ async def test_direct_step_content_uses_exact_index_without_sequence_union(tmp_p
         assert "ai_state_records" not in sql
         async with engine.connect() as connection:
             plan = (await connection.exec_driver_sql("EXPLAIN QUERY PLAN " + sql, parameters)).all()
-        assert any("SEARCH ai_step_messages" in row[3] and "store_locator=? AND sha256=?" in row[3] for row in plan), plan
+        assert any("SEARCH ai_messages" in row[3] and "store_locator=? AND sha256=?" in row[3] for row in plan), plan
         await archive.store.read(lambda tx: tx.read_archive_frontiers(
             scope_key=decode_archive_scope(archive.content_scope),
             requests=(ArchiveNodeRead(archive._key("archive_sequence", root.slices[0].first)),),
         ))
         event.remove(engine.sync_engine, "before_cursor_execute", record_query)
         assert len(statements) == 1
-        assert "ai_step_messages" not in statements[0][0]
+        assert "ai_messages" not in statements[0][0]

@@ -1,270 +1,107 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Session-specific Runtime storage I/O contracts."""
+"""Physical SQLite I/O contracts for the canonical Session owner."""
 
-from datetime import datetime, timezone
-from pathlib import Path
+from contextlib import contextmanager
 
 import pytest
-from linktools.ai.core import (
-    OperationKind,
-    OperationLedgerInput,
-    OperationStatus,
-    ResourceKind,
-    SessionStatus,
-    canonical_sha256,
-)
-from linktools.ai.migrate import provision_database
-from linktools.ai.persistence import Persistence
-from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.persistence.contracts import SessionRecord
 from sqlalchemy import event
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
+from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.persistence._ordinary_lineage import decode_session_lineage
+from linktools.ai.persistence.turns import SessionTurnKey
+
+from .test_session_turn_sql import _TRANSCRIPT, accept, store
 
 pytestmark = pytest.mark.asyncio
 
 
-def _session(
-    session_id: str,
-    now: datetime,
-    *,
-    history_id: str | None = None,
-) -> SessionRecord:
-    return SessionRecord(
-        session_id=session_id,
-        owner_principal_id="owner",
-        agent_id="agent",
-        status=SessionStatus.OPEN,
-        revision=0,
-        cwd=None,
-        metadata={},
-        created_at=now,
-        updated_at=now,
-        closed_at=None,
-        active_execution_id=None,
-        history_id=history_id,
-    )
+@contextmanager
+def _session_statements(engine):
+    statements = []
 
+    def capture(connection, _cursor, statement, _parameters, _context, _executemany):
+        sql = statement.lstrip().upper()
+        if sql.startswith(("SELECT", "UPDATE", "INSERT", "DELETE")):
+            statements.append((sql, connection.get_transaction()))
 
-def _fork_operation(now: datetime) -> OperationLedgerInput:
-    return OperationLedgerInput(
-        operation_id="fork-operation",
-        tenant_id="tenant",
-        resource_kind=ResourceKind.SESSION,
-        resource_id="target",
-        execution_id=None,
-        operation_kind=OperationKind.SESSION_FORK,
-        status=OperationStatus.SUCCEEDED,
-        request_digest=canonical_sha256({"action": "fork", "target": "target"}),
-        result_ref="target",
-        result_digest=canonical_sha256({"session_id": "target", "revision": 0}),
-        error_code=None,
-        compactable=True,
-        created_at=now,
-        updated_at=now,
-    )
-
-
-def _listen_sql(engine: AsyncEngine, statements: list[tuple[str, object]]) -> object:
-    def capture_sql(
-        _connection: object,
-        _cursor: object,
-        statement: str,
-        parameters: object,
-        _context: object,
-        _executemany: bool,
-    ) -> None:
-        statements.append((statement, parameters))
-
-    event.listen(engine.sync_engine, "before_cursor_execute", capture_sql)
-    return capture_sql
-
-
-def _record_selects(statements: list[tuple[str, object]]) -> list[tuple[str, object]]:
-    return [
-        (statement.upper(), parameters)
-        for statement, parameters in statements
-        if "AI_STATE_RECORDS" in statement.upper()
-        and statement.lstrip().upper().startswith("SELECT")
-    ]
-
-
-def _parameter_count(parameters: object) -> int:
-    if isinstance(parameters, (tuple, list, dict)):
-        return len(parameters)
-    return 0
-
-
-async def _build_fork_state(
-    tmp_path: Path,
-    namespace: str,
-    *,
-    source_history_id: str | None = None,
-) -> tuple[
-    AsyncEngine,
-    Persistence,
-    SessionRecord,
-    OperationLedgerInput,
-]:
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / f'{namespace}.db'}")
-    await provision_database(engine)
-    state = Persistence(PersistenceStorage.sql(engine))
-    await state.initialize(namespace=namespace, tenant_id="tenant")
-    now = datetime.now(timezone.utc)
-    source = await state.conversation.sessions.create(
-        _session("source", now, history_id=source_history_id)
-    )
-    return engine, state, source, _fork_operation(now)
-
-
-async def test_session_list_skips_generation_probe_but_page_keeps_it(
-    tmp_path: Path,
-) -> None:
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'sessions.db'}")
-    await provision_database(engine)
-    state = Persistence(PersistenceStorage.sql(engine))
-    await state.initialize(namespace="io-session-list", tenant_id="tenant")
-    now = datetime.now(timezone.utc)
-    await state.conversation.sessions.create(_session("session", now))
-    statements: list[tuple[str, object]] = []
-    capture_sql = _listen_sql(engine, statements)
+    event.listen(engine.sync_engine, "before_cursor_execute", capture)
     try:
-        values = await state.conversation.sessions.list(tenant_id="tenant")
-        assert tuple(value.session_id for value in values) == ("session",)
-        assert not any(
-            "AI_STATE_COUNTERS" in statement.upper()
-            for statement, _parameters in statements
-        )
-
-        statements.clear()
-        generation, page = await state.conversation.sessions.list_page(
-            tenant_id="tenant",
-            owner_principal_id=None,
-            cursor=None,
-            limit=10,
-        )
-        assert generation >= 1
-        assert tuple(value.session_id for value in page.items) == ("session",)
-        assert any(
-            "AI_STATE_COUNTERS" in statement.upper()
-            for statement, _parameters in statements
-        )
+        yield statements
     finally:
-        event.remove(engine.sync_engine, "before_cursor_execute", capture_sql)
-        await state.close()
-        await engine.dispose()
+        event.remove(engine.sync_engine, "before_cursor_execute", capture)
 
 
-async def test_session_fork_batches_known_record_sql(tmp_path: Path) -> None:
-    engine, state, source, operation = await _build_fork_state(
-        tmp_path,
-        "io-session-fork",
-    )
-    statements: list[tuple[str, object]] = []
-    capture_sql = _listen_sql(engine, statements)
-    try:
-        target, replayed = await state.conversation.sessions.create_fork_with_operation(
-            source.session_id,
-            _session("target", operation.created_at),
-            expected_source_revision=source.revision,
-            operation=operation,
-        )
-        assert target.session_id == "target"
-        assert replayed is False
+async def test_session_list_reads_each_keyset_page_without_generation_probe(store):
+    engine, _metadata, turns = store
+    await turns.create("next", config={})
+    await turns.create("excluded", config={})
 
-        record_selects = _record_selects(statements)
-        assert len(record_selects) == 2
-        batched = [
-            parameters
-            for statement, parameters in record_selects
-            if " IN " in statement
-        ]
-        assert len(batched) == 1
-        assert _parameter_count(batched[0]) == 6
-    finally:
-        event.remove(engine.sync_engine, "before_cursor_execute", capture_sql)
-        await state.close()
-        await engine.dispose()
+    with _session_statements(engine) as first_sql:
+        first = await turns.session_page(session_ids=("chat", "next"), before=None, limit=1)
+    assert [item["session_key"] for item in first] == [b"next"]
+    with _session_statements(engine) as next_sql:
+        next_page = await turns.session_page(session_ids=("chat", "next"), before=first[0]["id"], limit=1)
+    assert [item["session_key"] for item in next_page] == [b"chat"]
+    for queries in (first_sql, next_sql):
+        [(statement, _)] = queries
+        assert statement.startswith("SELECT")
+        assert "AI_SESSIONS" in statement and "AI_STATE_COUNTERS" not in statement
 
 
-async def test_session_fork_replay_batches_known_record_sql(tmp_path: Path) -> None:
-    engine, state, source, operation = await _build_fork_state(
-        tmp_path,
-        "io-session-fork-replay",
-    )
-    target = _session("target", operation.created_at)
-    await state.conversation.sessions.create_fork_with_operation(
-        source.session_id,
-        target,
-        expected_source_revision=source.revision,
-        operation=operation,
-    )
+async def test_session_fork_reads_two_headers_and_writes_once_atomically(store):
+    engine, _metadata, turns = store
+    with _session_statements(engine) as queries:
+        assert await turns.fork_session("chat", "target", expected_revision=0, authorized_revision=0, request_id="fork")
 
-    statements: list[tuple[str, object]] = []
-    capture_sql = _listen_sql(engine, statements)
-    try:
-        replayed_target, replayed = (
-            await state.conversation.sessions.create_fork_with_operation(
-                source.session_id,
-                target,
-                expected_source_revision=source.revision,
-                operation=operation,
-            )
-        )
-        assert replayed_target.session_id == "target"
-        assert replayed is True
-
-        record_selects = _record_selects(statements)
-        assert len(record_selects) == 1
-        batched = [
-            parameters
-            for statement, parameters in record_selects
-            if " IN " in statement
-        ]
-        assert len(batched) == 1
-        assert _parameter_count(batched[0]) == 5
-    finally:
-        event.remove(engine.sync_engine, "before_cursor_execute", capture_sql)
-        await state.close()
-        await engine.dispose()
+    assert [sql.split()[0] for sql, _ in queries] == ["SELECT", "SELECT", "UPDATE", "INSERT"]
+    assert all("AI_SESSIONS" in sql for sql, _ in queries)
+    first_transaction = queries[0][1]
+    assert first_transaction is not None
+    assert all(transaction is first_transaction for _, transaction in queries)
+    assert (await turns.get_session("chat"))["revision"] == 1
+    assert (await turns.get_session("target"))["lineage_json"]["source"] == "chat"
 
 
-async def test_session_fork_replay_uses_persisted_source_history_id(
-    tmp_path: Path,
-) -> None:
-    engine, state, source, operation = await _build_fork_state(
-        tmp_path,
-        "io-session-fork-custom-history",
-        source_history_id="custom-source-history",
-    )
-    target = _session("target", operation.created_at)
-    try:
-        created, replayed = await state.conversation.sessions.create_fork_with_operation(
-            source.session_id,
-            target,
-            expected_source_revision=source.revision,
-            operation=operation,
-        )
-        assert replayed is False
+async def test_session_fork_replay_only_reads_existing_target(store):
+    engine, _metadata, turns = store
+    assert await turns.fork_session("chat", "target", expected_revision=0, authorized_revision=0, request_id="fork")
+    target = await turns.get_session("target")
+    before = await turns.get_session("chat")
 
-        replayed_target, replayed = (
-            await state.conversation.sessions.create_fork_with_operation(
-                source.session_id,
-                target,
-                expected_source_revision=source.revision,
-                operation=operation,
-            )
-        )
-        assert replayed is True
-        assert replayed_target == created
+    with _session_statements(engine) as queries:
+        assert await turns.fork_session("chat", "target", expected_revision=0,
+                                        authorized_revision=before["revision"], request_id="fork")
+    [(statement, _)] = queries
+    assert statement.startswith("SELECT") and "AI_SESSIONS" in statement
+    assert await turns.get_session("target") == target
+    assert await turns.get_session("chat") == before
 
-        assert created.history_id is not None
-        child = await state.conversation.histories.get(
-            created.history_id,
-            tenant_id="tenant",
-        )
-        assert child is not None
-        assert child.parent_history_id == "custom-source-history"
-    finally:
-        await state.close()
-        await engine.dispose()
+    with pytest.raises(AIError) as conflict:
+        await turns.fork_session("chat", "target", expected_revision=1, authorized_revision=1, request_id="fork")
+    assert conflict.value.code is ErrorCode.STORAGE_CONFLICT
+
+
+async def test_session_fork_replay_uses_frozen_source_prefix_without_copying_turns(store):
+    engine, _metadata, turns = store
+    assert await accept(turns, "first", request="first")
+    assert await turns.finish(SessionTurnKey("chat", "first"), generation=1, turn_no=1,
+                              state="succeeded", transcript=_TRANSCRIPT)
+    source = await turns.get_session("chat")
+    with _session_statements(engine) as queries:
+        assert await turns.fork_session("chat", "target", expected_revision=source["revision"],
+                                        authorized_revision=source["revision"], request_id="fork")
+    assert all("AI_SESSIONS" in sql for sql, _ in queries)
+
+    after_fork = await turns.get_session("chat")
+    assert await accept(turns, "later", revision=after_fork["revision"], through=1, request="later")
+    assert await turns.finish(SessionTurnKey("chat", "later"), generation=1, turn_no=2,
+                              state="succeeded", transcript=_TRANSCRIPT)
+    current = await turns.get_session("chat")
+    assert await turns.fork_session("chat", "target", expected_revision=source["revision"],
+                                    authorized_revision=current["revision"], request_id="fork")
+    target = await turns.get_session("target")
+    assert target["last_turn_no"] == 1
+    inherited, = await turns.turn_page("target", through=target["last_turn_no"], limit=10,
+                                       lineage=decode_session_lineage(target["lineage_json"]))
+    assert inherited["session_key"] == b"chat" and inherited["turn_id"] == b"first"

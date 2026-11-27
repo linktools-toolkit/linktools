@@ -48,6 +48,52 @@ async def _begin(bridge, contract, *, replay_safe=False, args=None):
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ("claimed", "unknown"))
+@pytest.mark.parametrize(
+    ("call_id", "previous_safe", "new_safe", "previous_ref", "new_ref", "admit"),
+    (
+        ("fresh-call", True, True, _reference(), _reference(), True),
+        ("call", True, True, _reference(), _reference(), False),
+        ("fresh-call", False, True, _reference(), _reference(), False),
+        ("fresh-call", True, False, _reference(), _reference(), False),
+        ("fresh-call", True, True, _reference(), _reference(2), False),
+        ("fresh-call", True, True, None, None, False),
+    ),
+)
+async def test_interrupted_tool_only_allows_a_new_verified_replay_safe_call(
+    admission_state, status, call_id, previous_safe, new_safe, previous_ref, new_ref, admit,
+):
+    tools = admission_state.checkpoint.tools
+    interrupted = await tools.admit(replace(
+        _request(), tool_name="work", arguments_digest=canonical_sha256({}), binding_digest="b" * 64,
+        replay_safe=previous_safe, capability_ref=previous_ref,
+    ))
+    if status == "unknown":
+        interrupted = await tools.mark_effect_unknown(
+            interrupted.tool_operation_id, tenant_id="tenant", owner="worker", fence=interrupted.fence,
+            error_code=ErrorCode.TOOL_EFFECT_UNKNOWN.value,
+        )
+    bridge = _bridge(admission_state, recovery=True, operation_id=interrupted.tool_operation_id)
+    bridge._reported_interruptions[interrupted.tool_operation_id] = interrupted
+
+    async def start():
+        return await bridge.begin(
+            tool_run_context(), ToolCallPart("work", {}, tool_call_id=call_id),
+            ToolDefinition(name="work"), {}, new_safe, capability_ref=new_ref,
+        )
+
+    if admit:
+        decision = await start()
+        assert decision.operation_id != interrupted.tool_operation_id
+        fresh = await tools.get_operation(decision.operation_id, tenant_id="tenant")
+        assert fresh.tool_call_id == call_id and fresh.capability_ref == new_ref
+    else:
+        with pytest.raises(ToolCallFailed, match="tool outcome unknown"):
+            await start()
+    assert await tools.get_operation(interrupted.tool_operation_id, tenant_id="tenant") == interrupted
+
+
 def test_tool_admission_wire_retains_reference_without_connection_configuration() -> None:
     request = replace(_request(), capability_ref=_reference())
     assert decode_domain(encode_domain(request), ToolOperationAdmission) == request

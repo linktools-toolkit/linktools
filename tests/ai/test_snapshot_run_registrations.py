@@ -7,6 +7,7 @@ from dataclasses import replace
 import pytest
 
 from linktools.ai.errors import AIError
+from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence._official_step_reader import OfficialStepReader
 from linktools.ai.persistence._run_registration import RunRegistrationReference
 from linktools.ai.persistence.snapshots import (
@@ -48,11 +49,11 @@ def test_domain_deltas_share_registration_and_fail_closed_without_owner() -> Non
     record = StoredRecord(record_key("portable", "tenant", "trace", "agent_run", (run.run_id,)),
                           None, None, "agent_run", b"run", None, 1, None, 0, None, reference)
     from linktools.ai.persistence.codec import _decode_step_envelope
-    assert _decode_step_envelope(_expand_run_reference(record, {run.run_id: run}).data) == projection
+    assert _decode_step_envelope(_expand_run_reference(record, {run.run_id: run}, PersistenceDomain.TRACE).data) == projection
     with pytest.raises(AIError):
-        _expand_run_reference(record, {})
+        _expand_run_reference(record, {}, PersistenceDomain.TRACE)
     with pytest.raises(AIError):
-        _expand_run_reference(record, {run.run_id: replace(run, registration_id="other")})
+        _expand_run_reference(record, {run.run_id: replace(run, registration_id="other")}, PersistenceDomain.TRACE)
 
 
 @pytest.mark.asyncio

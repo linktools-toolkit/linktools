@@ -1237,6 +1237,26 @@ The binding contract does not persist Python output import paths or duplicate id
 
 ## 6. Sessions and executions
 
+Persistent SQL chat uses the same session and turn store with or without Step
+checkpoints. With an explicit host authorization policy, use:
+
+```python
+principal = runtime.default_principal
+await runtime.sessions.create_turn_session("chat-1", principal=principal)
+turn_id = await runtime.sessions.start_turn(
+    "chat-1", "inspect the first change", agent_id="audit",
+    principal=principal, idempotency_key="first-change",
+)
+page = await runtime.history.turn_session("chat-1", principal=principal)
+turn = await runtime.history.turn_result("chat-1", turn_id, principal=principal)
+```
+
+The send does not wait for completion. Keep the real turn ID to read its
+status or invoke an explicit cancel/recovery. Agent selection belongs to each
+turn, and application ownership belongs to the host's authorization policy.
+
+### Non-SQL definition-bound sessions
+
 Session metadata and a first turn are available through the default Session capability.
 An unretained completed turn makes its Session context unavailable for later
 resume or fork. To retain model context across resumed turns, register `ExecutionCapability(retain_history=True)` at Runtime scope before

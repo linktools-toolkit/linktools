@@ -67,11 +67,11 @@ def build_runtime_sql_metadata(
     # Every State group can own archived typed content, even when no Native
     # runtime domain is selected. Provision its canonical shared message table
     # with the group rather than waiting for a later route to add Step tables.
-    if "ai_step_messages" not in metadata.tables:
+    if "ai_messages" not in metadata.tables:
         from ._step_schema import build_step_sql_metadata
         existing = set(metadata.tables)
         build_step_sql_metadata(metadata=metadata)
-        for name in set(metadata.tables) - existing - {"ai_step_messages"}:
+        for name in set(metadata.tables) - existing - {"ai_messages"}:
             metadata.remove(metadata.tables[name])
     if "ai_state_records" in metadata.tables:
         return metadata
@@ -86,14 +86,12 @@ def build_runtime_sql_metadata(
     build_record_owner_table(metadata, name="ai_state_records", comment=_RECORD_COMMENT)
     build_record_owner_table(metadata, name="ai_execution_records",
                              comment="Authoritative execution lifecycle, request receipts, and content references.")
-    build_record_owner_table(metadata, name="ai_task_graphs",
-                             comment="Authoritative TaskGraph state and recovery ordering.")
     build_record_owner_table(metadata, name="ai_step_tool_operations",
                              comment="Authoritative Step tool effect ledger, including dispatch fencing and durable receipts.")
     from ._run_admission_schema import build_run_admission_sql_metadata
     build_run_admission_sql_metadata(metadata)
-    from ._turn_sql_schema import build_turn_sql_metadata
-    build_turn_sql_metadata(metadata)
+    from ._session_turn_sql import build_session_turn_sql_metadata
+    build_session_turn_sql_metadata(metadata)
 
 
     facts = Table(
@@ -206,7 +204,7 @@ def build_runtime_sql_metadata(
             "operation_key",
             LargeBinary(OPERATION_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(OPERATION_KEY_MAX_BYTES), "mysql"),
             nullable=False,
-            comment="Binary operation address, at most 768 bytes.",
+            comment=f"Binary operation address, at most {OPERATION_KEY_MAX_BYTES} bytes.",
         ),
         Column(
             "stream_key",

@@ -18,7 +18,7 @@ from ..core import (AuthorizationAction, AuthorizationPolicy, BudgetUsage, Corre
     ExecutionEventType, ExecutionLineageKind, ExecutionStatus, HandoffGate, HandoffState,
     IdempotencyStatus, JsonValue, Principal, ResourceKind, ResourceRef, StopReason, UsageMetrics,
     canonical_sha256, normalize_json_value, overlay_correlation,
-    principal_identity_payload, validate_idempotency_key)
+    principal_identity_payload, validate_execution_request_key)
 from ..errors import AIError, ErrorCode
 from ..storage import StoredPayload
 from ..task import TaskBindingContract, TaskEffectResolution
@@ -394,7 +394,7 @@ class TaskExecutionService:
             },
         )
         scope = "execution.task"
-        idempotency_key = validate_idempotency_key(idempotency_key)
+        idempotency_key = validate_execution_request_key(idempotency_key)
         request_digest = canonical_sha256(
             {
                 "contract": "task-execution-request-v1",

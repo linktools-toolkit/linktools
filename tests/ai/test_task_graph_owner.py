@@ -10,10 +10,9 @@ from sqlalchemy import text
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
-from linktools.ai.persistence._record_owner import record_owner_edge, record_owner_names, record_owner_table
 from linktools.ai.persistence.state import RecordQuery, record_key
 from tests.ai.test_task_recovery_index import _request
-from linktools.ai.task import TaskGraphAdmission
+from linktools.ai.task import TaskGraph, TaskGraphAdmission
 
 
 @pytest.mark.asyncio
@@ -25,9 +24,6 @@ async def test_graph_owner_preserves_generic_queries_and_rollback(tmp_path: Path
         await state.task.admissions.admit(TaskGraphAdmission.from_request(request), request.graph)
         store = state.task.admissions.state_store
         key = record_key("graph-owner", "tenant", "task", "task_graph", ("graph",))
-        assert record_owner_table(key) == "ai_task_graphs"
-        assert record_owner_names(keys=(key,)) == ("ai_task_graphs",)
-        assert record_owner_edge(key) != record_owner_edge(b"opaque")
         raw = await store.read_record(key)
         assert raw is not None
         opaque = replace(raw, key=b"opaque", sort_key=b"opaque")
@@ -37,8 +33,7 @@ async def test_graph_owner_preserves_generic_queries_and_rollback(tmp_path: Path
         assert {row.key for row in await store.read(lambda tx: tx.scan_records())} >= {key, opaque.key}
         if backend == "sqlite":
             async with store.context.engine.connect() as connection:
-                assert await connection.scalar(text("SELECT count(*) FROM ai_task_graphs")) == 1
-                assert await connection.scalar(text("SELECT count(*) FROM ai_state_records WHERE kind='task_graph'")) == 1
+                assert await connection.scalar(text("SELECT count(*) FROM ai_state_records WHERE kind='task_graph'")) == 2
         async def rollback(tx):
             await tx.delete_records((key,))
             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -49,23 +44,8 @@ async def test_graph_owner_preserves_generic_queries_and_rollback(tmp_path: Path
         assert await store.read_record(key) is None
 
 
-@pytest.mark.parametrize("dialect_name", ("mysql", "postgresql", "sqlite"))
-def test_graph_owner_index_budget_and_constant_projection(dialect_name: str) -> None:
-    from sqlalchemy import create_mock_engine, select
-    from linktools.ai.persistence.schema import build_runtime_sql_metadata, PersistenceDomain
-    from linktools.ai.persistence._record_owner import record_owner_rows
-    metadata = build_runtime_sql_metadata(frozenset(PersistenceDomain))
-    table = metadata.tables["ai_task_graphs"]
-    statements = []
-    engine = create_mock_engine(f"{dialect_name}://", lambda sql, *a, **kw: statements.append(str(sql.compile(dialect=engine.dialect))))
-    table.create(engine, checkfirst=False)
-    indexes = [sql for sql in statements if sql.startswith("CREATE INDEX") or sql.startswith("CREATE UNIQUE INDEX")]
-    assert len(table.c) == 20
-    import re
-    constraints = re.findall(r"\b(?:PRIMARY KEY|UNIQUE) \([^()]+\)", " ".join(statements))
-    assert len(indexes) + len(constraints) == 5
-    assert (len(indexes) + len(constraints)) * 3 <= len(table.c)
-    assert all(len(index.columns) <= 3 for index in table.indexes)
-    key = record_key("n", "t", "task", "task_graph", ("g",))
-    sql = str(select(record_owner_rows(metadata, keys=(key,))).compile(dialect=engine.dialect))
-    assert "ai_task_graphs" in sql and "ai_state_records" not in sql
+def test_task_graph_id_byte_limit() -> None:
+    graph_id = "界" * 21 + "a"
+    assert TaskGraph(graph_id, ()).graph_id == graph_id
+    with pytest.raises(ValueError, match="task graph identity"):
+        TaskGraph(graph_id + "b", ())

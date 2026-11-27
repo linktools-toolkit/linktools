@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Agent requests keep their admitted content identity across codec upgrades."""
+"""Agent requests retain one canonical admission identity."""
 
 from dataclasses import replace
 from datetime import datetime, timezone
-import json
-from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import StructuredContent, TextContent
 
-from linktools.ai.core import (ExecutionLineageKind, ExecutionStatus, IdempotencyStatus, Principal, PromptLimits, ResourceKind, WorkspaceFileInput,
-                               canonical_json_bytes)
+from linktools.ai.core import (ExecutionLineageKind, ExecutionStatus, IdempotencyStatus, Principal, PromptLimits,
+                               ResourceKind, WorkspaceFileInput)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionRecord, ExecutionRequest, ExecutionStartClaim, IdempotencyRecord, StoredUserInput
 from linktools.ai.inputs import ExecutionInputMaterializer, encode_user_content
 from linktools.ai.model import ModelBinding, create_model_binding
 from linktools.ai.persistence import Persistence, PersistenceStorage
-from linktools.ai.persistence.codec import decode_domain, encode_domain
 from linktools.ai.runtime._execution import ExecutionStartIdentity, _request_digest
 from linktools.ai.storage import StoredPayload
 
@@ -26,7 +23,6 @@ from .test_history_projection_conformance import _record
 from .test_mixed_pending_admission import _start, _writers
 from . import test_mixed_pending_admission as pending_fixture
 from .test_pending_coordination import _ObservedCache, _claim, _helper
-from .test_session_admission_conformance import _session
 
 _PRINCIPAL = Principal("owner", "tenant", "service")
 
@@ -50,7 +46,7 @@ class _ClaimingLauncher(_Launcher):
         return await self._repository.claim_start(ExecutionStartClaim(
             execution.execution_id, execution.revision, execution.event_seq,
             identity.scope, identity.idempotency_key, identity.request_digest,
-            execution.created_at, identity.request_identity_version,
+            execution.created_at,
         ))
 
 
@@ -72,61 +68,12 @@ async def test_new_agent_requests_bind_complete_structured_content(changed: Stru
         identity = await state.execution.idempotency.get(
             "execution.run", "same", tenant_id="tenant",
         )
-        assert identity.request_identity_version == 2
+        assert identity.request_digest == _digest(request, binding.binding_digest)
         assert backend.calls == 1
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("storage_kind", ("memory", "sqlite"))
-@pytest.mark.parametrize("session", (False, True))
-async def test_old_agent_identity_replays_without_rewriting_owner(storage_kind: str, session: bool, tmp_path: Path) -> None:
-    storage = (PersistenceStorage.in_memory() if storage_kind == "memory" else
-               PersistenceStorage.from_root(tmp_path, exclusive_writer=True))
-    async with Persistence.open("legacy-agent", storage=storage, tenant_id="tenant") as state:
-        backend = _ClaimingLauncher(state.execution.executions)
-        service = _service(state, backend=backend)
-        old_request = replace(_request("placeholder", _PRINCIPAL, "same"), user_prompt=(TextContent("fixed rendering"),))
-        binding = _binding()
-        scope = "session.resume" if session else "execution.run"
-        if session:
-            await state.conversation.sessions.create(replace(_session(), agent_id="agent"))
-
-        async def start(value):
-            return await service._start(
-                binding.binding_digest, value, scope=scope,
-                session_id="session" if session else None,
-                session_agent_id="agent" if session else None,
-            )
-
-        first = await start(old_request)
-        owner = await state.execution.idempotency.get(
-            scope, "same", tenant_id="tenant",
-        )
-        wire = encode_domain(owner)
-        del wire["fields"]["request_identity_version"]
-        legacy = decode_domain(wire, IdempotencyRecord)
-        assert legacy.request_identity_version == 1
-        await state.execution.idempotency.compare_and_swap(
-            legacy.scope, legacy.idempotency_key, tenant_id="tenant",
-            expected_status=owner.status, next_record=legacy,
-        )
-        request = replace(old_request, user_prompt=(_structured(),))
-        assert await start(request) == first
-        if not session:
-            assert await service.resolve_existing(binding.binding_digest, request) == first
-        assert await state.execution.idempotency.get(
-            legacy.scope, legacy.idempotency_key, tenant_id="tenant",
-        ) == legacy
-        assert backend.calls == 1
-        with pytest.raises(AIError) as caught:
-            await start(replace(request, user_prompt=(StructuredContent(
-                {"count": 1}, content="changed rendering", tag="state",
-            ),)))
-        assert caught.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
-
-
-@pytest.mark.asyncio
-async def test_agent_rechecks_concurrent_legacy_owner_using_original_request(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_agent_does_not_launch_concurrent_different_request(monkeypatch: pytest.MonkeyPatch) -> None:
     async with Persistence.open("identity-race", storage=PersistenceStorage.in_memory(), tenant_id="tenant") as state:
         backend = _ClaimingLauncher(state.execution.executions)
         service = _service(state, backend=backend)
@@ -140,28 +87,29 @@ async def test_agent_rechecks_concurrent_legacy_owner_using_original_request(mon
             nonlocal inserted
             if not inserted:
                 inserted = True
-                legacy = replace(
+                winner = replace(
                     proposed,
-                    execution=replace(proposed.execution, execution_id="legacy-winner", root_execution_id="legacy-winner",
+                    execution=replace(proposed.execution, execution_id="different-winner", root_execution_id="different-winner",
                                       stored_user_input=StoredUserInput("user-content-v1", StoredPayload.inline_json(
                                           encode_user_content(old_request.user_prompt)))),
-                    idempotency=replace(proposed.idempotency, resource_id="legacy-winner",
-                                        request_digest=_digest(old_request, binding.binding_digest), request_identity_version=1),
+                    idempotency=replace(proposed.idempotency, resource_id="different-winner",
+                                        request_digest=_digest(old_request, binding.binding_digest)),
                 )
-                await reserve(legacy)
+                await reserve(winner)
             return await reserve(proposed, **kwargs)
 
         monkeypatch.setattr(state.execution.executions, "reserve_start", race)
-        result = await service.start(binding.binding_digest, request)
-        assert result.execution_id == "legacy-winner"
-        assert backend.calls == 1
+        with pytest.raises(AIError) as caught:
+            await service.start(binding.binding_digest, request)
+        assert caught.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+        assert backend.calls == 0
         owner = await state.execution.idempotency.get("execution.run", "same", tenant_id="tenant")
-        assert owner.request_identity_version == 1
+        assert owner.resource_id == "different-winner"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_file", (False, True))
-async def test_local_and_remote_pending_retries_use_the_retained_owner_version(
+async def test_local_and_remote_pending_replay_use_canonical_request(
     with_file: bool, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     if with_file:
@@ -191,18 +139,17 @@ async def test_local_and_remote_pending_retries_use_the_retained_owner_version(
             for service, source in zip((pending, remote), sources):
                 service._input_materializer = ExecutionInputMaterializer(source, PromptLimits())
         async def start(request, reservation, session, coordination):
-            reservation = replace(reservation, idempotency=replace(reservation.idempotency, request_identity_version=1))
             turn, created = pending._runtime_bridge.pending_turns.admit("tenant", reservation, session,
                                                                         now=reservation.execution.created_at)
             assert created
             await pending._runtime_bridge.pending_turns.coordination.publish(
-                turn.execution, coordination, request_identity_version=1,
+                turn.execution, coordination,
             )
             return turn.execution.execution_id
 
         pending._runtime_bridge.pending_start = start
         attachments = (WorkspaceFileInput("input.txt"),) if with_file else ()
-        first = await _start(pending, prompt=(TextContent("fixed rendering"), *attachments))
+        first = await _start(pending, prompt=(_structured(), *attachments))
         assert await _start(pending, prompt=(_structured(), *attachments)) == first
         assert await _start(remote, prompt=(_structured(), *attachments)) == first
         assert remote.runtime_backend().calls == 0
@@ -210,37 +157,31 @@ async def test_local_and_remote_pending_retries_use_the_retained_owner_version(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version", (1, 2))
-async def test_pending_identity_version_requires_confirmed_owner_and_retains_old_omission(version: int) -> None:
+async def test_pending_projection_requires_live_owner() -> None:
     cache = _ObservedCache()
     helper = _helper(cache)
     owned = await _claim(helper)
-    await helper.publish(_record(ExecutionStatus.STARTED, 1), owned, request_identity_version=version)
-    if version == 1:
-        key = cache.record_key()
-        value = json.loads(await cache.get(key))
-        del value["request_identity_version"]
-        await cache.put(key, canonical_json_bytes(value))
-    assert await helper.read_request_identity_version("request", tenant_id="tenant") == version
+    record = _record(ExecutionStatus.STARTED, 1)
+    await helper.publish(record, owned)
+    assert await helper.read_request_execution("request", tenant_id="tenant") == record
     await cache.delete(cache.record_key())
     with pytest.raises(AIError) as caught:
-        await helper.read_request_identity_version("request", tenant_id="tenant")
+        await helper.read_request_execution("request", tenant_id="tenant")
     assert caught.value.code is ErrorCode.EXECUTION_START_UNKNOWN
     await cache.release_turn(owned.lease)
-    assert await helper.read_request_identity_version("request", tenant_id="tenant") is None
+    assert await helper.read_request_execution("request", tenant_id="tenant") is None
 
 
 @pytest.mark.asyncio
-async def test_legacy_failure_receipt_selects_identity_without_execution_payload() -> None:
-    async with Persistence.open("legacy-failure", storage=PersistenceStorage.in_memory(), tenant_id="tenant") as state:
+async def test_canonical_failure_receipt_preserves_error_without_execution_payload() -> None:
+    async with Persistence.open("canonical-failure", storage=PersistenceStorage.in_memory(), tenant_id="tenant") as state:
         backend = _ClaimingLauncher(state.execution.executions)
         service = _service(state, backend=backend)
         binding = _binding()
         request = replace(_request("placeholder", _PRINCIPAL, "same"), user_prompt=(_structured(),))
-        old_request = replace(request, user_prompt=(TextContent("fixed rendering"),))
         now = datetime.now(timezone.utc)
         owner = IdempotencyRecord(
-            "execution.run", "same", _digest(old_request, binding.binding_digest),
+            "execution.run", "same", _digest(request, binding.binding_digest),
             ResourceKind.EXECUTION, "missing-execution", IdempotencyStatus.FAILED, None,
             ErrorCode.EXECUTION_START_PERSISTENCE_FAILED.value, now, now,
         )

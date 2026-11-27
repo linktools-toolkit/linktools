@@ -55,8 +55,7 @@ async def test_terminal_trace_handoff_recovers_same_execution_without_losing_adm
     database = tmp_path / "state.db"
     async with Persistence.open("terminal-trace-handoff", storage=PersistenceStorage.sqlite(database)) as state:
         async with Runtime.open(persistence=state, features=features(blocked), metrics=None) as owner:
-            session = await owner.agents.get().create_session("session")
-            execution = await session.start("Remember blue", idempotency_key="turn")
+            execution = await owner.agents.get().start("Remember blue", idempotency_key="turn")
             await asyncio.wait_for(entered.wait(), 5)
             scopes = tuple(value.id for value in owner._run_store.trace_persistence._buffers.values())
             entries = [entry for scope in scopes for entry in await buffer.read_batch(scope, limit=100)]

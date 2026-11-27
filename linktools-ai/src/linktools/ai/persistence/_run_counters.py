@@ -3,11 +3,10 @@
 """Canonical Step run sequence addresses owned by local admission rows."""
 
 from ._record_key import decode_key_components, encode_key_components
-from ._record_owner import RUN_COUNTER_COLUMNS
+from ._record_owner import RUN_COUNTER_COLUMNS, is_run_admission_address
 from .state import RECORD_KEY_MAX_BYTES, STREAM_KEY_MAX_BYTES, record_key, stream_key, state_store_key
 
 _FAMILIES = ("event", "checkpoint", "interaction")
-_DOMAINS = {"trace", "checkpoint", "conversation"}
 
 
 def run_counter_address(key: bytes, *, store_key: bytes | None = None) -> tuple[bytes, str] | None:
@@ -16,7 +15,7 @@ def run_counter_address(key: bytes, *, store_key: bytes | None = None) -> tuple[
         parts = decode_key_components(key, STREAM_KEY_MAX_BYTES)
     except (ValueError, UnicodeDecodeError):
         return None
-    if len(parts) != 6 or parts[0] != "stream" or parts[3] not in _DOMAINS or parts[4] not in _FAMILIES:
+    if not is_run_admission_address(parts) or parts[0] != "stream" or parts[4] not in _FAMILIES:
         return None
     if store_key is not None:
         try:
@@ -33,7 +32,7 @@ def run_counter_streams(key: bytes, *, store_key: bytes | None = None) -> tuple[
         parts = decode_key_components(key, RECORD_KEY_MAX_BYTES)
     except (ValueError, UnicodeDecodeError):
         return ()
-    if len(parts) != 6 or parts[0] != "record" or parts[3] not in _DOMAINS or parts[4] != "agent_run":
+    if not is_run_admission_address(parts) or parts[0] != "record" or parts[4] != "agent_run":
         return ()
     if store_key is not None:
         try:

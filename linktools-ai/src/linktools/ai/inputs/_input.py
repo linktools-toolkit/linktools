@@ -6,7 +6,7 @@ import binascii
 import hashlib
 import json
 import mimetypes
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol, TypeAlias, cast
 
@@ -38,7 +38,6 @@ from ..model import (
 )
 from ..model.messages import (
     UnsupportedUserContentKind, decode_user_content_item, encode_user_content_item,
-    project_user_content_identity,
 )
 
 if TYPE_CHECKING:
@@ -74,11 +73,11 @@ class InputIntent:
 
 
 def input_intent(
-    value: _UserPromptInput, files: Sequence[str], *, identity_version: int = 2,
+    value: _UserPromptInput, files: Sequence[str],
 ) -> InputIntent:
     canonical = validate_user_input(value)
     normalized_files = normalize_input_files(files)
-    return InputIntent(_draft_prompt(canonical, identity_version=identity_version), normalized_files)
+    return InputIntent(_draft_prompt(canonical), normalized_files)
 
 
 def task_prompt_draft(value: _UserPromptInput) -> TaskPrompt:
@@ -208,6 +207,10 @@ class ExecutionInputMaterializer:
     @property
     def access(self) -> "InputFileSource | None":
         return self._access
+
+    @property
+    def limits(self) -> PromptLimits:
+        return self._limits
 
     async def canonicalize_files(self, files: Sequence[str]) -> tuple[str, ...]:
         raw_files = normalize_input_files(files)
@@ -470,7 +473,7 @@ class ExecutionInputMaterializer:
         return await self.materialize_payload(self.capture(value), tenant_id=tenant_id)
 
     async def materialize_payload(
-        self, value: "StoredUserInput", *, tenant_id: str,
+        self, value: "StoredUserInput", *, tenant_id: str, externalize_text: bool = False,
     ) -> "StoredUserInput":
         """Apply source payload placement to an already frozen accepted input."""
         from ..execution import StoredUserInput
@@ -478,8 +481,13 @@ class ExecutionInputMaterializer:
         if not isinstance(value, StoredUserInput):
             raise TypeError("value must be StoredUserInput")
         payload = value.payload
-        if (value.codec != _USER_CONTENT_CODEC or payload.kind != "inline"
-                or payload.encoding != "json" or self._object_store is None):
+        text = externalize_text and value.codec == _TEXT_CODEC and payload.encoding == "utf-8"
+        if payload.kind != "inline" or (not text and (
+                value.codec != _USER_CONTENT_CODEC or payload.encoding != "json")):
+            return value
+        if self._object_store is None:
+            if text:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY, "Large text input requires object storage")
             return value
         from ..persistence.objects import ObjectKeyFactory, put_runtime_object
 
@@ -490,10 +498,29 @@ class ExecutionInputMaterializer:
                 self._object_store, self._object_key_factory, self._object_domain, tenant_id, data,
             )
 
+        if text:
+            return replace(value, payload=StoredPayload.object(await write(payload.decode().encode("utf-8"))))
+
         placed = await store_attachment_payload(
             canonical_json_bytes(payload.value), format="user-content", write_object=write,
         )
         return value if placed is None else replace(value, payload=placed)
+
+    async def restore_session_input(
+        self, prompt: str, stored: "StoredUserInput | None", *,
+        read_scalar: Callable[["StoredUserInput"], Awaitable[str]],
+    ) -> str | Sequence[UserContent]:
+        """Restore a canonical turn prompt without reopening its workspace source."""
+        if stored is None:
+            return prompt
+        if stored.codec == "text":
+            if prompt:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Turn input has two text owners")
+            return await read_scalar(stored)
+        detached = await self.restore(stored)
+        if isinstance(detached, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Detached turn input is not multipart")
+        return (*detached, prompt) if prompt else tuple(detached)
 
     async def restore(self, value: "StoredUserInput") -> CanonicalUserInput:
         from ..execution import StoredUserInput
@@ -596,9 +623,7 @@ def _binary_parts(
     return tuple(item for item in content if isinstance(item, (BinaryContent, ReferencedContent)))
 
 
-def _draft_prompt(value: _UserPromptInput, *, identity_version: int = 2) -> DraftPrompt:
-    if type(identity_version) is not int or identity_version not in (1, 2):
-        raise ValueError("input identity version is unsupported")
+def _draft_prompt(value: _UserPromptInput) -> DraftPrompt:
     canonical = validate_user_input(value)
     if isinstance(canonical, str):
         return {"kind": "text", "text": canonical}
@@ -631,9 +656,7 @@ def _draft_prompt(value: _UserPromptInput, *, identity_version: int = 2) -> Draf
                 {
                     "kind": "native",
                     "codec": _USER_CONTENT_CODEC,
-                    "value": {"items": [project_user_content_identity(
-                        encode_user_content_item(item), version=identity_version,
-                    )]},
+                    "value": {"items": [encode_user_content_item(item)]},
                 }
             )
     return result

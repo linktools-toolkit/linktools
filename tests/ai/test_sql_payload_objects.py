@@ -52,7 +52,7 @@ def test_sql_payload_objects_round_trip_and_reject_non_object_roots(value, encod
                                                 (postgresql.dialect(), "JSON"),
                                                 (sqlite.dialect(), "JSON")))
 @pytest.mark.parametrize("name", (
-    "ai_state_records", "ai_execution_records", "ai_task_graphs", "ai_state_facts",
+    "ai_state_records", "ai_execution_records", "ai_state_facts",
     "ai_state_operations", "ai_step_run_admissions", "ai_step_tool_operations",
 ))
 def test_sql_state_payload_columns_are_json(dialect, storage_type: str, name: str) -> None:

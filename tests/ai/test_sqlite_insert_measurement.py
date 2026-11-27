@@ -20,7 +20,7 @@ def test_storage_probes_keep_rows_identities_and_body_bytes_with_sql_clocks(many
     if audit_clock:
         columns = columns.replace("message,", "updated_at, message,") + ", created_at"
         values = "?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP"
-    statement = f"INSERT INTO ai_step_messages ({columns}) VALUES ({values})"
+    statement = f"INSERT INTO ai_messages ({columns}) VALUES ({values})"
     rows = (("store", "first", memoryview(b"compressed"), "zlib", 1000, None, "locator"),
             ("store", "second", None, "raw", 20, '{"name":"文"}', "locator"))
     if not many:
@@ -33,18 +33,18 @@ def test_storage_probes_keep_rows_identities_and_body_bytes_with_sql_clocks(many
     assert traffic.message_rows == 2
     assert traffic.message_bytes == len(b"compressed")
     assert traffic.bound_bytes == _SqlTraffic._bytes(parameters)
-    assert identities.identities["ai_step_messages"] == ["first", "second"]
-    assert submissions.submitted_rows["ai_step_messages"] == 2
+    assert identities.identities["ai_messages"] == ["first", "second"]
+    assert submissions.submitted_rows["ai_messages"] == 2
     assert traffic.statements["message_insert"] == 1
 
 
 def test_insert_measurement_rejects_incomplete_parameter_rows():
-    statement = "INSERT INTO ai_step_messages (sha256, message, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)"
+    statement = "INSERT INTO ai_messages (sha256, message, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)"
     with pytest.raises(AssertionError):
         list(bound_insert_rows(statement, ("identity",), False))
 
 
 def test_insert_measurement_rejects_unrecognized_value_expressions():
-    statement = "INSERT INTO ai_step_messages (sha256, message) VALUES (?, NULL)"
+    statement = "INSERT INTO ai_messages (sha256, message) VALUES (?, NULL)"
     with pytest.raises(AssertionError):
         list(bound_insert_rows(statement, ("identity",), False))

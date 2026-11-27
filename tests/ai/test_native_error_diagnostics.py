@@ -42,8 +42,7 @@ async def test_native_and_execution_errors_keep_original_diagnostics_without_tra
             async with Runtime.open(
                 persistence=state, features=model_features(_Models(_UsageFunctionModel(model)), features),
             ) as runtime:
-                session = await runtime.agents.get().create_session("session")
-                execution = await session.start("question", idempotency_key="input")
+                execution = await runtime.agents.get().start("question", idempotency_key="input")
                 result = (await execution.wait(timeout_seconds=5)).result
                 assert result is not None and result.error_diagnostics is not None
                 assert result.error_diagnostics.exception_message == message

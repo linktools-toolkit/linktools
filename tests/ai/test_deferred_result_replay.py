@@ -71,7 +71,7 @@ class _Executions:
     def __init__(self, pending: PendingDeferredCall, *, approvals: bool) -> None:
         self.state_store = _ReadStateStore()
         self.execution = SimpleNamespace(
-            execution_id="execution", principal_id="owner",
+            execution_id="execution", principal_id="owner", parent_execution_id=None,
             status=ExecutionStatus.WAITING_DEFERRED,
             recovery_state=ExecutionRecoveryState.WAITING,
             recovery=ExecutionRecoveryDetail(

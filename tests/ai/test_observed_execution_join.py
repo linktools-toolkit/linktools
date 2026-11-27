@@ -36,11 +36,11 @@ async def test_observed_execution_join_keeps_fresh_native_sources(tmp_path: Path
                 repository.get_observed_in_transaction(transaction, "execution", tenant_id="tenant"))
             assert written == observed
             assert not any("fixed_native_nodes" in statement for statement in statements)
-            assert sum("ai_step_sequences" in statement for statement in statements) == 1
+            assert sum("ai_message_sequences" in statement for statement in statements) == 1
         finally:
             event.remove(group.context.engine.sync_engine, "before_cursor_execute", capture)
         async with group.context.engine.begin() as connection:
-            await connection.execute(text("DELETE FROM ai_step_sequences"))
+            await connection.execute(text("DELETE FROM ai_message_sequences"))
         with pytest.raises(AIError) as missing:
             await repository.get_observed("execution", tenant_id="tenant")
         assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

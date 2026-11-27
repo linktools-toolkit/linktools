@@ -75,10 +75,10 @@ class _Traffic:
             batches = parameters if many else (parameters,)
             self.record_inserts.update(batch[kind_index] for batch in batches)
         if operation == 'INSERT' and any(statement.lstrip().startswith('INSERT INTO ' + table)
-                for table in ('ai_step_messages', 'ai_step_sequences')):
+                for table in ('ai_messages', 'ai_message_sequences')):
             self.native_insert_statements += 1
         if operation in ('INSERT', 'UPDATE', 'DELETE') and any(
-            table in statement.lower() for table in ('ai_step_messages', 'ai_step_sequences')
+            table in statement.lower() for table in ('ai_messages', 'ai_message_sequences')
         ):
             # Count bound text/binary bytes, excluding protocol framing and
             # numeric binds. Do not turn bytes back into a JSON/string estimate.
@@ -126,9 +126,9 @@ class _Traffic:
                 assert "ai_state_records.store_key = ?" in record_sql
                 assert "ai_state_records.key_locator IN (?, ?)" in record_sql
                 assert 'ai_state_records."key",' in record_sql and "ai_state_records.key_locator," in record_sql
-                assert "ai_step_messages.store_locator = ?" in payload_sql
-                assert "ai_step_messages.store_key = ?" in payload_sql
-                assert "ai_step_messages.sha256 = ?" in payload_sql
+                assert "ai_messages.store_locator = ?" in payload_sql
+                assert "ai_messages.store_key = ?" in payload_sql
+                assert "ai_messages.sha256 = ?" in payload_sql
                 # Check selection identities independently of UNION padding
                 # and row-discriminator representation.
                 record_start = record_sql.split("WHERE", 1)[0].count("?")
@@ -142,12 +142,12 @@ class _Traffic:
                            for value in (*record_binds[1:], payload_binds[2]))
                 kinds['binding'] += 1
                 kinds['payload'] += 1
-            elif projection == "SELECT ai_step_sequences.sha256, ai_step_sequences.id":
-                assert "ai_step_sequences.sha256 IN" in statement
+            elif projection == "SELECT ai_message_sequences.sha256, ai_message_sequences.id":
+                assert "ai_message_sequences.sha256 IN" in statement
                 assert parameters == (native_store_locator(store_key), store_key, root)
                 kinds['root'] += 1
-            elif projection.startswith("SELECT ai_step_messages.id,") and payload_store is not None:
-                assert "ai_step_messages.store_key =" in statement and "ai_step_messages.sha256 =" in statement
+            elif projection.startswith("SELECT ai_messages.id,") and payload_store is not None:
+                assert "ai_messages.store_key =" in statement and "ai_messages.sha256 =" in statement
                 assert len(parameters) == 3 and parameters[:2] == (payload_store_locator(payload_store), payload_store)
                 kinds['payload'] += 1
             else:
@@ -221,9 +221,9 @@ class _Traffic:
 
 async def _native_counts(engine, store_key: bytes) -> tuple[int, int, int]:
     async with engine.connect() as connection:
-        table = build_step_sql_metadata().tables['ai_step_messages']
+        table = build_step_sql_metadata().tables['ai_messages']
         bodies = (await connection.execute(select(table.c.message).where(table.c.store_key == store_key))).scalars().all()
-        nodes = await connection.scalar(text('SELECT count(*) FROM ai_step_sequences WHERE store_key = :store_key'), {'store_key': store_key})
+        nodes = await connection.scalar(text('SELECT count(*) FROM ai_message_sequences WHERE store_key = :store_key'), {'store_key': store_key})
     return len(bodies), nodes, sum(_binary_size(body) for body in bodies if body is not None)
 
 
@@ -386,9 +386,9 @@ async def test_shared_owner_writes_and_cold_reads_have_linear_message_cost(
         assert traffic.statements['SELECT'] == before + 1
         typed_query, typed_parameters = traffic.reads[-1]
         assert "content_owners" in typed_query and "content_source" in typed_query
-        assert "ai_step_messages.store_locator =" in typed_query
-        assert "ai_step_messages.store_key =" in typed_query
-        assert "ai_step_messages.sha256 =" in typed_query
+        assert "ai_messages.store_locator =" in typed_query
+        assert "ai_messages.store_key =" in typed_query
+        assert "ai_messages.sha256 =" in typed_query
         assert payload_store_key(namespace, tenant) in typed_parameters
         assert payload_store_locator(payload_store_key(namespace, tenant)) in typed_parameters
         before = traffic.statements['SELECT']
@@ -455,7 +455,7 @@ async def test_cold_native_media_object_is_read_by_snapshot_and_execution_contex
 
         await store.mutate(publish)
         async with store.storage_group.context.engine.connect() as connection:
-            table = build_step_sql_metadata().tables['ai_step_messages']
+            table = build_step_sql_metadata().tables['ai_messages']
             bodies = (await connection.execute(select(table).where(table.c.store_key == native.store_key))).mappings().all()
         assert len(bodies) == 1
         content = ContentRecord.from_native_row(bodies[0])
@@ -557,8 +557,8 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
             assert writer_traffic.reads[reads:] == []
             phase_reads['snapshot'] += writer_traffic.statements['SELECT'] - reads
             budgeted_writes += writer_traffic.assert_writes(write_start, {
-                ('INSERT', 'ai_step_snapshots'): 1, ('INSERT', 'ai_step_messages'): 1,
-                ('INSERT', 'ai_step_sequences'): 1,
+                ('INSERT', 'ai_step_snapshots'): 1, ('INSERT', 'ai_messages'): 1,
+                ('INSERT', 'ai_message_sequences'): 1,
             })
             assert writer_traffic.rows == body_rows
             roots = []
@@ -627,7 +627,7 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
             budgeted_writes += writer_traffic.assert_writes(write_start, {
                 # Owner insert plus content-addressed binding insert-or-verify.
                 ('INSERT', 'ai_execution_records'): 1, ('INSERT', 'ai_state_records'): 1,
-                ('INSERT', 'ai_step_messages'): 1,
+                ('INSERT', 'ai_messages'): 1,
             })
             assert writer_traffic.rows == body_rows
 
@@ -708,5 +708,5 @@ def test_native_byte_accounting_uses_buffer_size() -> None:
     for body in (b"12345678", bytearray(b"12345678"), memoryview(b"12345678").cast("I")):
         assert _binary_size(body) == 8
         traffic = _Traffic()
-        traffic.sql(None, None, "INSERT INTO ai_step_messages (message) VALUES (?)", (body,), None, False)
+        traffic.sql(None, None, "INSERT INTO ai_messages (message) VALUES (?)", (body,), None, False)
         assert traffic.native_bind_bytes == 8

@@ -9,7 +9,7 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
 from linktools.ai.capability import ExecutionCapability
-from linktools.ai.core import CommitPolicy, ExecutionStatus
+from linktools.ai.core import CommitPolicy, ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -23,9 +23,8 @@ from .test_turn_scope_runtime_contract import _ProjectionAuthority
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancelled", (False, True))
-@pytest.mark.parametrize("sessionless", (False, True))
-async def test_pending_unsuccessful_turn_has_one_source_commit_and_no_model_replay(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancelled: bool, sessionless: bool,
+async def test_pending_unsuccessful_standalone_has_one_source_commit_and_no_model_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancelled: bool,
 ) -> None:
     calls = []
 
@@ -46,7 +45,6 @@ async def test_pending_unsuccessful_turn_has_one_source_commit_and_no_model_repl
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
     ) as runtime:
         agent = runtime.agents.get()
-        target = agent if sessionless else await agent.create_session("session")
         commits = []
         original = SqlStorageContext.run_mutation
 
@@ -56,27 +54,91 @@ async def test_pending_unsuccessful_turn_has_one_source_commit_and_no_model_repl
             return result
 
         monkeypatch.setattr(SqlStorageContext, "run_mutation", count)
-        execution = await target.start("question", idempotency_key="first")
+        execution = await agent.start("question", idempotency_key="first")
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status is (ExecutionStatus.CANCELLED if cancelled else ExecutionStatus.FAILED)
         assert len(commits) == 1
         record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert record is not None and record.status is result.status
-        if not sessionless:
-            session = await runtime._state.conversation.sessions.get("session", tenant_id=runtime.tenant_id)
-            assert session.active_execution_id is None
-            assert session.continuation is None
-        if sessionless:
-            with pytest.raises(AIError) as replay:
-                await target.start("question", idempotency_key="first")
-            assert replay.value.code is (ErrorCode.EXECUTION_CANCELLED if cancelled else ErrorCode.INTERNAL_ERROR)
-        else:
-            replay = await target.start("question", idempotency_key="first")
-            assert replay.execution_id == execution.execution_id
-            assert (await replay.wait(timeout_seconds=10)).result.status is result.status
+        with pytest.raises(AIError) as replay:
+            await agent.start("question", idempotency_key="first")
+        assert replay.value.code is (ErrorCode.EXECUTION_CANCELLED if cancelled else ErrorCode.INTERNAL_ERROR)
+        assert len(commits) == 1
         assert len(calls) == 1
-        following = await target.start("next", idempotency_key="second")
+        following = await agent.start("next", idempotency_key="second")
         assert (await following.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
+        assert len(calls) == 2
+
+
+class _SessionAuthority(TenantAuthorizationPolicy):
+    """Explicit native Session host authorization for this test."""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", (False, True))
+async def test_pending_unsuccessful_session_commits_actual_result_once_and_reopens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancelled: bool,
+) -> None:
+    calls = []
+    entered = asyncio.Event()
+
+    async def model(messages, info):
+        calls.append(messages)
+        if len(calls) == 1:
+            if cancelled:
+                entered.set()
+                await asyncio.Event().wait()
+            raise AIError(ErrorCode.INTERNAL_ERROR)
+        return ModelResponse(parts=[TextPart("next answer")])
+
+    features = RuntimeFeatures("pending-outcome")
+    features.agent("default", model="default", allow_tools=())
+    features = model_features(_Models(_UsageFunctionModel(model)), features)
+    database = tmp_path / "state.db"
+    status = ExecutionStatus.CANCELLED if cancelled else ExecutionStatus.FAILED
+
+    async def start(runtime, prompt, key):
+        return await runtime.sessions.start(
+            "session", prompt, agent=runtime.agents.get(), principal=runtime.default_principal,
+            idempotency_key=key,
+        )
+
+    async with Runtime.open("pending-outcome", storage=PersistenceStorage.sqlite(database), features=features,
+                            authorization=_SessionAuthority()) as runtime:
+        session = await runtime.agents.get().create_session("session")
+        repository = runtime._state.session_turns
+        finish = repository.finish
+        commits = []
+
+        async def count(key, **kwargs):
+            result = await finish(key, **kwargs)
+            commits.append((key, kwargs["state"], result))
+            return result
+
+        monkeypatch.setattr(repository, "finish", count)
+        turn = await start(runtime, "question", "first")
+        if cancelled:
+            await asyncio.wait_for(entered.wait(), 5)
+            assert await turn.cancel()
+        result = await turn.wait_final(timeout_seconds=10)
+        assert result.status is status
+        assert result.view.get("output") is None
+        assert commits == [(turn.key, status.value.lower(), True)]
+        assert (await session.inspect())["active_turn_id"] is None
+        assert await runtime._state.execution.executions.get(turn.key.turn_id, tenant_id=runtime.tenant_id) is None
+        replay = await start(runtime, "question", "first")
+        assert replay.key == turn.key
+        assert (await replay.wait_final(timeout_seconds=10)).status is status
+        assert len(calls) == len(commits) == 1
+
+    async with Runtime.open("pending-outcome", storage=PersistenceStorage.sqlite(database), features=features,
+                            authorization=_SessionAuthority()) as reopened:
+        replay = await start(reopened, "question", "first")
+        assert replay.key == turn.key
+        assert (await replay.wait_final(timeout_seconds=10)).status is status
+        assert len(calls) == 1
+        following = await start(reopened, "next", "second")
+        assert (await following.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
         assert len(calls) == 2
 
 
@@ -127,8 +189,7 @@ async def test_pending_source_dispatch_rechecks_ownership_after_context_material
                 return await original(*args, **kwargs)
 
             monkeypatch.setattr(backend._context_archive, "prepare", gated)
-            session = await runtime.agents.get().create_session("session")
-            execution = await session.start("question")
+            execution = await runtime.agents.get().start("question")
             await asyncio.wait_for(model_entered.wait(), 5)
             promotion = asyncio.create_task(backend.promote_pending_execution(execution.execution_id)) if phase == "promotion" else None
             await asyncio.wait_for(prepare_entered.wait(), 5)
@@ -233,8 +294,7 @@ async def test_pending_tools_share_local_owner_without_per_call_renewal(
                 tool_boundary.reset(token)
 
         monkeypatch.setattr(backend, "require_tool_authority", require_tool_authority)
-        session = await runtime.agents.get().create_session("session")
-        execution = await session.start("question", idempotency_key="once")
+        execution = await runtime.agents.get().start("question", idempotency_key="once")
         if lost:
             with pytest.raises(AIError) as raised:
                 await execution.wait(timeout_seconds=10)

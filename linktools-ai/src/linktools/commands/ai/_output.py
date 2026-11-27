@@ -7,6 +7,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+from secrets import token_urlsafe
 
 from rich import get_console
 from rich.console import Console
@@ -15,6 +16,7 @@ from rich.text import Text
 from linktools.cli import CommandError
 from linktools.core import environ
 from linktools.ai.core import ExecutionDeltaType, ExecutionEventType, ExecutionStatus
+from linktools.ai.errors import AIError, ErrorCode
 
 if TYPE_CHECKING:
     from linktools.ai.execution import Execution, ExecutionResult, ExecutionTreeEvent
@@ -30,9 +32,14 @@ async def emit_result(
     thinking: bool | None,
 ) -> int:
     """Wait or stream an execution, cancelling owned work on interruption."""
+    from linktools.ai.runtime.turn_clients import uses_turn_sessions
+
+    native = uses_turn_sessions(runtime)
+    if native and not planning:
+        return await _emit_session_result(runtime, prompt, session_id, as_json, thinking)
     execution = await runtime.agents.get().start(
         prompt,
-        session_id=session_id,
+        session_id=None if native else session_id,
         planning=planning,
         thinking=thinking,
     )
@@ -46,6 +53,76 @@ async def emit_result(
     except asyncio.CancelledError:
         await _cancel_interrupted_execution(execution)
         raise
+
+
+async def _emit_session_result(
+    runtime: "Runtime", prompt: str, session_id: str, as_json: bool, thinking: bool | None,
+) -> int:
+    from linktools.ai.runtime.turn_clients import TurnObserver
+    from linktools.ai.session import ToolProcessItem
+
+    principal = runtime.default_principal
+    try:
+        await runtime.sessions.create_turn_session(
+            session_id, principal=principal, idempotency_key=f"ai-run:{session_id}",
+        )
+    except AIError as error:
+        if error.code is not ErrorCode.SESSION_CONFLICT:
+            raise
+
+    event_console = Console(stderr=True)
+    output = _AttemptOutput(get_console(), event_console)
+    turn_id = None
+    try:
+        with TurnObserver(runtime, session_id, principal, local_workspace=True, preview=not as_json) as observer:
+            turn_id = await runtime.sessions.start_turn(
+                session_id, prompt, agent="default", principal=principal,
+                idempotency_key=token_urlsafe(9), thinking=thinking,
+            )
+            async for frame in observer.events(turn_id):
+                kind = frame["type"]
+                if kind == "terminal":
+                    break
+                if as_json:
+                    continue
+                if kind in ("gap", "preview_reset"):
+                    output.boundary("Preview incomplete; committed output follows on completion")
+                elif kind == "delta" and isinstance(text := frame.get("text"), str) and text:
+                    if frame.get("delta_kind") == "text":
+                        output.write_text(text)
+                    elif frame.get("delta_kind") == "thinking":
+                        _emit_event(event_console, "[thinking]", text, "cyan")
+                elif kind == "tool" and isinstance(item := frame.get("item"), Mapping):
+                    if (tool := ToolProcessItem.from_notice(item)) is not None:
+                        running = tool.status == "RUNNING"
+                        _emit_event(
+                            event_console, "[tool]" if running else "[tool] finished",
+                            f"{tool.tool_name} · #{tool.key.removeprefix('tool:')}",
+                            "yellow" if running else "green",
+                        )
+    except asyncio.CancelledError:
+        if turn_id is not None:
+            await runtime.sessions.cancel_turn(session_id, turn_id, principal=principal)
+        raise
+
+    status = str(frame["state"]).upper()
+    error_code = frame.get("error_code")
+    result = frame.get("output")
+    text = result.get("text") if isinstance(result, Mapping) else None
+    if as_json:
+        print(json.dumps({
+            "turn_id": turn_id, "status": status,
+            "output": result, "error_code": error_code,
+            "safe_error_details": {}, "error_diagnostics": None,
+        }, ensure_ascii=False, sort_keys=True))
+    elif status == "SUCCEEDED" and isinstance(text, str) and (observer.incomplete or not output.line_open):
+        output.write_text(text)
+    output.close_line()
+    if status != "SUCCEEDED":
+        raise CommandError(_failure_message(turn_id, status, error_code, {}))
+    if not as_json:
+        _emit_event(event_console, "✓ SUCCEEDED", turn_id, "green")
+    return 0
 
 
 async def _stream_result(execution: "Execution[object]") -> int:

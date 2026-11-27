@@ -63,7 +63,7 @@ configurations. Native-only equality has a real terminal writer regression: no
 ordinary content reads, unchanged fixed Native reference, and corrupted Native
 bytes rejected in the next transaction. Offline ownership tests retain Native
 body/encoding/cold-range bounds and prohibit online edge/collector DML. Typed
-payload rows in `ai_step_messages` are counted separately by exact store partition,
+payload rows in `ai_messages` are counted separately by exact store partition,
 not mistaken for duplicated Native messages.
 
 The keyed JOIN regression performs a genuinely cold first get without opening

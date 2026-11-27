@@ -71,14 +71,14 @@ class _MemoryRecordOwners(MutableMapping[bytes, StoredRecord]):
         self.payload_rows: dict[tuple[bytes, str], dict[str, object]] = {}
 
     def validate(self, record: StoredRecord) -> None:
-        if self._archive and record_owner_table(record.key, store_key=STATE_GROUP_ARCHIVE_KEY) == "ai_step_messages":
+        if self._archive and record_owner_table(record.key, store_key=STATE_GROUP_ARCHIVE_KEY) == "ai_messages":
             from ._step_payload_owner import payload_record_values
             payload_record_values(record)
 
     def __getitem__(self, key: bytes) -> StoredRecord:
         if record_owner_table(key) == "ai_step_run_admissions":
             return self.run_admissions[key].record
-        if self._archive and record_owner_table(key, store_key=STATE_GROUP_ARCHIVE_KEY) == "ai_step_messages":
+        if self._archive and record_owner_table(key, store_key=STATE_GROUP_ARCHIVE_KEY) == "ai_messages":
             from ._step_payload_owner import payload_address, payload_record_from_row
             return payload_record_from_row(self.payload_rows[payload_address(key)])
         return self._owners[record_owner_table(key)][key]
@@ -88,7 +88,7 @@ class _MemoryRecordOwners(MutableMapping[bytes, StoredRecord]):
             previous = self.run_admissions.get(key)
             self.run_admissions[key] = (_MemoryRunAdmission(value) if previous is None else replace(previous, record=value))
             return
-        if self._archive and record_owner_table(key, store_key=STATE_GROUP_ARCHIVE_KEY) == "ai_step_messages":
+        if self._archive and record_owner_table(key, store_key=STATE_GROUP_ARCHIVE_KEY) == "ai_messages":
             from ._step_payload_owner import payload_address, payload_record_values
             self.payload_rows[payload_address(key)] = payload_record_values(value)
             return
@@ -98,7 +98,7 @@ class _MemoryRecordOwners(MutableMapping[bytes, StoredRecord]):
         if record_owner_table(key) == "ai_step_run_admissions":
             del self.run_admissions[key]
             return
-        if self._archive and record_owner_table(key, store_key=STATE_GROUP_ARCHIVE_KEY) == "ai_step_messages":
+        if self._archive and record_owner_table(key, store_key=STATE_GROUP_ARCHIVE_KEY) == "ai_messages":
             from ._step_payload_owner import payload_address
             del self.payload_rows[payload_address(key)]
             return

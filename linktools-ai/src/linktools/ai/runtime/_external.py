@@ -7,6 +7,8 @@ import json
 from datetime import datetime, timezone
 from typing import Protocol
 
+from ._session_deferred import SessionDeferredCommands, SessionTurnKey
+
 from linktools.core import environ
 from ..core import (
     AuthorizationAction,
@@ -33,7 +35,7 @@ from ..execution import (
     ExternalSupplyRequest,
     ExternalSupplyResult,
 )
-from ..execution import ExecutionRecord, ExecutionRecoveryState
+from ..execution import ExecutionRecord, ExecutionRecoveryState, PendingToolContinuation
 from ..persistence.contracts import (
     deferred_resource_id,
     ExternalCallRecord,
@@ -68,6 +70,7 @@ class DefaultExternalService:
         objects: ObjectStore,
         object_key_factory: ObjectKeyFactory,
         continuation: _DeferredContinuation | None = None,
+        session_deferred: SessionDeferredCommands | None = None,
     ) -> None:
         self._calls = calls
         self._executions = executions
@@ -75,56 +78,55 @@ class DefaultExternalService:
         self._objects = objects
         self._object_key_factory = object_key_factory
         self._continuation = continuation
+        self._session_deferred = session_deferred
 
     async def list(
         self,
-        execution_id: str,
+        execution_id: str | SessionTurnKey,
         *,
         principal: Principal,
     ) -> tuple[ExternalCallView, ...]:
-        execution = await self._waiting_execution(
-            execution_id, principal=principal,
-            action=AuthorizationAction.EXTERNAL_READ,
-        )
-        if execution is None or execution.recovery is None or execution.recovery.pending_tools is None:
+        _, pending = await self._waiting(execution_id, principal=principal, action=AuthorizationAction.EXTERNAL_READ)
+        if pending is None:
             return ()
+        if isinstance(execution_id, SessionTurnKey):
+            execution_id = execution_id.turn_id
         views: list[ExternalCallView] = []
-        for pending in execution.recovery.pending_tools.calls:
+        for item in pending.calls:
             call_id = deferred_resource_id(
                 "external-call-v1",
                 principal.tenant_id,
                 execution_id,
-                execution.recovery.pending_tools.source_agent_run_id,
-                pending.tool_call_id,
+                pending.source_agent_run_id,
+                item.tool_call_id,
             )
             record = await self._calls.get(call_id, tenant_id=principal.tenant_id)
             if record is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            arguments = await _decode_json_payload(self._objects, pending.arguments_payload)
+            arguments = await _decode_json_payload(self._objects, item.arguments_payload)
             views.append(
                 ExternalCallView(
                     call_id,
                     record.status.value,
-                    pending.tool_name,
+                    item.tool_name,
                     arguments,
-                    dict(pending.metadata),
+                    dict(item.metadata),
                 )
             )
         return tuple(views)
 
     async def supply(
         self,
-        execution_id: str,
+        execution_id: str | SessionTurnKey,
         request: ExternalSupplyRequest,
     ) -> ExternalSupplyResult:
-        execution = await self._waiting_execution(
-            execution_id, principal=request.principal,
-            action=AuthorizationAction.EXTERNAL_SUPPLY,
+        frontier, continuation = await self._waiting(
+            execution_id, principal=request.principal, action=AuthorizationAction.EXTERNAL_SUPPLY,
         )
+        if isinstance(execution_id, SessionTurnKey):
+            execution_id = execution_id.turn_id
         pending = _pending_call(
-            execution,
-            request.call_id,
-            tenant_id=request.principal.tenant_id,
+            continuation, execution_id, request.call_id, tenant_id=request.principal.tenant_id,
         )
         if pending is None:
             raise AIError(ErrorCode.EXTERNAL_RESULT_CONFLICT)
@@ -134,39 +136,56 @@ class DefaultExternalService:
         )
         if record is None or record.execution_id != execution_id:
             raise AIError(ErrorCode.EXTERNAL_RESULT_CONFLICT)
+        async def read_exact():
+            observed = await self._calls.get(request.call_id, tenant_id=request.principal.tenant_id)
+            return observed if await self._is_exact_replay(observed, execution_id=execution_id, request=request) else None
+
         if record.status is ExternalCallStatus.SUPPLIED:
             if not await self._is_exact_replay(record, execution_id=execution_id, request=request):
                 raise AIError(ErrorCode.EXTERNAL_RESULT_CONFLICT)
-            updated = record
+            if frontier is not None and self._session_deferred.uses_split_receipts(self._calls.state_store):
+                # Resume the handoff, not the already completed supply command.
+                async def existing():
+                    return record
+
+                updated = await self._session_deferred.settle(
+                    frontier, self._calls.state_store, existing, read_exact=read_exact,
+                )
+            else:
+                updated = record
         else:
             payload, resolution_kind = await self._resolution_payload(request)
-            try:
-                updated = await self._calls.supply(
-                    request.call_id,
-                    tenant_id=request.principal.tenant_id,
-                    expected_status=ExternalCallStatus.PENDING,
-                    idempotency_key=request.idempotency_key,
-                    resolution_kind=resolution_kind,
-                    result_payload=payload,
-                    resolution_metadata=dict(request.metadata),
-                    supplied_at=datetime.now(timezone.utc),
-                )
-            except (AIError, asyncio.CancelledError) as error:
-                if isinstance(error, AIError) and error.code not in {
-                    ErrorCode.EXTERNAL_RESULT_CONFLICT, ErrorCode.STORAGE_CONFLICT, ErrorCode.STORAGE_COMMIT_UNKNOWN,
-                }:
-                    raise
+            async def settle():
                 try:
-                    updated = await self._calls.get(
+                    updated = await self._calls.supply(
                         request.call_id,
                         tenant_id=request.principal.tenant_id,
+                        expected_status=ExternalCallStatus.PENDING,
+                        idempotency_key=request.idempotency_key,
+                        resolution_kind=resolution_kind,
+                        result_payload=payload,
+                        resolution_metadata=dict(request.metadata),
+                        supplied_at=datetime.now(timezone.utc),
                     )
-                    replay = await self._is_exact_replay(updated, execution_id=execution_id, request=request)
-                finally:
-                    if isinstance(error, asyncio.CancelledError):
-                        raise error
-                if not replay:
-                    raise
+                except (AIError, asyncio.CancelledError) as error:
+                    if isinstance(error, AIError) and error.code not in {
+                        ErrorCode.EXTERNAL_RESULT_CONFLICT, ErrorCode.STORAGE_CONFLICT, ErrorCode.STORAGE_COMMIT_UNKNOWN,
+                    }:
+                        raise
+                    try:
+                        updated = await read_exact()
+                    finally:
+                        if isinstance(error, asyncio.CancelledError):
+                            raise error
+                    if updated is None:
+                        raise
+                return updated
+            if frontier is None:
+                updated = await settle()
+            else:
+                updated = await self._session_deferred.settle(
+                    frontier, self._calls.state_store, settle, read_exact=read_exact,
+                )
         if updated is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _logger.info(
@@ -175,7 +194,10 @@ class DefaultExternalService:
             request.call_id,
             updated.resolution_kind,
         )
-        await _reconcile(self._continuation, execution_id, request.principal.tenant_id)
+        if frontier is not None:
+            await self._session_deferred.resume(frontier, receipt_store=self._calls.state_store)
+        else:
+            await _reconcile(self._continuation, execution_id, request.principal.tenant_id)
         return ExternalSupplyResult(request.call_id, request.idempotency_key, True)
 
     async def _is_exact_replay(
@@ -202,6 +224,15 @@ class DefaultExternalService:
             return (record.resolution_kind == ("retry" if isinstance(resolution, ExternalCallRetry) else "failed")
                     and record.result_payload == StoredPayload.inline_text(resolution.message))
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
+    async def _waiting(self, execution_id: str | SessionTurnKey, *, principal: Principal, action: AuthorizationAction):
+        if isinstance(execution_id, SessionTurnKey):
+            if self._session_deferred is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            current = await self._session_deferred.read(execution_id, principal=principal, action=action)
+            return (None, None) if current is None else current
+        execution = await self._waiting_execution(execution_id, principal=principal, action=action)
+        return None, None if execution is None else execution.recovery.pending_tools
 
     async def _waiting_execution(
         self,
@@ -248,19 +279,20 @@ class DefaultExternalService:
 
 
 def _pending_call(
-    execution: ExecutionRecord | None,
+    continuation: PendingToolContinuation | None,
+    execution_id: str,
     call_id: str,
     *,
     tenant_id: str,
 ) -> PendingDeferredCall | None:
-    if execution is None or execution.recovery is None or execution.recovery.pending_tools is None:
+    if continuation is None:
         return None
-    for pending in execution.recovery.pending_tools.calls:
+    for pending in continuation.calls:
         candidate = deferred_resource_id(
             "external-call-v1",
             tenant_id,
-            execution.execution_id,
-            execution.recovery.pending_tools.source_agent_run_id,
+            execution_id,
+            continuation.source_agent_run_id,
             pending.tool_call_id,
         )
         if candidate == call_id:

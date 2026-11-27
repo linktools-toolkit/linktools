@@ -3,15 +3,18 @@
 """Runtime-owned tool authorization and durable operation contracts."""
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from uuid import uuid4
 from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import TypeAdapter
 from pydantic_ai_harness.step_persistence import RunRecord, StepEvent, StepStore, ToolEffectRecord
 from linktools.core import environ
 from pydantic_ai.messages import (
+    ModelMessage,
     ModelRequest,
     ToolCallPart,
     ToolReturnPart,
@@ -19,6 +22,8 @@ from pydantic_ai.messages import (
 from pydantic_ai.tools import RunContext as PydanticRunContext, ToolDefinition
 
 from ..core import (
+    ApprovalStatus,
+    ExternalCallStatus,
     deterministic_id,
     JsonValue,
     ToolOperationStatus,
@@ -28,7 +33,7 @@ from ..core import (
     validate_resource_id,
     validate_tenant_id,
 )
-from ..capability import ToolCallFailed, ToolCallRetry
+from ..capability import PydanticToolControlCapability, ToolCallFailed, ToolCallRetry
 from ..errors import AIError, ErrorCode
 from ..storage import (
     ObjectStore,
@@ -42,13 +47,105 @@ from ..persistence.state import Observed
 from ..persistence.contracts import ToolOperationAdmission
 from ..spec import CapabilityRef
 from ..persistence.durability import CommitObservation, DurableCommitState, await_owned_task, run_durable_commit
-from ..persistence.contracts import ToolOperationRecord, decode_tool_operation_failure
+from ..persistence.contracts import (
+    ApprovalRecord, ExternalCallRecord, ToolOperationRecord, ToolStateRepository,
+    decode_tool_operation_failure, deferred_resource_id,
+)
 from ..execution import tool_operation_id, TOOL_OPERATION_ID_METADATA_KEY
 
 if TYPE_CHECKING:
-    from ..execution import ExecutionRecord
+    from ..execution import ExecutionRecord, PendingDeferredCall
+    from ..persistence.state import StateStore, StateTransaction
+    from ..persistence.turns import SessionTurnKey
 
 _logger = environ.get_logger("ai.runtime.tool")
+
+
+TOOL_CAPABILITY_REF_METADATA_KEY = "linktools.ai.capability_ref"
+_INTERRUPTED_TOOL_RECEIPT = "linktools.ai.interrupted_tool_receipt"
+_INTERRUPTED_TOOL_MESSAGE = "Task interrupted; tool outcome unknown. Do not retry this tool call automatically."
+
+
+def tool_capability_ref(tool: ToolDefinition) -> CapabilityRef | None:
+    """Read the execution identity carried by the provided native definition."""
+    value = (tool.metadata or {}).get(TOOL_CAPABILITY_REF_METADATA_KEY)
+    return None if value is None else CapabilityRef.from_payload(value)
+
+
+async def settle_canonical_deferred_leaf(
+    repository: ToolStateRepository, *, checkpoint_objects: ObjectStore, namespace: str, tenant_id: str,
+    turn_id: str, generation: int, pending: "PendingDeferredCall", resolution: ApprovalRecord | ExternalCallRecord,
+    external_value: object = None,
+) -> ToolOperationRecord:
+    """Publish a resolved leaf in the already-held waiting-turn receipt boundary."""
+    if resolution.execution_id != turn_id:
+        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+    if isinstance(resolution, ApprovalRecord):
+        identity = deferred_resource_id("approval-v1", tenant_id, turn_id, turn_id, pending.tool_call_id)
+        if (resolution.approval_id != identity
+                or resolution.status not in {ApprovalStatus.DENIED, ApprovalStatus.CANCELLED}):
+            raise AIError(ErrorCode.APPROVAL_CONFLICT)
+        kind = "failed"
+        value = resolution.decision_message or "The tool call was denied."
+    else:
+        identity = deferred_resource_id("external-call-v1", tenant_id, turn_id, turn_id, pending.tool_call_id)
+        if (resolution.call_id != identity or resolution.status is not ExternalCallStatus.SUPPLIED
+                or resolution.result_payload is None or resolution.supplied_at is None
+                or resolution.resolution_kind not in {"succeeded", "retry", "failed"}):
+            raise AIError(ErrorCode.EXTERNAL_RESULT_CONFLICT)
+        kind = resolution.resolution_kind
+        value = external_value
+
+    current = await repository.get_operation(pending.operation_id, tenant_id=tenant_id)
+    if current is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if (
+        current.execution_id != turn_id or current.agent_run_id != turn_id
+        or current.tool_call_id != pending.tool_call_id or current.tool_name != pending.tool_name
+        or current.producer_generation != generation or current.owner is not None
+    ):
+        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+    result = error_code = error_payload = None
+    if kind == "succeeded":
+        # The canonical timestamp comes from the already persisted receipt,
+        # making repeated settlement byte-for-byte equivalent.
+        encoded = encode_model_messages((ModelRequest(parts=[
+            ToolReturnPart("runtime", value, tool_call_id=pending.operation_id, timestamp=resolution.supplied_at),
+        ]),))
+        keys = ObjectKeyFactory(namespace)
+        result = await store_attachment_payload(
+            encoded, format="model-messages", write_object=lambda body: put_runtime_object(
+                checkpoint_objects, keys, PersistenceDomain.CHECKPOINT, tenant_id, body,
+            ),
+        )
+        if result is None:
+            result = StoredPayload.inline_bytes(encoded)
+    else:
+        if not isinstance(value, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        error_code, error_payload = _encode_tool_failure(
+            ToolCallRetry(value) if kind == "retry" else ToolCallFailed(value),
+        )
+
+    return await repository.settle_deferred_result(
+        current, result_payload=result, error_code=error_code, error_payload=error_payload,
+    )
+
+
+def _encode_tool_failure(error: ToolCallRetry | ToolCallFailed) -> tuple[str, StoredPayload]:
+    if isinstance(error, ToolCallRetry):
+        code = ErrorCode.TOOL_RETRY_REQUIRED.value
+        kind = "tool_call_rejected"
+    elif isinstance(error, ToolCallFailed):
+        code = ErrorCode.TOOL_EXECUTION_FAILED.value
+        kind = "tool_call_failed"
+    else:
+        raise TypeError("tool failure must be a LinkTools tool signal")
+    return code, StoredPayload.inline_bytes(canonical_json_bytes({
+        "version": 1, "kind": kind, "message": error.message,
+    }))
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,6 +400,7 @@ class RuntimeToolOperationBridge:
         self._fresh_execution = fresh_execution
         self._terminal_commands = terminal_commands
         self._budget_scope_id = budget_scope_id
+        self._canonical_budget = None
         self._pending_tools = pending_tools
         if pending_tools is not None and (budget_scope_id is not None or recovery_agent_run_id is not None):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
@@ -319,11 +417,16 @@ class RuntimeToolOperationBridge:
         self._tool_events: dict[str, StepEvent] = {}
         self._admission_attempts: set[str] = set()
         self._native_step_store: StepStore | None = None
+        self._canonical_defer = None
+        self._canonical_pause = None
         self._native_run: RunRecord | None = None
+        self._canonical_event_projection: Callable[[StepEvent], StepEvent] | None = None
+        self._canonical_event_writer: Callable[[StepEvent], Awaitable[None]] | None = None
         self._prepared_boundaries: tuple[ToolAdmissionBoundary, ToolTerminalBoundary, ToolUnknownBoundary | None] | None = None
         if producer_generation is not None and terminal_commands is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         self._effect_receipts: dict[str, Observed[ToolOperationRecord]] = {}
+        self._reported_interruptions: dict[str, ToolOperationRecord] = {}
         self._decisions: dict[tuple[str, str], ToolOperationDecision] = {}
         self._decision_fingerprints: dict[tuple[str, str], tuple[str, str]] = {}
 
@@ -353,6 +456,216 @@ class RuntimeToolOperationBridge:
             admission, terminal, unknown = self._prepared_boundaries or (self._split_admission, self._split_terminal, None)
             self.bind_boundaries(admission=admission, terminal=terminal, unknown=unknown)
         self._prepared_boundaries = None
+
+    _settled_split_resume = False
+    _split_approved_operation: ToolOperationRecord | None = None
+    _split_approval_ref: CapabilityRef | None = None
+    _split_approval_args: tuple[str, str, bool, dict[str, Any]] | None = None
+
+    def _capture_split_approval(self, call: ToolCallPart, tool_def: ToolDefinition, args: dict[str, Any]) -> None:
+        from ..capability import tool_effect_policy_from_metadata
+
+        if tool_def.kind != "unapproved" or self._split_approval_ref is None:
+            return
+        if tool_capability_ref(tool_def) != self._split_approval_ref or call.tool_name != tool_def.name:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        policy = tool_effect_policy_from_metadata(tool_def.metadata, require=True)
+        self._split_approval_args = call.tool_call_id, call.tool_name, policy == "replay_safe", _portable_arguments(args)
+
+    async def _consume_split_approval(self, call: ToolCallPart) -> ToolOperationRecord:
+        captured, ref = self._split_approval_args, self._split_approval_ref
+        if (captured is None or ref is None or self._producer_generation != 1
+                or (call.tool_call_id, call.tool_name) != captured[:2]):
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        return await self._pending_tool_record(call, captured[3], replay_safe=captured[2], capability_ref=ref)
+
+    def configure_canonical_budget(self, scope_id: str, repository) -> None:
+        if self._canonical_event_writer is None or self._budget_scope_id is not None or self._decisions:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        self._canonical_budget = repository
+        self._budget_scope_id = scope_id
+
+    def prepare_canonical_boundaries(
+        self, native: SqlStepStore, *, state_store: "StateStore", key: "SessionTurnKey", generation: int,
+        guard: Callable[["StateTransaction"], Awaitable[None]],
+        prepare_event: Callable[[StepEvent], StepEvent],
+        resuming_approval: Callable[[], tuple["StateStore", Callable[..., Awaitable[Observed[ToolOperationRecord]]]]
+                                    | None] | None = None,
+    ) -> None:
+        """Bind leaf ownership to an admitted canonical turn, not an Execution producer."""
+
+        repository = self._repository
+        group = state_store.storage_group
+        if (not isinstance(repository, ToolStateRepository) or repository.state_store.storage_group is not group
+                or self._execution_id != key.turn_id or self._pending_tools is not None
+                or self._terminal_commands is not None or self._producer_generation is not None
+                or self._decisions or self._native_step_store is not None):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        members = tuple(dict.fromkeys((state_store, repository.state_store)))
+
+        async def publish_event(event: StepEvent) -> None:
+            if event.run_id != self._agent_run_id:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            prepared = await native.prepare_step(events=(prepare_event(event),))
+            async def write(transaction):
+                return await native.write_prepared_step(transaction.transaction(state_store), prepared, turn_guard=guard)
+            receipt = await group.mutate((state_store,), write)
+            native.confirm_prepared_step(receipt)
+
+        async def admit(request, *, observed, event, known_new):
+            if (request.execution_id != key.turn_id or request.producer_generation != generation
+                    or request.agent_run_id != self._agent_run_id or event.run_id != self._agent_run_id):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            prepared = await native.prepare_step(events=(prepare_event(event),))
+
+            budget = self._canonical_budget
+            admitted_scope = self._budget_scope_id
+            budget_receipt = uuid4().hex if budget is not None else None
+            participants = members
+            approved = None if resuming_approval is None else resuming_approval()
+            if approved is not None:
+                approval_store, _ = approved
+                if budget is not None or approval_store.storage_group is not group:
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                participants = tuple(dict.fromkeys((*participants, approval_store)))
+                await self.require_active()
+            if budget is not None:
+                if budget.state_store.storage_group is not group or admitted_scope is None:
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                participants = tuple(dict.fromkeys((*members, budget.state_store)))
+
+            async def write(transaction):
+                # The tool receipt and its start event commit in the same
+                # transaction that proves this generation still may dispatch.
+                if approved is None:
+                    await guard(transaction.transaction(state_store))
+                    effect = await repository.admit_in_transaction(
+                        transaction.transaction(repository.state_store), request, observed=observed, known_new=known_new,
+                    )
+                else:
+                    # This port rejects any operation other than the retained
+                    # approved leaf, including duplicate/unknown claims.
+                    effect = await approved[1](transaction, request)
+                if effect.value.status is ToolOperationStatus.CLAIMED and effect.value.producer_generation != generation:
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                if budget is not None and effect.value.status is ToolOperationStatus.CLAIMED:
+                    call_identity = canonical_sha256({
+                        "execution_id": effect.value.execution_id, "tool_operation_id": effect.value.tool_operation_id,
+                        "fence": effect.value.fence,
+                    })
+                    await budget.admit_tool_in_transaction(
+                        transaction.transaction(budget.state_store), admitted_scope, call_identity,
+                        admission_id=budget_receipt,
+                    )
+                receipt = await native.write_prepared_step(transaction.transaction(state_store), prepared)
+                return effect, receipt
+
+            async def commit():
+                return await group.mutate(participants, write)
+
+            effect, receipt = await commit() if budget is None else await budget.retry_admission(commit)
+            native.confirm_prepared_step(receipt)
+            return effect
+
+        def require_admitted(observed, *, operation_id, tenant_id, owner, fence):
+            value = None if observed is None else observed.value
+            if (value is None or tenant_id != self._tenant_id or owner != self._owner
+                    or (value.tool_operation_id, value.execution_id, value.agent_run_id, value.producer_generation,
+                        value.owner, value.fence) != (operation_id, key.turn_id, self._agent_run_id, generation, owner, fence)):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+        async def terminal(operation_id, *, tenant_id, owner, fence, observed, event, result_payload=None,
+                           error_code=None, error_payload=None):
+            if observed is None:
+                # The existing commit readback can invalidate its local receipt.
+                observed = await repository.observe_operation(operation_id, tenant_id=tenant_id)
+            require_admitted(observed, operation_id=operation_id, tenant_id=tenant_id, owner=owner, fence=fence)
+            if event.run_id != self._agent_run_id:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            prepared = await native.prepare_step(events=(prepare_event(event),))
+            if (result_payload is None and (error_code is None or error_payload is None)) or (
+                result_payload is not None and (error_code is not None or error_payload is not None)
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+            async def write(transaction):
+                # Stop/expiry does not erase a known leaf outcome. Its retained
+                # operation owner, generation and fence are the write proof.
+                # The event belongs only to that attempt, not the public turn.
+                tools = transaction.transaction(repository.state_store)
+                if result_payload is not None:
+                    effect = await repository.complete_in_transaction(
+                        tools, operation_id, tenant_id=tenant_id, owner=owner, fence=fence,
+                        result_payload=result_payload, observed=observed,
+                    )
+                else:
+                    effect = await repository.fail_in_transaction(
+                        tools, operation_id, tenant_id=tenant_id, owner=owner, fence=fence,
+                        error_code=error_code, error_payload=error_payload, observed=observed,
+                    )
+                receipt = await native.write_prepared_step(transaction.transaction(state_store), prepared)
+                return effect, receipt
+
+            effect, receipt = await group.mutate(members, write)
+            native.confirm_prepared_step(receipt)
+            return effect, self._cancellation_requested
+
+        async def unknown(operation_id, *, tenant_id, owner, fence, error_code, event):
+            observed = next((receipt for receipt in self._effect_receipts.values()
+                             if receipt.value.tool_operation_id == operation_id), None)
+            if observed is None:
+                observed = await repository.observe_operation(operation_id, tenant_id=tenant_id)
+            require_admitted(observed, operation_id=operation_id, tenant_id=tenant_id, owner=owner, fence=fence)
+            if event.run_id != self._agent_run_id:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            prepared = await native.prepare_step(events=(prepare_event(event),))
+            receipt = None
+
+            async def write(transaction):
+                nonlocal receipt
+                receipt = await native.write_prepared_step(transaction, prepared)
+
+            effect = await repository.mark_effect_unknown(
+                operation_id, tenant_id=tenant_id, owner=owner, fence=fence, error_code=error_code, write=write,
+            )
+            if receipt is not None:
+                native.confirm_prepared_step(receipt)
+            return effect
+
+        async def defer(operation_id, *, tenant_id, owner, fence):
+            observed = next((receipt for receipt in self._effect_receipts.values()
+                             if receipt.value.tool_operation_id == operation_id), None)
+            if observed is None:
+                observed = await repository.observe_operation(operation_id, tenant_id=tenant_id)
+            require_admitted(observed, operation_id=operation_id, tenant_id=tenant_id, owner=owner, fence=fence)
+
+            async def write(transaction):
+                await guard(transaction.transaction(state_store))
+                return await repository.defer_in_transaction(
+                    transaction.transaction(repository.state_store), operation_id,
+                    tenant_id=tenant_id, owner=owner, fence=fence,
+                )
+
+            return await group.mutate(members, write)
+
+        async def pause(value: ToolOperationRecord) -> None:
+            async def write(transaction):
+                await guard(transaction.transaction(state_store))
+                (stored,) = await repository.reserve_many_in_transaction(
+                    transaction.transaction(repository.state_store), (value,),
+                )
+                if (stored.status is not ToolOperationStatus.PENDING or stored.owner is not None
+                        or stored.producer_generation != generation):
+                    raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+
+            await group.mutate(members, write)
+
+        self._canonical_pause = pause
+        self._canonical_defer = defer
+        self.prepare_boundaries(admission=admit, terminal=terminal, unknown=unknown)
+        self._canonical_event_writer = publish_event
+        self._canonical_event_projection = prepare_event
+        self._producer_generation = generation
 
     async def _split_admission(
         self, request: ToolOperationAdmission, *, observed: Observed[ToolOperationRecord] | None,
@@ -417,10 +730,16 @@ class RuntimeToolOperationBridge:
         store = self._native_step_store
         if store is None:
             return
-        if readback and any(candidate.idempotency_key == event.idempotency_key
+        key = (event.idempotency_key if self._canonical_event_projection is None
+               else self._canonical_event_projection(event).idempotency_key)
+        if readback and any(candidate.idempotency_key == key
                             for candidate in await store.list_events(run_id=event.run_id)):
             return
-        if fixed_error_source and isinstance(store, SqlStepStore):
+        if self._canonical_event_writer is not None:
+            if readback:
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+            await self._canonical_event_writer(event)
+        elif fixed_error_source and isinstance(store, SqlStepStore):
             await store.append_event(event, fixed_error_source=True)
         else:
             await store.append_event(event)
@@ -470,6 +789,42 @@ class RuntimeToolOperationBridge:
         else:
             await self.require_active()
 
+    async def defer_before_effect(
+        self, call: ToolCallPart, args: dict[str, Any], *,
+        replay_safe: bool, capability_ref: CapabilityRef | None,
+    ) -> None:
+        """Reserve the canonical leaf without claiming or dispatching an effect."""
+        if self._canonical_pause is None:
+            return
+        call_id = call.tool_call_id
+        operation_id = self._operation_id(self._agent_run_id, call_id)
+        prior = self._operation_ids.get(call_id)
+        if prior is not None and prior != operation_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        await self._canonical_pause(await self._pending_tool_record(
+            call, _portable_arguments(args), replay_safe=replay_safe, capability_ref=capability_ref,
+        ))
+        self._operation_ids[call_id] = operation_id
+        self._admission_attempts.add(operation_id)
+        if self._operation_observer is not None:
+            self._operation_observer(call_id, operation_id)
+
+    async def _pending_tool_record(
+        self, call: ToolCallPart, portable_args: dict[str, Any], *, replay_safe: bool,
+        capability_ref: CapabilityRef | None,
+    ) -> ToolOperationRecord:
+        call_id = call.tool_call_id
+        operation_id = self._operation_id(self._agent_run_id, call_id)
+        now = datetime.now(UTC)
+        return ToolOperationRecord(
+            tool_operation_id=operation_id, execution_id=self._execution_id, agent_run_id=self._agent_run_id,
+            tool_call_id=call_id, tool_name=call.tool_name, arguments_digest=canonical_sha256(portable_args),
+            binding_digest=self._binding_digest, replay_safe=replay_safe, status=ToolOperationStatus.PENDING,
+            owner=None, fence=0, error_code=None, created_at=now, updated_at=now,
+            producer_generation=self._producer_generation, arguments_payload=await self._arguments_payload(portable_args),
+            capability_ref=capability_ref,
+        )
+
     async def begin(
         self,
         ctx: PydanticRunContext[None],
@@ -489,6 +844,18 @@ class RuntimeToolOperationBridge:
         portable_args = _portable_arguments(args)
         arguments_digest = canonical_sha256(portable_args)
         fingerprint = (tool_def.name, arguments_digest)
+        # A new call can run a verified replay-safe tool; the interrupted call
+        # keeps its original receipt and is never re-dispatched here.
+        if any(
+            fingerprint == (record.tool_name, record.arguments_digest)
+            and not (
+                call.tool_call_id != record.tool_call_id
+                and replay_safe and record.replay_safe
+                and capability_ref is not None and capability_ref == record.capability_ref
+            )
+            for record in self._reported_interruptions.values()
+        ):
+            raise ToolCallFailed(_INTERRUPTED_TOOL_MESSAGE)
         prior = self._decisions.get(key)
         if prior is not None:
             if self._decision_fingerprints.get(key) != fingerprint:
@@ -504,8 +871,10 @@ class RuntimeToolOperationBridge:
             if not settled and not prior.staged and (prior.replay_safe is not replay_safe or original != requested):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             if receipt is not None and receipt.status is ToolOperationStatus.CLAIMED:
+                if self._canonical_event_writer is not None:
+                    raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
                 if self._budget_scope_id is not None:
-                    raise AIError(ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED, safe_details={
+                    raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT, safe_details={
                         "scope_id": self._budget_scope_id,
                         "dimension": "tool_calls", "reason": "duplicate_dispatch",
                     })
@@ -770,6 +1139,180 @@ class RuntimeToolOperationBridge:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         return values
 
+    async def resume_canonical_approval(self, pending: "PendingDeferredCall", *, generation: int) -> None:
+        """Seed only the original, still-pending receipt for an approved canonical leaf."""
+        operation_id = self._operation_id(self._agent_run_id, pending.tool_call_id)
+        if (self._canonical_event_writer is None or self._producer_generation != generation + 1
+                or pending.operation_id != operation_id):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        observed = await self._repository.observe_operation(operation_id, tenant_id=self._tenant_id)
+        value = None if observed is None else observed.value
+        if (value is None or value.status is not ToolOperationStatus.PENDING or value.owner is not None
+                or (value.execution_id, value.agent_run_id, value.binding_digest, value.producer_generation,
+                    value.tool_call_id, value.tool_name, value.capability_ref, value.arguments_payload)
+                != (self._execution_id, self._agent_run_id, self._binding_digest, generation,
+                    pending.tool_call_id, pending.tool_name, pending.capability_ref, pending.arguments_payload)):
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        self._operation_ids[pending.tool_call_id] = operation_id
+        self._effect_receipts[pending.tool_call_id] = observed
+
+    def reported_interruption(self, record: ToolOperationRecord) -> bool:
+        """Whether this recovery already showed the model this unresolved receipt."""
+        return self._reported_interruptions.get(record.tool_operation_id) == record
+
+    @staticmethod
+    def _interruption_marker(record: ToolOperationRecord) -> list[JsonValue]:
+        return [record.tool_operation_id, record.producer_generation, record.fence]
+
+    def checkpoint_interruptions(self, messages: Sequence[ModelMessage]) -> Sequence[ModelMessage]:
+        """Tag the SDK's supplied failure in the already-owned checkpoint suffix."""
+        if not self._reported_interruptions:
+            return messages
+        records = {record.tool_call_id: record for record in self._reported_interruptions.values()}
+        result = []
+        for message in messages:
+            if isinstance(message, ModelRequest):
+                parts = []
+                for part in message.parts:
+                    record = records.get(part.tool_call_id) if isinstance(part, ToolReturnPart) else None
+                    if record is not None and part.tool_name == record.tool_name and part.outcome == "failed":
+                        metadata = dict(part.metadata) if isinstance(part.metadata, Mapping) else {}
+                        part = replace(part, metadata={**metadata, _INTERRUPTED_TOOL_RECEIPT: self._interruption_marker(record)})
+                    parts.append(part)
+                message = replace(message, parts=parts)
+            result.append(message)
+        return result
+
+    def has_checkpoint_interruption(self, part: ToolReturnPart) -> bool:
+        marker = part.metadata.get(_INTERRUPTED_TOOL_RECEIPT) if isinstance(part.metadata, Mapping) else None
+        identity = self._operation_ids.get(part.tool_call_id)
+        record = None if identity is None else self._reported_interruptions.get(identity)
+        return (record is not None and part.tool_name == record.tool_name and part.outcome == "failed"
+                and marker == self._interruption_marker(record))
+
+    async def resume_canonical_effects(
+        self,
+        pending_calls: Mapping[str, str],
+        *,
+        interrupted_generation: int | None = None,
+        retained_returns: Sequence[ToolReturnPart] = (),
+        checkpoint_completed_calls: Mapping[str, str] | None = None,
+        recover_delegate: Callable[
+            [ToolOperationRecord, Mapping[str, JsonValue]], Awaitable[ToolOperationRecord],
+        ] | None = None,
+    ):
+        """Project retained outcomes and explicitly reported interruptions; never replay a leaf."""
+        from pydantic_ai.tools import DeferredToolResults
+
+        if self._canonical_event_writer is None:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        values = await self._repository.list_by_agent_run(
+            self._agent_run_id, tenant_id=self._tenant_id, execution_id=self._execution_id,
+        )
+        retained = {
+            part.tool_call_id: part for part in retained_returns
+            if part.outcome == "failed" and isinstance(part.metadata, Mapping)
+            and _INTERRUPTED_TOOL_RECEIPT in part.metadata
+        }
+        receipts = {}
+        pending_recovery = []
+        for value in values:
+            if (value.execution_id != self._execution_id or value.agent_run_id != self._agent_run_id
+                    or value.tool_call_id in receipts):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if checkpoint_completed_calls and value.tool_call_id in checkpoint_completed_calls:
+                tool_name = checkpoint_completed_calls[value.tool_call_id]
+                if (value.status is not ToolOperationStatus.COMPLETED
+                        or value.tool_name != tool_name or value.binding_digest != self._binding_digest
+                        or value.tool_operation_id != self._operation_id(self._agent_run_id, value.tool_call_id)
+                        or value.producer_generation is None or interrupted_generation is None
+                        or not 1 <= value.producer_generation <= interrupted_generation):
+                    return None
+            if value.status not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}:
+                if (value.binding_digest != self._binding_digest
+                        or value.status not in {ToolOperationStatus.CLAIMED, ToolOperationStatus.EFFECT_UNKNOWN}):
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                if value.tool_name == "delegate_task":
+                    if (recover_delegate is None or value.replay_safe
+                            or pending_calls.get(value.tool_call_id) != value.tool_name):
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    pending_recovery.append(value)
+                else:
+                    if (interrupted_generation is None or self._producer_generation != interrupted_generation + 1
+                            or value.tool_operation_id != self._operation_id(self._agent_run_id, value.tool_call_id)):
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    part = retained.get(value.tool_call_id)
+                    if (part is not None and part.tool_name == value.tool_name
+                            and part.metadata[_INTERRUPTED_TOOL_RECEIPT] == self._interruption_marker(value)
+                            and value.producer_generation is not None
+                            and value.producer_generation < interrupted_generation
+                            and value.tool_call_id not in pending_calls):
+                        self._operation_ids[value.tool_call_id] = value.tool_operation_id
+                        self._reported_interruptions[value.tool_operation_id] = value
+                    elif (value.producer_generation != interrupted_generation
+                          or pending_calls.get(value.tool_call_id) != value.tool_name):
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            receipts[value.tool_call_id] = value
+        results = DeferredToolResults()
+        if any(call_id not in receipts or receipts[call_id].tool_name != tool_name
+               for call_id, tool_name in pending_calls.items()):
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        for value in pending_recovery:
+            assert recover_delegate is not None
+            if value.arguments_payload is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            payload = await self._payload_bytes(value.arguments_payload)
+            try:
+                args = normalize_json_value(json.loads(payload))
+            except ValueError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if not isinstance(args, dict) or canonical_sha256(args) != value.arguments_digest:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            terminal = await recover_delegate(value, args)
+            if ((terminal.tool_operation_id, terminal.execution_id, terminal.agent_run_id, terminal.tool_call_id,
+                 terminal.tool_name, terminal.binding_digest, terminal.arguments_digest)
+                    != (value.tool_operation_id, value.execution_id, value.agent_run_id, value.tool_call_id,
+                        value.tool_name, value.binding_digest, value.arguments_digest)
+                    or terminal.status not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            receipts[value.tool_call_id] = terminal
+        for call_id in pending_calls:
+            value = receipts[call_id]
+            self._operation_ids[call_id] = value.tool_operation_id
+            if value.status in {ToolOperationStatus.CLAIMED, ToolOperationStatus.EFFECT_UNKNOWN}:
+                self._reported_interruptions[value.tool_operation_id] = value
+                results.calls[call_id] = PydanticToolControlCapability.build_tool_failed(_INTERRUPTED_TOOL_MESSAGE)
+            else:
+                results.calls[call_id] = await self._canonical_effect_result(value)
+        if checkpoint_completed_calls and not checkpoint_completed_calls.keys() <= receipts.keys():
+            return None
+        return results if pending_calls or checkpoint_completed_calls else None
+
+    async def native_delegate_payload(
+        self, original: ToolOperationRecord, child: "ExecutionRecord", result: dict[str, JsonValue] | str,
+    ) -> tuple[StoredPayload | None, str | None, StoredPayload | None]:
+        if isinstance(result, str):
+            code, payload = _encode_tool_failure(ToolCallFailed(result))
+            return None, code, payload
+        if child.completed_at is None:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        message = ModelRequest(parts=[
+            ToolReturnPart("runtime", result, tool_call_id=original.tool_operation_id, timestamp=child.completed_at),
+        ], timestamp=child.completed_at)
+        return await self._payload(encode_model_messages((message,))), None, None
+
+    async def _canonical_effect_result(self, value: ToolOperationRecord):
+        if value.execution_id != self._execution_id or value.agent_run_id != self._agent_run_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if value.status is ToolOperationStatus.COMPLETED:
+            return await self._decode_result(value)
+        if value.status is not ToolOperationStatus.FAILED:
+            raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+        error = await self._decode_error(value)
+        if isinstance(error, ToolCallRetry):
+            return PydanticToolControlCapability.build_model_retry(error.message)
+        return PydanticToolControlCapability.build_tool_failed(error.message)
+
     async def _decision_from_record(
         self,
         existing: ToolOperationRecord,
@@ -977,6 +1520,8 @@ class RuntimeToolOperationBridge:
                         fence=decision.fence, error_code=code, event=event,
                     )
                 except BaseException:
+                    if self._canonical_event_writer is not None:
+                        raise
                     # Native storage failure must not erase already established
                     # uncertainty. Keep the effect fact, then repair its event.
                     await self._repository.mark_effect_unknown(
@@ -1016,7 +1561,9 @@ class RuntimeToolOperationBridge:
                     )
                 if event is not None:
                     store = self._native_step_store
-                    present = (store is not None and any(candidate.idempotency_key == event.idempotency_key
+                    key = (event.idempotency_key if self._canonical_event_projection is None
+                           else self._canonical_event_projection(event).idempotency_key)
+                    present = (store is not None and any(candidate.idempotency_key == key
                                for candidate in await store.list_events(run_id=event.run_id)))
                     if not present:
                         if self._unknown_boundary is not None:
@@ -1097,6 +1644,10 @@ class RuntimeToolOperationBridge:
                 )):
             return False
         async def finish() -> ToolOperationRecord:
+            if self._canonical_defer is not None:
+                return await self._canonical_defer(
+                    decision.operation_id, tenant_id=self._tenant_id, owner=decision.owner, fence=decision.fence,
+                )
             if self._terminal_commands is not None:
                 return await self._terminal_commands.commit_tool_deferred(
                     decision.operation_id,
@@ -1221,24 +1772,7 @@ class RuntimeToolOperationBridge:
         self,
         error: ToolCallRetry | ToolCallFailed,
     ) -> tuple[str, StoredPayload]:
-        if isinstance(error, ToolCallRetry):
-            code = ErrorCode.TOOL_RETRY_REQUIRED.value
-            kind = "tool_call_rejected"
-        elif isinstance(error, ToolCallFailed):
-            code = ErrorCode.TOOL_EXECUTION_FAILED.value
-            kind = "tool_call_failed"
-        else:
-            raise TypeError("tool failure must be a LinkTools tool signal")
-        payload = StoredPayload.inline_bytes(
-            canonical_json_bytes(
-                {
-                    "version": 1,
-                    "kind": kind,
-                    "message": error.message,
-                }
-            )
-        )
-        return code, payload
+        return _encode_tool_failure(error)
 
     async def _finish_with_readback(
         self,

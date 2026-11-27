@@ -64,8 +64,7 @@ async def test_turn_owner_survives_handle_return_timeout_and_promotion(tmp_path:
     async with Persistence.open("lifecycle-probe", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
     ) as runtime:
-        session = await runtime.agents.get().create_session("session")
-        execution = await session.start("question", idempotency_key="request")
+        execution = await runtime.agents.get().start("question", idempotency_key="request")
         await asyncio.wait_for(entered.wait(), 5)
         backend = runtime._execution_service.runtime_backend()
         coordinator = backend._pending_turns.coordination
@@ -128,8 +127,7 @@ async def test_parent_and_parallel_children_keep_independent_turn_owners(tmp_pat
     cache = _ObservedCache()
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache, coordination=cache)
     async with Persistence.open("subagent-owner-probe", storage=storage) as persistence, Runtime.open(persistence=persistence, features=features) as runtime:
-        session = await runtime.agents.get().create_session("session")
-        execution = await session.start("delegate twice", idempotency_key="parent-request")
+        execution = await runtime.agents.get().start("delegate twice", idempotency_key="parent-request")
         try:
             await asyncio.wait_for(both_entered.wait(), 5)
             children = await runtime.executions.list_children(execution.execution_id, principal=runtime.default_principal)
@@ -174,8 +172,7 @@ async def test_turn_owner_outlives_worker_until_owned_work_settles(tmp_path: Pat
     async with Persistence.open("owned-work", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
     ) as runtime:
-        session = await runtime.agents.get().create_session("session")
-        execution = await session.start("question", idempotency_key="request")
+        execution = await runtime.agents.get().start("question", idempotency_key="request")
         await asyncio.wait_for(entered.wait(), 5)
         backend = runtime._execution_service.runtime_backend()
         coordinator = backend._pending_turns.coordination
@@ -227,8 +224,7 @@ async def test_lease_renewal_failure_stops_worker_and_releases_ownership(tmp_pat
     async with Persistence.open("lost-owner", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
     ) as runtime:
-        session = await runtime.agents.get().create_session("session")
-        execution = await session.start("question", idempotency_key="request")
+        execution = await runtime.agents.get().start("question", idempotency_key="request")
         await asyncio.wait_for(entered.wait(), 5)
         cache.lost = True
         await asyncio.wait_for(stopped.wait(), 5)
@@ -289,8 +285,7 @@ async def test_runtime_handoff_stops_child_wait_without_cancelling_logical_child
         await runtime.__aenter__()
         backend = runtime._execution_service.runtime_backend()
         try:
-            session = await runtime.agents.get().create_session("session")
-            execution = await session.start("delegate", idempotency_key="parent-request")
+            execution = await runtime.agents.get().start("delegate", idempotency_key="parent-request")
             await asyncio.wait_for(entered.wait(), 5)
             children = await runtime.executions.list_children(
                 execution.execution_id, principal=runtime.default_principal,
@@ -360,8 +355,7 @@ async def test_parent_lease_loss_stops_only_old_workers_without_logical_child_ca
         async with Persistence.open("parent-owner-loss", storage=storage) as persistence, Runtime.open(
             persistence=persistence, features=features,
         ) as runtime:
-            session = await runtime.agents.get().create_session("session")
-            execution = await session.start("delegate", idempotency_key="parent-request")
+            execution = await runtime.agents.get().start("delegate", idempotency_key="parent-request")
             await asyncio.wait_for(entered.wait(), 5)
             backend = runtime._execution_service.runtime_backend()
             owner = backend._turn_owners[execution.execution_id]
@@ -416,8 +410,7 @@ async def test_child_owner_loss_does_not_force_cancel_logical_child(tmp_path: Pa
         async with Persistence.open("child-owner-loss", storage=storage) as persistence, Runtime.open(
             persistence=persistence, features=features,
         ) as runtime:
-            session = await runtime.agents.get().create_session("session")
-            execution = await session.start("delegate", idempotency_key="parent-request")
+            execution = await runtime.agents.get().start("delegate", idempotency_key="parent-request")
             await asyncio.wait_for(entered.wait(), 5)
             backend = runtime._execution_service.runtime_backend()
             parent_owner = backend._turn_owners[execution.execution_id]

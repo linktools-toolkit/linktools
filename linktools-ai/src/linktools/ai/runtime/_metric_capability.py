@@ -522,6 +522,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         interaction_recorder: ModelInteractionRecorder | None = None,
         event_sink: ModelRequestEventSink | None = None,
         model_boundary: Callable[[Model], Awaitable[Model]] | None = None,
+        before_first_model_dispatch: Callable[[], Awaitable[None]] | None = None,
         budget: RunBudgetContext | None = None,
     ) -> None:
         self.id = "linktools.ai.model-observation"
@@ -545,6 +546,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         self._interaction_recorder = interaction_recorder
         self._event_sink = event_sink
         self._model_boundary = model_boundary
+        self._before_first_model_dispatch = before_first_model_dispatch
         self._budget = budget
         self._prepared_models: dict[int, PreparedRequestModel] = {}
         self._serving_model_ids: dict[int, str] = {}
@@ -664,6 +666,8 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 dispatched = await self._model_boundary(model)
             elif self._interaction_recorder is not None:
                 await self._interaction_recorder.commit_history_boundary()
+            if self._before_first_model_dispatch is not None:
+                await self._before_first_model_dispatch()
             return self._client_recorders[fact.model_request_seq].wrap_model(dispatched)
 
         def provider_failed(error: Exception) -> None:
@@ -1037,6 +1041,8 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 )
                 if self._interaction_recorder is not None:
                     await self._interaction_recorder.commit_history_boundary()
+                if self._before_first_model_dispatch is not None:
+                    await self._before_first_model_dispatch()
             except asyncio.CancelledError:
                 await self._complete_request(
                     fact,

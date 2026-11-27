@@ -9,7 +9,7 @@ import json
 import math
 import time
 import heapq
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -60,6 +60,9 @@ from ._service import DefaultExecutionHistoryService, _read_model_interaction_up
 from ..core import token_seed
 from ._transient import TransientExecutionHistoryStore
 from ._session_display_cache import SessionDisplayCache
+from ._ordinary_sessions import SessionTurnTraceItem, _ObservedTurnResult, _OrdinarySessionHistory
+from ..persistence.turns import SessionTurnKey, SqlSessionTurnReader
+
 from ..persistence.state import active_state_scope
 from ._session_timeline import (
     SessionTimelineTranscriptStore,
@@ -89,7 +92,7 @@ from ..session import SessionTurn, SessionView
 from ..persistence import Persistence, PersistenceDomain
 from ..persistence.repositories import ExecutionRepositoryImpl
 from ..persistence.repositories import SessionRepositoryImpl
-from ..persistence.runs import StagingAgentRunStore
+from ..persistence.runs import StagingAgentRunStore, StateStepArchive
 from ..persistence.contracts import (
     ConversationRepositories,
     EventRepository,
@@ -301,6 +304,9 @@ class _HistorySubscription:
                 self._released(self)
 
 
+_BoundTurnRead = Callable[[SessionTurnKey, Principal, bool], Awaitable[_ObservedTurnResult]]
+
+
 class History:
     """Stable read-only composition for persisted execution projections."""
 
@@ -326,6 +332,9 @@ class History:
         pending_session_execution: SessionPendingExecutionLookup[ExecutionRecord] | None = None,
         pending_execution: Callable[..., Awaitable[ExecutionRecord | None]] | None = None,
         cache: CacheBackend | None = None,
+        session_turn_reader: SqlSessionTurnReader | None = None,
+        session_trace_source: StateStepArchive | None = None,
+        _bind_runtime_turn_read: Callable[[_BoundTurnRead], None] | None = None,
     ) -> None:
         self._service = service
         self._subscriptions: set[_HistorySubscription] = set()
@@ -345,16 +354,124 @@ class History:
         self._task_objects = task_objects
         self._object_reader = object_reader
         self._artifacts = artifacts
-        self._conversation = conversation
+        self._conversation = conversation if conversation is not None and conversation.sessions is not None else None
         self._session_transcript_store = session_transcript_store
+        self._session_trace_source = session_trace_source
         self._pending_session_execution = pending_session_execution
         self._pending_execution = pending_execution
         self._session_cursor_signer = (cursor_signer if namespace is None else
                                        HmacCursorSigner("session", token_seed(namespace)))
+        self._ordinary_sessions = (
+            None if session_turn_reader is None or authorization is None or self._session_cursor_signer is None
+            else _OrdinarySessionHistory(session_turn_reader, tenant_id, authorization, self._session_cursor_signer)
+        )
+        if _bind_runtime_turn_read is not None and self._ordinary_sessions is not None:
+            _bind_runtime_turn_read(self._read_runtime_turn)
         self._display_cache = (
-            None if conversation is None or executions is None or self._session_cursor_signer is None
-            else SessionDisplayCache(conversation, executions, session_transcript_store,
+            None if self._conversation is None or executions is None or self._session_cursor_signer is None
+            else SessionDisplayCache(self._conversation, executions, session_transcript_store,
                                      self._session_cursor_signer, cache, now=lambda: time.time())
+        )
+
+    @property
+    def has_turn_sessions(self) -> bool:
+        """Whether this history reader can query ordinary SQL sessions."""
+        return self._ordinary_sessions is not None
+
+    @property
+    def has_turn_trace(self) -> bool:
+        """Whether this reader has the canonical SQL Trace source."""
+        return bool(
+            self.has_turn_sessions
+            and self._session_trace_source is not None
+            and self._session_trace_source.has_turn_trace
+        )
+
+    def _require_ordinary_sessions(self) -> _OrdinarySessionHistory:
+        if self._closed or self._ordinary_sessions is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return self._ordinary_sessions
+
+    async def turn_sessions(
+        self, *, principal: Principal, cursor: str | None = None, limit: int = 100,
+        session_ids: Sequence[str] | None = None, local_workspace: bool = False,
+    ) -> dict[str, JsonValue]:
+        """List SQL sessions by explicit IDs, a host policy prefix, or the trusted local console."""
+        return await self._require_ordinary_sessions().sessions(
+            principal=principal, cursor=cursor, limit=limit, session_ids=session_ids, local_workspace=local_workspace,
+        )
+
+    async def turn_session_state(
+        self, session_id: str, *, principal: Principal, local_workspace: bool = False,
+    ) -> dict[str, JsonValue]:
+        """Read the authorized current session and its occupant without reading history."""
+        return await self._require_ordinary_sessions().session_state(
+            session_id, principal=principal, local_workspace=local_workspace,
+        )
+
+    async def turn_session(
+        self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100,
+        local_workspace: bool = False, tool_return_names: frozenset[str] | None = None,
+    ) -> dict[str, JsonValue]:
+        """Read an authorized page of committed turns, newest page first.
+
+        Hosts can request tool returns only with an explicit per-turn grant.
+        """
+        return await self._require_ordinary_sessions().session(
+            session_id, principal=principal, cursor=cursor, limit=limit,
+            local_workspace=local_workspace, tool_return_names=tool_return_names,
+        )
+
+    async def turn_tool_returns(
+        self, session_id: str, turn_id: str, *, principal: Principal,
+        tool_names: frozenset[str], tool_call_ids: frozenset[str] | None = None,
+    ) -> tuple[dict[str, JsonValue], ...]:
+        """Read host-granted business JSON returns from one exact committed turn.
+
+        Mixed returns keep their JSON fragments in order and omit typed SDK content.
+        """
+        return await self._require_ordinary_sessions().tool_returns(
+            session_id, turn_id, principal=principal, tool_names=tool_names, tool_call_ids=tool_call_ids,
+        )
+
+    async def turn_trace(
+        self, session_id: str, turn_id: str, *, principal: Principal,
+        local_workspace: bool = False, cursor: str | None = None, limit: int = 100,
+    ) -> Page[SessionTurnTraceItem]:
+        """Read exact canonical turn Trace metadata, not standalone executions."""
+        return await self._require_ordinary_sessions().turn_trace(
+            session_id, turn_id, principal=principal, local_workspace=local_workspace,
+            source=self._session_trace_source, cursor=cursor, limit=limit,
+        )
+
+    async def turn_model_interactions(
+        self, session_id: str, turn_id: str, *, principal: Principal, local_workspace: bool = False,
+        cursor: str | None = None, limit: int = 100, include_content: bool = False,
+        model_request_seq: int | None = None,
+    ) -> Page[dict[str, JsonValue]]:
+        """Read exact canonical turn Trace model interactions; bodies require the local workspace."""
+        return await self._require_ordinary_sessions().turn_model_interactions(
+            session_id, turn_id, principal=principal, local_workspace=local_workspace,
+            source=self._session_trace_source, cursor=cursor, limit=limit,
+            include_content=include_content, model_request_seq=model_request_seq,
+        )
+
+    async def turn_result(
+        self, session_id: str, turn_id: str, *, principal: Principal, local_workspace: bool = False,
+        producer_stopped_generation: int | None = None,
+    ) -> dict[str, JsonValue]:
+        """Read the authorized turn; report a stopped matching producer as needing recovery."""
+        return await self._require_ordinary_sessions().turn_result(
+            session_id, turn_id, principal=principal, local_workspace=local_workspace,
+            producer_stopped_generation=producer_stopped_generation,
+        )
+
+    async def _read_runtime_turn(
+        self, key: SessionTurnKey, principal: Principal, local_workspace: bool,
+    ) -> _ObservedTurnResult:
+        return await self._require_ordinary_sessions()._read_turn_result(
+            key.session_id, key.turn_id, principal=principal, local_workspace=local_workspace,
+            for_execution=True,
         )
 
     async def read_model_interactions(
@@ -1713,6 +1830,8 @@ async def _open_runtime_history(
     selected_state = persistence
     resolved_namespace = persistence.namespace
     effective_tenant_id = persistence.tenant_id
+    session_turn_reader = persistence.session_turn_reader
+    agent_bound_conversation = persistence.conversation if session_turn_reader is None else None
     pending_coordination = persistence.pending_turn_coordination
     history_store = selected_state.run_store.read_store(PersistenceDomain.TRACE)
     if selected_state.plan.route(PersistenceDomain.TRACE).retention is StorageRetentionMode.TRANSIENT:
@@ -1753,7 +1872,7 @@ async def _open_runtime_history(
         tenant_id=effective_tenant_id,
         executions=selected_state.execution.executions,
         events=selected_state.execution.events,
-        sessions=selected_state.conversation.sessions,
+        sessions=None if agent_bound_conversation is None else agent_bound_conversation.sessions,
         _task_source=lambda: selected_state.task.tasks,
         authorization=effective_authorization,
         namespace=resolved_namespace,
@@ -1764,12 +1883,15 @@ async def _open_runtime_history(
             "runtime-history",
             token_seed(resolved_namespace),
         ),
-        pending_session_execution=(None if pending_coordination is None
+        pending_session_execution=(None if pending_coordination is None or agent_bound_conversation is None
                                    else pending_coordination.read_session_execution),
         pending_execution=None if pending_coordination is None else pending_coordination.read_execution,
-        conversation=selected_state.conversation,
-        session_transcript_store=selected_state.run_store.conversation_persistence,
-        cache=(selected_state.plan.route(PersistenceDomain.CONVERSATION).cache if all(
+        conversation=agent_bound_conversation,
+        session_turn_reader=session_turn_reader if authorization is not None else None,
+        session_trace_source=history_store if isinstance(history_store, StateStepArchive) else None,
+        session_transcript_store=(None if agent_bound_conversation is None
+                                  else selected_state.run_store.conversation_persistence),
+        cache=(selected_state.plan.route(PersistenceDomain.CONVERSATION).cache if agent_bound_conversation is not None and all(
             selected_state.plan.route(domain).retention is StorageRetentionMode.DURABLE
             for domain in (PersistenceDomain.CONVERSATION, PersistenceDomain.EXECUTION)
         ) else None),

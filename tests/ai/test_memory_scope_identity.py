@@ -44,7 +44,7 @@ async def test_memory_maximum_scope_and_long_path_preserve_capture_replay(
     tmp_path: Path, backend: str,
 ) -> None:
     storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "memory.db")
-    namespace, tenant, scope, execution = "n" * 128, "t" * 128, "é" * 64, "e" * 128
+    namespace, tenant, scope, execution = "n" * 64, "t" * 64, "é" * 64, "e" * 128
     path = "/".join("x" * 200 for _ in range(6))
     assert len(path.encode()) == 1205
     async with Persistence.open(namespace, tenant_id=tenant, storage=storage) as state:
@@ -249,8 +249,8 @@ async def test_memory_long_random_path_preserves_server_write_read_prefix_and_re
     engine = create_async_engine(url)
     rng = random.Random(90210)
     alphabet = string.ascii_letters + string.digits
-    namespace = "".join(rng.choices(alphabet, k=128))
-    tenant = "".join(rng.choices(alphabet, k=128))
+    namespace = "".join(rng.choices(alphabet, k=64))
+    tenant = "".join(rng.choices(alphabet, k=64))
     path = "/".join("".join(rng.choices(alphabet, k=size)) for size in (*([200] * 11), 189))
     assert len(path) == 2400
     operation = MemoryOperation("long-path", canonical_sha256({"content": "note"}))

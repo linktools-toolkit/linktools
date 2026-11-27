@@ -22,7 +22,7 @@ from pydantic_ai_harness.step_persistence import StepPersistence
 from linktools.ai.capability import ExecutionCapability, TraceCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.spec import AgentUsageLimits
-from linktools.ai.core import ExecutionStatus
+from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.history import History
 from linktools.ai.runtime import Runtime
@@ -52,50 +52,57 @@ async def test_sqlite_execution_without_shared_budget_keeps_public_history(tmp_p
     pytest.importorskip("starlette")
     from linktools.ai.web import create_app
 
-    path = tmp_path / "current-history.db"
+    class HostAuthorization(TenantAuthorizationPolicy):
+        """Use explicit host authorization for the live producer and cold reader."""
+
+    storage = PersistenceStorage.from_root(tmp_path / "current-history")
+    authorization = HostAuthorization()
     accepted = RuntimeFeatures("application")
     accepted.agent("default", model="default", allow_tools=(), usage_limits=AgentUsageLimits(output_tokens=250))
     accepted.capability(ExecutionCapability(retain_history=True), scope="runtime")
     accepted.capability(TraceCapability(), scope="runtime")
-    async with Persistence.open("older-history", storage=PersistenceStorage.sqlite(path)) as persistence:
+    async with Persistence.open("older-history", storage=storage) as persistence:
         native = await persistence.create_step_store()
         accepted.capability(StepPersistence(store=native, capture_frontier=True), scope="runtime")
         try:
             async with Runtime.open(
                 persistence=persistence, features=model_features(helpers.RuntimeUsageModels(), accepted),
+                authorization=authorization,
             ) as runtime:
-                execution = await runtime.agents.get().session("session").start("retained older question")
-                assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
-                assert await execution.budget_usage() is None
-                execution_id = execution.execution_id
-            run, = await native.list_runs()
-            assert any(event.kind == "run_started" for event in await native.list_events(run_id=run.run_id))
+                agent = runtime.agents.get()
+                await agent.create_session("session")
+                turn = await agent.start("retained older question", session_id="session", idempotency_key="start")
+                assert (await turn.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
+                assert await runtime.sessions.budget_usage(
+                    "session", turn.key.turn_id, principal=runtime.default_principal,
+                ) is None
         finally:
             await native.close()
-    async with Persistence.open('older-history', storage=PersistenceStorage.sqlite(path), tenant_id="default", read_only=True) as history_persistence_52, History.open(persistence=history_persistence_52) as history:
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=create_app(history=history)),
+    async with (
+        Persistence.open("older-history", storage=storage, read_only=True) as state,
+        History.open(persistence=state, authorization=authorization) as history,
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=create_app(history=history, local_workspace=True)),
             base_url="http://127.0.0.1:8765",
-        ) as client:
-            for route in (
-                "/api/sessions?limit=50",
-                "/api/session?session_id=session&include_timeline=false",
-                "/api/executions?session_id=session&limit=1",
-                f"/api/executions/{execution_id}",
-                f"/api/executions/{execution_id}/trace",
-                f"/api/executions/{execution_id}/models",
-            ):
-                response = await client.get(route)
-                assert response.status_code == 200, response.text
-            response = await client.get("/api/session?session_id=session&limit=50")
+        ) as client,
+    ):
+        for route in (
+            "/api/sessions?limit=50",
+            "/api/session?session_id=session&include_timeline=false",
+            f"/api/session?session_id=session&turn_id={turn.key.turn_id}",
+            f"/api/session?session_id=session&turn_id={turn.key.turn_id}&trace=true",
+        ):
+            response = await client.get(route)
             assert response.status_code == 200, response.text
-            turn, = response.json()["timeline"]["items"]
-            assert turn["execution_id"] == execution_id
-            assert turn["user_input"]["prompt"] == {"kind": "text", "text": "retained older question"}
-            assert turn["conversation_committed"] is True
-            assert [(item["item_kind"], item["content"]) for item in turn["items"]] == [
-                ("assistant", "done"),
-            ]
+        response = await client.get("/api/session?session_id=session&limit=50")
+        assert response.status_code == 200, response.text
+        published, = response.json()["timeline"]["items"]
+        assert published["turn_id"] == turn.key.turn_id
+        assert published["user_input"]["prompt"] == "retained older question"
+        assert published["conversation_committed"] is True
+        assert [(item["item_kind"], item["content"]) for item in published["items"]] == [
+            ("assistant", "done"),
+        ]
 
 
 @pytest.mark.asyncio

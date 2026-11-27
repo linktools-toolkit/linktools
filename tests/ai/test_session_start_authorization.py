@@ -67,39 +67,58 @@ async def test_shared_session_start_authorizes_the_execution_identity(tmp_path: 
         persistence=state, features=model_features(_Models(_UsageFunctionModel(model)), features),
         authorization=policy,
     ) as runtime:
-        session = await runtime.agents.get().create_session("shared", principal=owner)
+        agent = runtime.agents.get()
+        session = await agent.create_session("shared", principal=owner)
+
+        async def start(prompt: str, key: str):
+            return await runtime.sessions.start(session.session_id, prompt, principal=peer, agent=agent,
+                                                idempotency_key=key)
+        pristine = await runtime.history.turn_session(session.session_id, principal=owner)
+        assert pristine["session"]["active_turn_id"] is None
+        assert pristine["timeline"]["items"] == []
         policy.deny_new = True
         with pytest.raises(AIError) as denied:
-            await session.start("denied fresh", principal=peer, idempotency_key="denied-fresh")
+            await start("denied fresh", "denied-fresh")
         assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+        assert await runtime.history.turn_session(session.session_id, principal=owner) == pristine
         assert calls == 0
         policy.deny_new = False
         policy.execution_resources.clear()
-        execution = await session.start("peer turn", principal=peer, idempotency_key="peer-turn")
-        policy.existing_owners[execution.execution_id] = "peer"
+        execution = await start("peer turn", "peer-turn")
+        policy.existing_owners[execution.key.turn_id] = "peer"
         try:
             await asyncio.wait_for(entered.wait(), 5)
-            replay = await session.start("peer turn", principal=peer, idempotency_key="peer-turn")
-            assert replay.execution_id == execution.execution_id
-            policy.denied.add(execution.execution_id)
+            replay = await start("peer turn", "peer-turn")
+            assert replay.key.turn_id == execution.key.turn_id
+            policy.denied.add(execution.key.turn_id)
+            active = await runtime.history.turn_session(session.session_id, principal=owner)
+            assert active["session"]["active_turn_id"] == execution.key.turn_id
+            assert active["timeline"]["items"] == []
             with pytest.raises(AIError) as denied:
-                await session.start("peer turn", principal=peer, idempotency_key="peer-turn")
+                await start("peer turn", "peer-turn")
             assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+            assert await runtime.history.turn_session(session.session_id, principal=owner) == active
             assert calls == 1
         finally:
             finish.set()
-        assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
+        assert (await execution.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        committed = await runtime.history.turn_session(session.session_id, principal=owner)
+        assert committed["session"]["active_turn_id"] is None
+        assert [turn["turn_id"] for turn in committed["timeline"]["items"]] == [execution.key.turn_id]
         with pytest.raises(AIError) as denied:
-            await session.start("peer turn", principal=peer, idempotency_key="peer-turn")
+            await start("peer turn", "peer-turn")
         assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+        assert await runtime.history.turn_session(session.session_id, principal=owner) == committed
         policy.denied.clear()
-        replay = await session.start("peer turn", principal=peer, idempotency_key="peer-turn")
-        assert replay.execution_id == execution.execution_id
+        replay = await start("peer turn", "peer-turn")
+        assert replay.key.turn_id == execution.key.turn_id
         assert calls == 1
         assert policy.execution_resources
-        assert set(policy.execution_resources) == {execution.execution_id}
-        assert (await state.conversation.sessions.get("shared", tenant_id="default")).owner_principal_id == "owner"
-        assert (await state.execution.executions.get(execution.execution_id, tenant_id="default")).principal_id == "peer"
+        assert policy.execution_resources[-1] == execution.key.turn_id
+        assert "shared" not in policy.execution_resources
+        assert await state.execution.executions.get(execution.key.turn_id, tenant_id="default") is None
+        row = await state.session_turns.get_turn(execution.key)
+        assert row["request_json"]["principal"]["principal_id"] == "peer"
 
 
 @pytest.mark.asyncio

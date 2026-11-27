@@ -7,7 +7,7 @@ from functools import lru_cache
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from ..core import RESOURCE_ID_MAX_BYTES
+from ..core import AGENT_RUN_ID_MAX_BYTES, RESOURCE_ID_MAX_BYTES
 from ..steps import NATIVE_STORE_KEY_MAX_BYTES, NATIVE_REPLAY_KEY_MAX_BYTES
 from ..storage import (
     sql_audit_columns,
@@ -41,7 +41,8 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
         return Column(name, sql_sort_key(), nullable=nullable, comment=comment)
 
     def identifier(name: str, comment: str, *, nullable: bool = True) -> "Column":
-        return Column(name, sql_text_key(RESOURCE_ID_MAX_BYTES), nullable=nullable, comment=comment)
+        width = AGENT_RUN_ID_MAX_BYTES if name in ("run_id", "parent_run_id") else RESOURCE_ID_MAX_BYTES
+        return Column(name, sql_text_key(width), nullable=nullable, comment=comment)
 
     def partition() -> "Column":
         return Column("store_key", LargeBinary(NATIVE_STORE_KEY_MAX_BYTES).with_variant(
@@ -79,6 +80,14 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
             text("metadata", "Upstream string metadata encoded as JSON.", nullable=False),
             Column("started_at", String(64), nullable=False, comment="Original ISO 8601 run start time."),
             text("registration_id", "Upstream registration invocation identifier."),
+            Column("turn_source_generation", BigInteger, nullable=True,
+                   comment="Adopted Conversation generation; absent for independent Step runs."),
+            Column("turn_source_phase", String(12), nullable=True,
+                   comment="Subordinate split handoff phase; never an independent lease."),
+            Column("turn_source_receipt", sql_text_key(64), nullable=True,
+                   comment="Exact source receipt identity matched by Conversation reconciliation."),
+            Column("turn_source_pin", JSON(none_as_null=True), nullable=True,
+                   comment="Retained immutable source checkpoint and transcript references."),
             Column("managed_start_key", LargeBinary(NATIVE_REPLAY_KEY_MAX_BYTES).with_variant(
                 VARBINARY(NATIVE_REPLAY_KEY_MAX_BYTES), "mysql"), nullable=True,
                 comment="Exact first managed start identity; NULL means metadata admission only."),
@@ -135,9 +144,9 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
         sql_unique(snapshots, "store_locator", "run_id", "idempotency_key")
         sql_query_index(snapshots, "store_locator", "run_id", "pruned")
 
-    if "ai_step_messages" not in metadata.tables:
+    if "ai_messages" not in metadata.tables:
         messages = table(
-            "ai_step_messages", "Immutable typed content bytes: native messages and accepted execution payloads in disjoint partitions.",
+            "ai_messages", "Immutable typed content bytes: native messages and accepted execution payloads in disjoint partitions.",
             partition(),
             digest("sha256", "SHA-256 of the canonical uncompressed bytes for the partition content type."),
             Column("message", sql_blob(), nullable=True, comment="Raw or compressed canonical content bytes, absent for native attachment manifests."),
@@ -150,9 +159,9 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
         )
         sql_unique(messages, "store_locator", "sha256")
 
-    if "ai_step_sequences" not in metadata.tables:
+    if "ai_message_sequences" not in metadata.tables:
         sequences = table(
-            "ai_step_sequences", "Shared immutable message sequence nodes for native snapshots.",
+            "ai_message_sequences", "Shared immutable message sequence nodes for native snapshots.",
             partition(),
             digest("sha256", "SHA-256 of the immutable sequence node."),
             digest("message_sha256", "SHA-256 of the referenced upstream message JSON."),
@@ -179,7 +188,7 @@ def build_step_domain_sql_metadata(domains: "Iterable[PersistenceDomain]", *, me
     existing = set(metadata.tables)
     build_step_sql_metadata(metadata=metadata)
     if PersistenceDomain.CHECKPOINT not in selected:
-        keep = {"ai_step_runs", "ai_step_messages", "ai_step_sequences"}
+        keep = {"ai_step_runs", "ai_messages", "ai_message_sequences"}
         if selected.intersection({PersistenceDomain.EXECUTION, PersistenceDomain.TRACE}):
             keep.update({"ai_step_runs", "ai_step_events"})
         for name in set(metadata.tables) - existing - keep:
@@ -192,7 +201,7 @@ def native_message_sql_tables() -> "Mapping[str, Table]":
     """Reuse query descriptors without sharing mutable provisioner metadata."""
     tables = build_step_sql_metadata().tables
     return MappingProxyType({
-        name: tables[name] for name in ("ai_step_messages", "ai_step_sequences", "ai_step_snapshots")
+        name: tables[name] for name in ("ai_messages", "ai_message_sequences", "ai_step_snapshots")
     })
 
 

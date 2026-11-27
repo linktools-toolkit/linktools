@@ -105,8 +105,7 @@ async def test_revoked_failed_owner_retries_exact_cleanup_without_replaying_effe
 
         async with Runtime.open(persistence=state, features=features(), metrics=None,
                                   auto_recover=False) as original:
-            session = await original.agents.get().create_session("session")
-            execution = await session.start("first turn", idempotency_key="first")
+            execution = await original.agents.get().start("first turn", idempotency_key="first")
             with pytest.raises(AIError) as failure:
                 await execution.wait(timeout_seconds=10)
             assert failure.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -122,7 +121,7 @@ async def test_revoked_failed_owner_retries_exact_cleanup_without_replaying_effe
             async with Runtime.open(persistence=state, features=features(), metrics=None,
                                       auto_recover=False) as successor:
                 principal = successor.default_principal
-                repeated = await successor.agents.get().session("session").start(
+                repeated = await successor.agents.get().start(
                     "first turn", idempotency_key="first",
                 )
                 assert repeated.execution_id == execution.execution_id
@@ -176,7 +175,7 @@ async def test_revoked_failed_owner_retries_exact_cleanup_without_replaying_effe
                 assert kept[0].tool_operation_id == receipt.tool_operation_id
                 assert kept[0].result_payload == receipt.result_payload
                 next_turn = True
-                following = await successor.agents.get().session("session").start(
+                following = await successor.agents.get().start(
                     "next turn", idempotency_key="next",
                 )
                 terminal = (await following.wait(timeout_seconds=10)).result
@@ -238,13 +237,12 @@ async def test_terminal_handoff_cleans_only_revoked_failed_execution_while_peer_
 
         async with Runtime.open(persistence=state, features=features(), metrics=None,
                                   auto_recover=False) as original:
-            peer_session = await original.agents.get().create_session("peer")
-            peer = await peer_session.start("healthy peer", idempotency_key="peer")
+            agent = original.agents.get()
+            peer = await agent.start("healthy peer", idempotency_key="peer")
             await asyncio.wait_for(peer_entered.wait(), 5)
             peer_keys = set(buffer.pending)
             try:
-                failed_session = await original.agents.get().create_session("failed")
-                failed = await failed_session.start("failed turn", idempotency_key="failed")
+                failed = await agent.start("failed turn", idempotency_key="failed")
                 with pytest.raises(AIError) as caught:
                     await failed.wait(timeout_seconds=10)
                 assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -270,7 +268,7 @@ async def test_terminal_handoff_cleans_only_revoked_failed_execution_while_peer_
                 assert len(kept) == 1 and kept[0].tool_operation_id == receipt.tool_operation_id
                 assert kept[0].status is ToolOperationStatus.COMPLETED
                 assert kept[0].result_payload == receipt.result_payload
-                following = await failed_session.start("next turn", idempotency_key="next")
+                following = await agent.start("next turn", idempotency_key="next")
                 assert (await following.wait(timeout_seconds=10)).result.output == {"text": "next completed"}
                 assert calls == {"effect": 1, "failed_model": 2}
             finally:

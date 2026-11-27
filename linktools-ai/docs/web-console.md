@@ -26,6 +26,63 @@ as `ai-run`; memory is supplied by the Runtime capability. Prefer environment
 configuration for credentials rather than shell history. The console does not
 persist or edit model credentials.
 
+The local console uses canonical SQL conversations with native Step and Trace.
+It keeps the default Agent's tools and rejects unsupported bindings before
+admission rather than silently dropping tools. Skill and MCP tools require a
+same-store native Step. Subagent delegation is not available on this turn path.
+
+An embedded ordinary Runtime can enable the native read-only tools without adding
+a second tool configuration. Declare the Workspace through `FileSystemCapability`
+and select the tools by name on the ordinary Agent:
+
+```python
+from linktools.ai.capability import FileSystemCapability
+from linktools.ai.runtime import RuntimeFeatures
+
+features = RuntimeFeatures("workspace")
+features.model("default", model_binding)
+features.capability(FileSystemCapability(workspace))
+features.agent(
+    "review",
+    allow_tools=("list_files", "read_file"),
+    allow_skills=(),
+    allow_subagents=(),
+    allow_capabilities=(),
+)
+```
+
+Pass `features` and the host's explicit session authorization policy to
+`Runtime.open` with the ordinary SQL store. Send with `agent_id="review"`. Select
+both tools or only the one needed; `allow_tools=("*",)` also selects unsafe
+workspace tools and is not an ordinary Agent profile. The workspace policy must
+allow every selected tool. Ordinary `read_file` only returns a bounded,
+single-file text preview; it does not enable bulk reads, file attachments
+returned by a tool, dynamically loaded skills, or shell commands. The console
+shows the tool status and public preview, not raw parameters or results.
+
+**Recover** continues an interrupted ordinary turn from its retained Step
+checkpoint when the turn and tool receipts share a store. An unfinished ordinary
+tool's outcome is reported to the model as unknown. The original tool call is not
+run again, and its receipt is kept unchanged. Already confirmed tool results keep
+their original meaning. The browser does not have to start a new turn for this
+recovery.
+
+A turn without a retained Step checkpoint can instead regenerate from the
+accepted prompt, frozen Agent binding, and admitted attachment bytes where its
+configured recovery mode supports that. This does not certify an interrupted
+tool's effects. Graph turns, split-store turns, and interrupted delegated work
+have separate recovery constraints.
+
+If recovery reports that a stopped ordinary turn cannot resume, the same
+**Recover** control stays visible. Choosing it again asks whether to end the
+failed turn, without retrying recovery or rerunning tools. The Runtime releases only the
+confirmed producer generation after its lease expires and preserves recorded
+tool uncertainty. This control does not end Graph or split-store turns.
+On SQLite, any persisted child must already be in a durable terminal state.
+Ending the parent does not change the child or its tool receipts. The next ordinary
+turn that uses the session context receives a short interruption notice, not
+the failed turn's tool calls or unconfirmed results.
+
 Connection configuration uses the shared CLI configuration and its `LINKTOOLS_`
 environment prefix. Model file-input policy uses the existing workspace file
 `.linktools/config.yaml`, shared by `ai-run`, `ai-acp`, and `ai-web`:
@@ -49,6 +106,19 @@ The console's "Captured input MIME types" panel shows the expanded, normalized
 authoring tokens. These stored MIME permissions are not re-expanded at restore.
 A match permits an input but does not verify provider support; SDK encoding and
 resource limits still apply.
+
+Use **Attach files** in the conversation composer to select local files.
+Selected files are sent with the message, not read from the server workspace.
+A message accepts up to 32 nonempty files, subject to the Runtime's input budget.
+The Runtime uses its configured Object Store for attachment bodies;
+conversation history carries attachment summaries, not file bytes.
+The default attachment total is 5 MiB of original file bytes per turn. Embedded
+hosts can set `RuntimeFeatures(..., limits=PromptLimits(max_turn_attachment_bytes=...))`;
+a lower `max_binary_input_bytes` still applies. Web clients read the effective
+limit from `/api/config`. The HTTP JSON allowance includes Base64 expansion.
+Attachment bytes have a separate bound from stored text context; model input
+limits and token accounting still depend on the selected provider.
+The Web composer uses the default Agent.
 
 To allow image attachments for one invocation, use `LINKTOOLS_MODEL_VISION=1 ai-web`.
 The same environment variable works for `ai-run` and `ai-acp`. `LINKTOOLS_MODEL_VISION=1`
@@ -274,6 +344,51 @@ The console does not introduce a private lock, heartbeat, background result
 consumer, or alternative recovery implementation. See the
 [Runtime history guide](runtime-history.md) for storage-specific recovery and
 publication guarantees.
+
+### Ordinary turns across processes
+
+A host running ai-web with shared SQL storage can optionally supply a
+`TurnNoticeTransport` to each process. Keep Runtime open while serving the app
+and enable ASGI lifespan so the app can attach and detach the bridge:
+
+```python
+from linktools.ai.runtime import Runtime, TurnNoticeTransport
+from linktools.ai.web import create_app
+
+
+def build_console(runtime: Runtime, transport: TurnNoticeTransport):
+    return create_app(runtime=runtime, turn_notice_transport=transport)
+```
+
+For Redis Pub/Sub, pass an open async Redis client that the host owns.
+All processes sharing the same storage use the same deployment prefix;
+use distinct prefixes for independent deployments. Redis DB numbers do not
+isolate Pub/Sub subscriptions.
+
+```python
+from linktools.ai.runtime.redis_notices import RedisTurnNoticeTransport
+
+transport = RedisTurnNoticeTransport(redis_client, prefix="my-deployment")
+app = create_app(runtime=runtime, turn_notice_transport=transport)
+```
+
+Use the same notification backend and channel configuration for processes with
+the same Runtime namespace and tenant. The host owns the transport and its
+credentials. The bridge sends only admission and terminal hints after commit,
+not prompt text, results or live token deltas. The receiving console reads
+committed state through the existing authorized History API. A notification
+does not confer access, replace SQL, or allow a receiver to recover a live turn.
+A single-process host does not need to configure a transport. No database
+polling or separate broker is required by the default setup.
+
+On a reconnect or known delivery gap, the transport signals a gap even if a
+browser's SSE connection stayed open. The console forwards that gap on the
+existing session stream, and the browser uses the authorized session API to
+fill missing committed history in pages.
+A process crash after the SQL commit but before publishing a notice cannot be
+detected by this bridge. If the browser stays connected without receiving a gap
+or another update, use **Refresh** to read the committed state. Refresh does not
+rerun the turn.
 
 ## Command consolidation and coverage
 

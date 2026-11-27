@@ -119,7 +119,7 @@ class TaskBoundExecutionRecovery(Protocol):
         self,
         graph_id: str,
         request: RecoverGraphRequest,
-    ) -> None: ...
+    ) -> frozenset[str]: ...
 
 
 class TaskGraphService(TaskGraphQueryService, Protocol):

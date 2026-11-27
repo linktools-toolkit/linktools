@@ -37,19 +37,16 @@ from ..core import (
     ToolOperationStatus,
     UsageMetrics,
     canonical_sha256,
-    normalize_json_value,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..storage import StoredPayload
 from ..spec import CapabilityRef, RepositoryInstructionResolver, RepositoryInstructions
 from ..inputs import CanonicalUserInput
-from ._tool_boundary import is_instruction_file_read
 from ._repository_instructions import (
-    _RepositoryInstructionApproval,
-    _merge_repository_instructions,
-    _repository_instruction_signature,
+    _discover_repository_overlay,
+    _instruction_paths,
     _repository_instructions_contain,
-    _validate_repository_instruction_frontier,
+    _validate_repository_instruction_overlay,
 )
 from ..execution import (
     ExecutionRecoveryEffect,
@@ -67,7 +64,6 @@ from ..persistence.contracts import (
     PendingDeferredCall,
     PendingToolContinuation,
     RecoveryHandoffPhase,
-    RepositoryInstructionBarrier,
     ToolOperationRecord,
 )
 from ..session import ConversationCursor
@@ -78,6 +74,22 @@ _logger = environ.get_logger("ai.runtime.local")
 _T = TypeVar("_T")
 
 
+def _is_standalone_prepared_terminal(execution: ExecutionRecord) -> bool:
+    recovery = execution.recovery
+    return (
+        execution.status is ExecutionStatus.STARTED
+        and execution.session_id is None
+        and execution.conversation
+        and execution.parent_execution_id is None
+        and not execution.requires_task_invocation_capture
+        and recovery is not None
+        and recovery.handoff_phase is RecoveryHandoffPhase.PREPARED
+        and recovery.terminal_handoff is not None
+        and recovery.terminal_handoff.conversation is None
+        and recovery.terminal_handoff.outcome.terminal_status is ExecutionStatus.SUCCEEDED
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _DeferredResume:
     execution: ExecutionRecord
@@ -86,7 +98,6 @@ class _DeferredResume:
     producer_generation: int
     binding: AgentBinding = field(repr=False, compare=False)
     output_retries_used: int
-    repository_instruction_approvals: Mapping[str, _RepositoryInstructionApproval] = field(default_factory=dict)
 
 
 class _RecoveryCoordinatorPort(Protocol):
@@ -193,7 +204,6 @@ class _RecoveryCoordinatorPort(Protocol):
         call: ToolCallPart,
         metadata: Mapping[str, object],
         *,
-        repository_instruction_frontier: str | None = None,
         capability_ref: CapabilityRef | None = None,
         operation_id: str | None,
     ) -> PendingDeferredCall: ...
@@ -374,11 +384,10 @@ class _RecoveryCoordinatorPort(Protocol):
         reference: RuntimePayloadRef | None,
     ) -> RepositoryInstructions | None: ...
 
-    async def commit_repository_instruction_barrier(
+    async def commit_repository_instruction_overlay(
         self,
         execution: ExecutionRecord,
         overlay: RepositoryInstructions,
-        barrier: RepositoryInstructionBarrier,
         *,
         producer_generation: int | None = None,
     ) -> ExecutionRecord: ...
@@ -429,11 +438,11 @@ class _RecoveryCoordinator:
         arguments: dict[str, object],
         path_fields: tuple[str, ...],
         producer_generation: int | None = None,
-    ) -> tuple[RepositoryInstructions | None, bool]:
+    ) -> RepositoryInstructions | None:
         paths = _instruction_paths(arguments, path_fields)
         resolver = self._instruction_resolver
         if not paths or resolver is None:
-            return overlay, False
+            return overlay
         current = await self._port.load_recovery_execution(
             execution.execution_id,
             tenant_id=self._port.tenant_id,
@@ -448,66 +457,19 @@ class _RecoveryCoordinator:
         persisted_overlay = await self._port.load_repository_instructions(
             current.recovery.repository_instruction_overlay
         )
-        _validate_repository_instruction_frontier(current, persisted_overlay)
-        arguments_digest = canonical_sha256(normalize_json_value(arguments))
-        matching = tuple(
-            barrier
-            for barrier in current.recovery.repository_instruction_barriers
-            if barrier.agent_run_id == current.recovery.agent_run_id
-            and barrier.tool_call_id == tool_call_id
-        )
-        instruction_read = is_instruction_file_read(tool_name, arguments, path_fields)
-        if matching:
-            barrier = matching[0]
-            if barrier.arguments_digest != arguments_digest:
-                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            return persisted_overlay, not instruction_read
-
-        active = _merge_repository_instructions(initial, persisted_overlay)
-        excluded = frozenset(
-            document.source for document in (() if active is None else active.documents)
-        )
-        discovered: list[object] = []
-        discovered_sources = set(excluded)
-        for path in paths:
-            resolved = await resolver.resolve(
-                path,
-                exclude_sources=frozenset(discovered_sources),
-            )
-            for document in resolved.documents:
-                if document.source in discovered_sources:
-                    continue
-                discovered_sources.add(document.source)
-                discovered.append(document)
-        if not discovered:
-            return persisted_overlay, (
-                not instruction_read and _repository_instruction_signature(overlay)
-                != _repository_instruction_signature(persisted_overlay)
-            )
-        new_documents = RepositoryInstructions(tuple(discovered))
-        next_overlay = _merge_repository_instructions(persisted_overlay, new_documents)
+        _validate_repository_instruction_overlay(current, persisted_overlay)
+        next_overlay = await _discover_repository_overlay(resolver, initial, persisted_overlay, paths)
         if next_overlay is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        cumulative = _merge_repository_instructions(initial, next_overlay)
-        assert cumulative is not None
-        resolver.validate(cumulative)
-        barrier = RepositoryInstructionBarrier(
-            current.recovery.agent_run_id,
-            tool_call_id,
-            arguments_digest,
-        )
-        committed = await self._port.commit_repository_instruction_barrier(
-            current,
-            next_overlay,
-            barrier,
-            producer_generation=producer_generation,
+            return persisted_overlay
+        committed = await self._port.commit_repository_instruction_overlay(
+            current, next_overlay, producer_generation=producer_generation,
         )
         if committed.recovery is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         committed_overlay = await self._port.load_repository_instructions(
             committed.recovery.repository_instruction_overlay
         )
-        _validate_repository_instruction_frontier(committed, committed_overlay)
+        _validate_repository_instruction_overlay(committed, committed_overlay)
         if (
             committed_overlay is None
             or not _repository_instructions_contain(committed_overlay, next_overlay)
@@ -519,7 +481,7 @@ class _RecoveryCoordinator:
             current.recovery.agent_run_id,
             tool_call_id,
         )
-        return committed_overlay, not instruction_read
+        return committed_overlay
 
     async def commit_deferred_pause(
         self,
@@ -529,7 +491,6 @@ class _RecoveryCoordinator:
         agent_run_id: str,
         paused_at: datetime,
         producer_generation: int | None = None,
-        repository_instruction_frontiers: Mapping[str, str] | None = None,
         capability_refs: Mapping[str, CapabilityRef] | None = None,
     ) -> ExecutionRecord:
         current = await self._port.load_recovery_execution(
@@ -564,10 +525,6 @@ class _RecoveryCoordinator:
                     metadata.get(call.tool_call_id, {}),
                     operation_id=operation_ids.get(call.tool_call_id),
                     capability_ref=None if capability_refs is None else capability_refs.get(call.tool_call_id),
-                    repository_instruction_frontier=(
-                        None if repository_instruction_frontiers is None
-                        else repository_instruction_frontiers.get(call.tool_call_id)
-                    ),
                 )
             )
         approvals = tuple(approvals_list)
@@ -1082,7 +1039,7 @@ class _RecoveryCoordinator:
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return latest, launched
-        if current.status is ExecutionStatus.FINALIZING:
+        if current.status is ExecutionStatus.FINALIZING or _is_standalone_prepared_terminal(current):
             if (current.recovery is None or current.recovery.terminal_handoff is None
                     or current.recovery.handoff_phase is RecoveryHandoffPhase.NONE):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1231,7 +1188,7 @@ class _RecoveryCoordinator:
         resolved = await self._load_deferred_results(current, continuation)
         if resolved is None:
             return None
-        deferred_results, repository_approvals = resolved
+        deferred_results = resolved
         checkpoint = await self._port.load_interrupted_checkpoint(
             continuation.source_agent_run_id, execution=current,
         )
@@ -1255,14 +1212,13 @@ class _RecoveryCoordinator:
             resumed_execution, tuple(checkpoint.messages if checkpoint.context_messages is None
                                      else checkpoint.context_messages),
             deferred_results, current.revision + 1,
-            binding, checkpoint.output_retries_used, repository_approvals,
+            binding, checkpoint.output_retries_used,
         )
 
     async def _load_deferred_results(
-        self, execution: ExecutionRecord, continuation: PendingToolContinuation,
-    ) -> tuple[DeferredToolResults, dict[str, _RepositoryInstructionApproval]] | None:
+        self, execution: ExecutionRecord, continuation: PendingToolContinuation, *, settled_only: bool = False,
+    ) -> DeferredToolResults | None:
         deferred_results = DeferredToolResults()
-        repository_approvals: dict[str, _RepositoryInstructionApproval] = {}
         for pending in continuation.approvals:
             approval_id = deferred_resource_id(
                 "approval-v1",
@@ -1286,28 +1242,14 @@ class _RecoveryCoordinator:
                 deferred_results.approvals[pending.tool_call_id] = ToolApproved(
                     override_args=arguments
                 )
-                # Only runtime-frozen pending metadata is evidence of the
-                # original model's instruction frontier, never resolution metadata.
-                metadata = pending.metadata.get("linktools")
-                if metadata is not None:
-                    frontier = (metadata.get("repository_instruction_frontier")
-                                if isinstance(metadata, Mapping) else None)
-                    if (
-                        not isinstance(frontier, str)
-                        or len(frontier) != 64
-                        or any(character not in "0123456789abcdef" for character in frontier)
-                    ):
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    repository_approvals[pending.tool_call_id] = _RepositoryInstructionApproval(
-                        pending.tool_name, frontier,
-                    )
             elif record.status in {
                 ApprovalStatus.DENIED,
                 ApprovalStatus.CANCELLED,
             }:
-                await self._port.settle_denied_tool_result(
-                    execution, continuation.source_agent_run_id, pending.tool_call_id, record,
-                )
+                if not settled_only:
+                    await self._port.settle_denied_tool_result(
+                        execution, continuation.source_agent_run_id, pending.tool_call_id, record,
+                    )
                 deferred_results.approvals[pending.tool_call_id] = ToolDenied(
                     message=record.decision_message or "The tool call was denied."
                 )
@@ -1337,9 +1279,10 @@ class _RecoveryCoordinator:
             if record.result_payload is None or record.resolution_kind is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             result = await self._port.read_deferred_payload(record.result_payload)
-            await self._port.settle_external_tool_result(
-                execution, continuation.source_agent_run_id, pending.tool_call_id, record, result,
-            )
+            if not settled_only:
+                await self._port.settle_external_tool_result(
+                    execution, continuation.source_agent_run_id, pending.tool_call_id, record, result,
+                )
             if record.resolution_kind == "succeeded":
                 deferred_results.calls[pending.tool_call_id] = result
             elif record.resolution_kind == "retry":
@@ -1355,7 +1298,7 @@ class _RecoveryCoordinator:
             deferred_results.metadata[pending.tool_call_id] = dict(
                 record.resolution_metadata
             )
-        return deferred_results, repository_approvals
+        return deferred_results
 
     async def restore_resumed_deferred(
         self, execution: ExecutionRecord, *,
@@ -1368,9 +1311,8 @@ class _RecoveryCoordinator:
         resolved = await self._load_deferred_results(execution, execution.recovery.pending_tools)
         if resolved is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        results, approvals = resolved
         return _DeferredResume(
-            execution, history, results, producer_generation, binding, output_retries_used, approvals,
+            execution, history, resolved, producer_generation, binding, output_retries_used,
         )
 
     def _deferred_attempt_advanced(
@@ -1444,24 +1386,3 @@ class _RecoveryCoordinator:
             if page.next_cursor is None:
                 return
             cursor = page.next_cursor
-
-
-def _instruction_paths(
-    arguments: Mapping[str, object],
-    path_fields: tuple[str, ...],
-) -> tuple[str, ...]:
-    paths: list[str] = []
-    for field in path_fields:
-        value = arguments.get(field)
-        if value is None:
-            continue
-        if isinstance(value, str):
-            paths.append(value)
-            continue
-        if isinstance(value, (list, tuple)) and all(
-            isinstance(item, str) for item in value
-        ):
-            paths.extend(value)
-            continue
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    return tuple(paths)

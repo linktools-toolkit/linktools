@@ -18,11 +18,17 @@ from ..errors import AIError, ErrorCode
 from ..storage import Lease, TurnCoordination, TurnScope, TurnScopeIdentity, RenewingTurnScope, sql_observation_phase, sql_observation_scope
 from ._execution_authority import ExecutionAuthority, SourceTurnRevoked
 from ._sql import SqlStateStore
-from ._turn_sql import SqlTurnNotOwned, turn_hex, turn_session_address
+from ._ordinary_lineage import SessionTurnSegment, decode_session_lineage
+from ._session_turn_sql import (
+    MAX_REMEMBERED_SCOPE_BYTES, MAX_REMEMBERED_SCOPES, CanonicalDeferredFrontier, SessionInstructionFrontier,
+    SessionTurnKey, SqlSessionTurnReader, SqlSessionTurns, decode_instruction_scopes,
+)
+from ._split_step_source import SplitStepPin, SplitStepSourceObservation, SplitStepWaiting, SqlSplitStepSource
+from ._turn_sql import STANDALONE, SqlTurnNotOwned, turn_hex, turn_session_address
 from ._turn_sql_schema import TURN_REQUEST_MAX_BYTES
 from .state import (
     RecordLeaseTransition, RecordReplacement, StateGroupTransaction, StateStore, StateTransaction, StateTransactionNestingError,
-    StoredRecord, active_state_scope, record_key, scope_key,
+    StoredRecord, active_state_scope, record_key, scope_key, state_store_key,
 )
 
 if TYPE_CHECKING:
@@ -205,16 +211,21 @@ class StateTurnCoordination:
     def __init__(
         self, store: StateStore, *, namespace: str, tenant_id: str,
         read_only: bool = False, require_ready: Callable[[], None] | None = None,
-        _runtime_sql: bool = False, _coowned: bool = False,
+        _coowned: bool = False, _runtime_sql: bool = False,
     ) -> None:
+        from ._turn_sql_schema import RUNTIME_TURN_SCOPE
+
         self._read_only = read_only
         self._require_ready = require_ready
         self._store = store
-        self._execution_row_authority = _coowned and _runtime_sql and type(store) is SqlStateStore
-        self._runtime_sql = _runtime_sql and type(store) is SqlStateStore
+        self._runtime_sql = ((_runtime_sql or _coowned) and type(store) is SqlStateStore and
+                             store.store_key == state_store_key(namespace, tenant_id, "execution"))
+        if _coowned and not self._runtime_sql:
+            raise ValueError("coowned Runtime receipts require the SQL Execution partition")
+        self._execution_row_authority = _coowned
+        self._native_execution_receipts = _coowned
+        self._split_execution_receipts = self._runtime_sql and not _coowned
         if self._runtime_sql:
-            from ._turn_sql_schema import RUNTIME_TURN_SCOPE
-
             store.bind_runtime_turn_scope(TurnScopeIdentity(namespace, tenant_id, RUNTIME_TURN_SCOPE))
         self._records = _TurnRecords(namespace, tenant_id)
 
@@ -226,10 +237,30 @@ class StateTurnCoordination:
         from ._turn_sql_schema import RUNTIME_TURN_SCOPE
         return self._store if self._runtime_sql and scope == RUNTIME_TURN_SCOPE else None
 
+    async def _capture_sql_turn(self, source, scope, *, route, identity):
+        if route == "session":
+            kind, key = turn_session_address(identity)
+            if kind == STANDALONE:
+                route, identity = "request", key.decode("ascii")
+
+        async def capture(_tx):
+            result = await source._turn_transaction()._read_native_execution_receipt(
+                scope, route=route, identity=identity, split=self._split_execution_receipts,
+            )
+            return None if result is None else result[2]
+
+        return await source.read(capture)
+
+    async def _observe_sql_turn(self, source, scope, *, route, identity):
+        observation = await self._capture_sql_turn(source, scope, route=route, identity=identity)
+        return None if observation is None or observation.expired else observation.proof
+
     def _local_scope(self, scope: TurnScopeIdentity) -> str:
         if not isinstance(scope, TurnScopeIdentity):
             raise TypeError("turn scope must be a TurnScopeIdentity")
         if (scope.namespace, scope.tenant_id) != (self._records.namespace, self._records.tenant_id):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if self._coowned and self._sql_source(scope.scope) is None:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         return scope.scope
 
@@ -241,6 +272,50 @@ class StateTurnCoordination:
         return RenewingTurnScope(
             self, scope, session_key=session_key, request_key=request_key,
             request_digest=request_digest, execution_id=execution_id, owner_id=owner_id,
+        )
+
+    def _enter_existing(
+        self, scope: TurnScopeIdentity, *, session_key: str, request_key: str,
+        request_digest: str, execution_id: str, owner_id: str,
+    ) -> TurnScope:
+        local_scope = self._local_scope(scope)
+        source = self._sql_source(local_scope)
+        if source is None:
+            return self.enter(scope, session_key=session_key, request_key=request_key,
+                              request_digest=request_digest, execution_id=execution_id, owner_id=owner_id)
+        kind, _ = turn_session_address(session_key)
+        if kind != STANDALONE and not self._split_execution_receipts:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+        async def claim(seconds: float) -> TurnCoordination | None:
+            token = uuid4().hex
+
+            async def regrant(_tx: StateTransaction) -> TurnCoordination | None:
+                try:
+                    transaction = source._turn_transaction()
+                    if self._split_execution_receipts and kind != STANDALONE:
+                        from ._split_turn_anchor import SplitSessionTurnTransactions
+                        return await SplitSessionTurnTransactions(transaction, scope).regrant(
+                            session_key=session_key, request_key=request_key, request_digest=request_digest,
+                            execution_id=execution_id, owner_id=owner_id, token=token, duration=_duration(seconds),
+                        )
+                    return await transaction._regrant_native_execution_receipt(
+                        scope, session_key=session_key,
+                        execution_id=execution_id, request_key=request_key, request_digest=request_digest,
+                        owner_id=owner_id, token=token, duration=_duration(seconds),
+                        split=self._split_execution_receipts,
+                    )
+                except SqlTurnNotOwned as error:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+
+            return await self._mutation(regrant, lambda: self._confirmed(
+                local_scope, execution_id, receipt=token, kind="claim",
+                expected_claim=(session_key, request_key, request_digest, owner_id),
+            ))
+
+        return RenewingTurnScope(
+            self, scope, session_key=session_key, request_key=request_key,
+            request_digest=request_digest, execution_id=execution_id, owner_id=owner_id, _claim=claim,
         )
 
     def _outside_transaction(self) -> None:
@@ -361,7 +436,7 @@ class StateTurnCoordination:
         local_scope = self._local_scope(scope)
         if (source := self._sql_source(local_scope)) is not None:
             self._outside_transaction()
-            proof = await source.observe_turn_admission(scope, route="execution", identity=execution_id, coowned=self._coowned)
+            proof = await self._observe_sql_turn(source, scope, route="execution", identity=execution_id)
             return None if proof is None else proof.coordination(scope)
         graph = await self._observe(self._local_scope(scope), "turn_execution", execution_id)
         return None if graph is None else self._coordination(graph)
@@ -370,7 +445,7 @@ class StateTurnCoordination:
         local_scope = self._local_scope(scope)
         if (source := self._sql_source(local_scope)) is not None:
             self._outside_transaction()
-            proof = await source.observe_turn_admission(scope, route="request", identity=request_key, coowned=self._coowned)
+            proof = await self._observe_sql_turn(source, scope, route="request", identity=request_key)
             return None if proof is None else proof.coordination(scope)
         graph = await self._observe(self._local_scope(scope), "turn_request", request_key)
         return None if graph is None else self._coordination(graph)
@@ -390,8 +465,8 @@ class StateTurnCoordination:
         if (source := self._sql_source(local_scope)) is not None:
             async def sql_capture(transaction: StateGroupTransaction):
                 receipt = await requests.get(idempotency_scope, idempotency_key, tenant_id=scope.tenant_id)
-                return receipt, None if receipt is not None else await source.capture_turn_admission(
-                    scope, route="request", identity=request_key, coowned=self._coowned,
+                return receipt, None if receipt is not None else await self._capture_sql_turn(
+                    source, scope, route="request", identity=request_key,
                 )
 
             stores = tuple(dict.fromkeys((self._store, requests.state_store)))
@@ -436,7 +511,7 @@ class StateTurnCoordination:
         local_scope = self._local_scope(scope)
         if (source := self._sql_source(local_scope)) is not None:
             self._outside_transaction()
-            proof = await source.observe_turn_admission(scope, route="session", identity=session_key, coowned=self._coowned)
+            proof = await self._observe_sql_turn(source, scope, route="session", identity=session_key)
             return None if proof is None else proof.coordination(scope)
         graph = await self._observe(self._local_scope(scope), "turn_session", session_key)
         return None if graph is None else self._coordination(graph)
@@ -449,7 +524,7 @@ class StateTurnCoordination:
         local_scope = self._local_scope(scope)
         if (source := self._sql_source(local_scope)) is not None:
             self._outside_transaction()
-            proof = await source.observe_turn_admission(scope, route="session", identity=session_key, coowned=self._coowned)
+            proof = await self._observe_sql_turn(source, scope, route="session", identity=session_key)
             return proof is not None and (proof.execution_id, proof.owner_id, proof.fence) == (execution_id, owner_id, fence)
         graph = await self._observe(self._local_scope(scope), "turn_session", session_key)
         if graph is None:
@@ -480,11 +555,17 @@ class StateTurnCoordination:
 
     async def _mutation(
         self, callback: Callable[[StateTransaction], Awaitable[_Value]],
-        readback: Callable[[], Awaitable[_Value | None]],
+        readback: Callable[[], Awaitable[_Value | None]], *, session_store: SqlStateStore | None = None,
     ) -> _Value:
         self._writable()
+
+        async def mutate(group: StateGroupTransaction) -> _Value:
+            return await callback(group.transaction(self._store))
+
         for attempt in range(3):
             try:
+                if session_store is not None:
+                    return await self._store.storage_group.mutate((self._store, session_store), mutate)
                 return await self._store.mutate(callback)
             except _TurnGraphReadError as error:
                 # The failed mutation has rolled back before rechecking authority.
@@ -511,10 +592,14 @@ class StateTurnCoordination:
 
     async def _confirmed(
         self, scope: str, execution_id: str, *, receipt: str, kind: str,
+        expected_claim: tuple[str, str, str, str] | None = None,
     ) -> TurnCoordination | bool | None:
         if (source := self._sql_source(scope)) is not None:
             full_scope = TurnScopeIdentity(self._records.namespace, self._records.tenant_id, scope)
-            return await source.confirm_turn_admission(full_scope, execution_id=execution_id, receipt=receipt, kind=kind, coowned=self._coowned)
+            return await source.read(lambda _tx: source._turn_transaction()._confirm_native_execution_receipt(
+                full_scope, execution_id=execution_id, receipt=receipt, kind=kind, expected_claim=expected_claim,
+                split=self._split_execution_receipts,
+            ))
         execution = await self._store.read(lambda tx: self._load(tx, scope, "turn_execution", execution_id))
         if execution is None:
             return None
@@ -562,6 +647,7 @@ class StateTurnCoordination:
 
         return await self._mutation(claim, lambda: self._confirmed(
             local_scope, execution_id, receipt=token, kind="claim",
+            expected_claim=(session_key, request_key, request_digest, owner_id),
         ))
 
     async def _claim_in_transaction(
@@ -572,9 +658,22 @@ class StateTurnCoordination:
     ) -> TurnCoordination | None:
         if (source := self._sql_source(local_scope)) is not None:
             scope = TurnScopeIdentity(self._records.namespace, self._records.tenant_id, local_scope)
-            return await source.claim_turn_admission(
-                scope, session_key=session_key, request_key=request_key, request_digest=request_digest,
-                execution_id=execution_id, duration=duration, owner_id=owner_id, token=token, coowned=self._coowned, publish=publish,
+            kind, address = turn_session_address(session_key)
+            if kind != STANDALONE:
+                if self._split_execution_receipts:
+                    from ._split_turn_anchor import SplitSessionTurnTransactions
+                    if publish is not None:
+                        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                    return await SplitSessionTurnTransactions(source._turn_transaction(), scope).claim(
+                        session_key=session_key, request_key=request_key, request_digest=request_digest,
+                        execution_id=execution_id, owner_id=owner_id, token=token, duration=duration,
+                    )
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            if address != turn_hex(request_key, TURN_REQUEST_MAX_BYTES):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            return await source._turn_transaction()._claim_execution_owned_standalone(
+                scope, execution_id=execution_id, request_key=request_key, request_digest=request_digest,
+                duration=duration, owner_id=owner_id, token=token, publish=publish,
             )
         keys = {"turn_session": self._records.key(local_scope, "turn_session", session_key),
                 "turn_request": self._records.key(local_scope, "turn_request", request_key),
@@ -701,6 +800,8 @@ class StateTurnCoordination:
                     or value[2:4] != [self._records.namespace, self._records.tenant_id]):
                 return None
             scope = TurnScopeIdentity.validate_scope(value[4])
+            if self._coowned and self._sql_source(scope) is None:
+                return None
             execution_id, session_key, request_key = map(_text, value[5:])
             return scope, execution_id, session_key, request_key
         except (ValueError, TypeError):
@@ -720,19 +821,14 @@ class StateTurnCoordination:
             async def sql_change(tx: StateTransaction) -> TurnCoordination | bool | None:
                 if lease is not None:
                     owner, session_key, request_key = lease
-                if kind == "release":
-                    return await source.retire_turn_admission(
-                        full_scope, session_key=session_key, request_key=request_key,
-                        execution_id=execution_id, token=owner.token, fence=owner.fence, receipt=receipt, coowned=self._coowned,
-                    )
-                change = await source.change_turn_admission(
+                changed = await source._turn_transaction()._change_native_execution_receipt(
                     full_scope, kind=kind, execution_id=execution_id, receipt=receipt, duration=duration,
-                    lease=None if lease is None else (session_key, request_key, owner.token, owner.fence), coowned=self._coowned,
+                    split=self._split_execution_receipts,
+                    lease=None if lease is None else (session_key, request_key, owner.token, owner.fence),
                 )
-                return change is not None if kind == "cancel" else change
+                return changed if kind == "renew" else changed is True
 
             if lease is not None:
-                from ._turn_sql import turn_hex, turn_session_address
                 try:
                     turn_hex(lease[0].token, 32)
                     turn_session_address(lease[1])
@@ -858,4 +954,6 @@ def validate_turn_records(records: Sequence[StoredRecord], *, namespace: str, te
         codec.graph(execution, request, session)
 
 
-__all__ = ["ExecutionAuthority", "SourceTurnRevoked", "SourceTurnWriteFence", "StateTurnCoordination", "validate_turn_records"]
+__all__ = ["ExecutionAuthority", "SourceTurnRevoked", "SourceTurnWriteFence", "StateTurnCoordination", "SqlSessionTurns", "SqlSessionTurnReader", "SessionTurnKey", "SessionTurnSegment", "CanonicalDeferredFrontier", "SessionInstructionFrontier", "decode_session_lineage", "validate_turn_records",
+           "MAX_REMEMBERED_SCOPE_BYTES", "MAX_REMEMBERED_SCOPES", "decode_instruction_scopes",
+           "SplitStepPin", "SplitStepSourceObservation", "SplitStepWaiting", "SqlSplitStepSource"]

@@ -13,9 +13,10 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence.codec import decode_fact, decode_operation, encode_fact, encode_operation
 from linktools.ai.persistence.snapshots import _decode_snapshot_sequences
 from linktools.ai.persistence.state import (
-    STREAM_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, FactQuery, FactScanCursor,
-    OperationQuery, OperationScanCursor, StateTransaction, StoredFact, StoredOperation,
-    capability_receipt_key, record_key, stream_key, validate_stream_key,
+    STREAM_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, RECORD_KEY_MAX_BYTES, RELATION_KEY_MAX_BYTES,
+    PARENT_KEY_MAX_BYTES, FactQuery, FactScanCursor, OperationQuery, OperationScanCursor,
+    RecordQuery, StateTransaction, StoredFact, StoredOperation,
+    capability_receipt_key, capability_store_key, record_key, stream_key, validate_stream_key,
 )
 
 from .test_state_batch_delete_backends import _open_store, _record
@@ -26,7 +27,8 @@ def _tuple(*parts: str) -> bytes:
 
 
 def test_stream_components_preserve_exact_unicode_scope_and_empty_owner() -> None:
-    namespace, tenant, owner = "界" * 42 + "ab", "界" * 42 + "ab", "界" * 42 + "ab"
+    namespace = tenant = "界" * 21 + "a"
+    owner = "界" * 42 + "ab"
     address = stream_key(namespace, tenant, "trace", "event", (owner,))
     assert address == _tuple("stream", namespace, tenant, "trace", "event", owner)
     assert stream_key("ns", "tenant", "conversation", "session_list_tenant", ()) == _tuple(
@@ -66,11 +68,15 @@ def test_stream_and_receipt_bounds_preserve_current_wire_and_private_repr() -> N
     with pytest.raises(AIError) as snapshot:
         _decode_snapshot_sequences([{"stream_key": (key + b"x").hex(), "value": 1}])
     assert snapshot.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    namespace = capability = write = "界" * 42 + "ab"
-    tenant = run = "界" * 42 + "ab"
+    namespace = tenant = "界" * 21 + "a"
+    capability = write = run = "界" * 42 + "ab"
     receipt = capability_receipt_key(namespace, tenant, capability, (1 << 63) - 1, run, write)
-    assert receipt == b"\x02" + _tuple("capability-write", namespace, tenant, capability, str((1 << 63) - 1), run, write)
-    assert len(receipt) == 690 <= OPERATION_KEY_MAX_BYTES
+    assert receipt == (b"\x02" + capability_store_key(namespace, tenant, capability)
+                       + ((1 << 63) - 1).to_bytes(8, "big") + _tuple(run, write))
+    assert len(receipt) == OPERATION_KEY_MAX_BYTES == 301
+    assert capability_receipt_key(namespace, tenant, capability, 1, "a", "bc") != capability_receipt_key(
+        namespace, tenant, capability, 1, "ab", "c",
+    )
 
 
 @pytest.mark.asyncio
@@ -126,6 +132,25 @@ async def test_bare_store_stream_scope_family_counters_and_pagination(backend: s
             with pytest.raises(ValueError):
                 await transaction.next_sequence(b"x" * (STREAM_KEY_MAX_BYTES + 1))
         await store.mutate(reject_overflow)
+
+
+@pytest.mark.asyncio
+async def test_sql_raw_record_relations_and_fact_owner_keep_the_full_address(tmp_path: Path) -> None:
+    owner = replace(_record(1), key=b"r" * RECORD_KEY_MAX_BYTES,
+                    scope_key=b"s" * RELATION_KEY_MAX_BYTES, parent_key=b"p" * PARENT_KEY_MAX_BYTES)
+    fact = StoredFact(b"stream", 1, owner.key, "probe", None, None, {})
+    async with _open_store("sql", tmp_path) as store:
+        async def seed(transaction: StateTransaction) -> None:
+            await transaction.insert_record(owner)
+            await transaction.insert_fact(fact)
+
+        await store.mutate(seed)
+        assert await store.read_record(owner.key) == owner
+        assert await store.read(lambda tx: tx.list_records(RecordQuery(scope_key=owner.scope_key))) == (owner,)
+        assert await store.read(lambda tx: tx.list_records(RecordQuery(parent_key=owner.parent_key))) == (owner,)
+        assert await store.read(lambda tx: tx.list_facts(FactQuery(fact.stream_key))) == (fact,)
+        await store.mutate(lambda tx: tx.delete_fact_streams(owner.key))
+        assert await store.read(lambda tx: tx.list_facts(FactQuery(fact.stream_key))) == ()
 
 
 @pytest.mark.asyncio

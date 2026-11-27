@@ -5,16 +5,16 @@
 
 CREATE TABLE ai_state_records (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
-	`key` VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
-	scope_key VARBINARY(768) NULL COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.',
+	store_key VARBINARY(64) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
+	`key` VARBINARY(640) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
+	scope_key VARBINARY(640) NULL COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.',
 	subject_id VARBINARY(128) NULL COMMENT 'Exact UTF-8 subject identifier used for lookups within a record scope.',
-	parent_key VARBINARY(768) NULL COMMENT 'Bounded binary parent identity used by hierarchical list queries.',
+	parent_key VARBINARY(640) NULL COMMENT 'Bounded binary parent identity used by hierarchical list queries.',
 	kind VARCHAR(32) NOT NULL COMMENT 'Stable persisted record kind such as session, execution, task_node, or agent_run.',
 	sort_key LONGBLOB NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current SQL-queryable state for record kinds with persisted state-machine semantics.',
 	storage_revision BIGINT NOT NULL COMMENT 'Physical compare-and-swap revision incremented by every record mutation.',
-	lease_owner TEXT NULL COMMENT 'Current durable lease owner for record kinds using claim and fencing semantics.',
+	lease_owner VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current durable lease owner for record kinds using claim and fencing semantics.',
 	lease_fence BIGINT NOT NULL COMMENT 'Monotonic fencing token for the current durable record lease.' DEFAULT 0,
 	lease_expires_at DATETIME(6) NULL COMMENT 'Database-authoritative expiry time of the current durable lease.',
 	payload_json JSON NOT NULL COMMENT 'Canonical domain JSON object.',
@@ -23,7 +23,7 @@ CREATE TABLE ai_state_records (
 	scope_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Single SHA-256 lookup projection of the complete scope_key; raw identity must also match.',
 	parent_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Single SHA-256 lookup projection of the complete parent_key; raw identity must also match.',
 	sort_prefix VARBINARY(128) NOT NULL COMMENT 'First 128 bytes of the full sort key; non-unique query projection only.',
-	scan_kind VARCHAR(34) NOT NULL COMMENT 'Write-through kind and execution recovery candidate projection; never domain authority.',
+	scan_kind VARCHAR(34) NOT NULL COMMENT 'Write-through kind and recovery candidate projection; never domain authority.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
@@ -38,20 +38,19 @@ CREATE TABLE ai_state_records (
 
 CREATE TABLE ai_execution_records (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
-	`key` VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
-	scope_key VARBINARY(768) NULL COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.',
+	store_key VARBINARY(64) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
+	`key` VARBINARY(360) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
+	scope_key VARBINARY(300) NULL COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.',
 	subject_id VARBINARY(128) NULL COMMENT 'Exact UTF-8 subject identifier used for lookups within a record scope.',
-	parent_key VARBINARY(768) NULL COMMENT 'Bounded binary parent identity used by hierarchical list queries.',
+	parent_key VARBINARY(239) NULL COMMENT 'Bounded binary parent identity used by hierarchical list queries.',
 	kind VARCHAR(32) NOT NULL COMMENT 'Stable persisted record kind such as session, execution, task_node, or agent_run.',
-	sort_key LONGBLOB NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
+	sort_key VARBINARY(360) NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current SQL-queryable state for record kinds with persisted state-machine semantics.',
 	storage_revision BIGINT NOT NULL COMMENT 'Physical compare-and-swap revision incremented by every record mutation.',
-	lease_owner TEXT NULL COMMENT 'Current durable lease owner for record kinds using claim and fencing semantics.',
+	lease_owner VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current durable lease owner for record kinds using claim and fencing semantics.',
 	lease_fence BIGINT NOT NULL COMMENT 'Monotonic fencing token for the current durable record lease.' DEFAULT 0,
 	lease_expires_at DATETIME(6) NULL COMMENT 'Database-authoritative expiry time of the current durable lease.',
 	payload_json JSON NOT NULL COMMENT 'Domain JSON object; execution reference digests are stored in typed columns.',
-	payload_bytes LONGBLOB NULL COMMENT 'Optional binary content body owned by this record; ordinary domain state remains JSON.',
 	key_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Single SHA-256 lookup projection of the complete key; raw identity must also match.',
 	scope_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Single SHA-256 lookup projection of the complete scope_key; raw identity must also match.',
 	parent_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Single SHA-256 lookup projection of the complete parent_key; raw identity must also match.',
@@ -63,13 +62,16 @@ CREATE TABLE ai_execution_records (
 	output_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Canonical execution reference SHA-256.',
 	input_first_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Canonical execution reference SHA-256.',
 	output_first_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Canonical execution reference SHA-256.',
-	scan_kind VARCHAR(34) NOT NULL COMMENT 'Write-through kind and execution recovery candidate projection; never domain authority.',
+	scan_kind VARCHAR(34) NOT NULL COMMENT 'Write-through kind and recovery candidate projection; never domain authority.',
 	turn_slot_kind SMALLINT COMMENT 'Runtime slot family of the exact source owner.',
-	turn_slot_key VARBINARY(128) COMMENT 'Raw runtime slot identity, separate from its family.',
+	turn_slot_key VARBINARY(64) COMMENT 'Raw runtime slot identity, separate from its family.',
 	turn_token VARBINARY(32) COMMENT 'Exact generated runtime lease token.',
 	turn_fence BIGINT COMMENT 'Session fencing generation of the coordinated execution.',
 	turn_expiry DATETIME(6) COMMENT 'Last granted source deadline; active only with a lease token.',
 	turn_revision BIGINT NOT NULL COMMENT 'Independent writable revision for source lease renewal.' DEFAULT 0,
+	turn_request_route VARBINARY(64) NOT NULL COMMENT 'Unique live request, parked standalone request, or row-local unoccupied address.',
+	turn_occupied_route VARBINARY(64) NOT NULL COMMENT 'Unique active or parked split-store session or row-local unoccupied address.',
+	turn_receipt JSON COMMENT 'Compact retained coordination receipt, independent of the execution payload.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
@@ -79,86 +81,17 @@ CREATE TABLE ai_execution_records (
 	KEY ix_scope_locator_subject_id (scope_locator, subject_id),
 	KEY ix_store_key_scan_kind_sort_prefix (store_key, scan_kind, sort_prefix),
 	KEY ix_updated_at (updated_at),
-	UNIQUE KEY uk_store_key_key_locator (store_key, key_locator)
+	UNIQUE KEY uk_store_key_key_locator (store_key, key_locator),
+	UNIQUE KEY uk_store_key_turn_request_route (store_key, turn_request_route),
+	UNIQUE KEY uk_store_key_turn_occupied_route (store_key, turn_occupied_route)
 )ENGINE=InnoDB COMMENT='Authoritative execution lifecycle, request receipts, and content references.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
-
-CREATE TABLE ai_turn_slots (
-	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(32) NOT NULL COMMENT 'Physical StateStore partition.',
-	session_kind SMALLINT NOT NULL COMMENT 'Conversation or standalone turn slot.',
-	session_key VARBINARY(128) NOT NULL COMMENT 'Exact coordination session identity.',
-	active_execution_id VARBINARY(128) COMMENT 'Current admission owner, or NULL for an idle slot.',
-	lease_token VARBINARY(32) COMMENT 'Exact active lease token, or NULL for an idle slot.',
-	lease_fence BIGINT NOT NULL COMMENT 'Lease fencing generation.' DEFAULT 0,
-	lease_expires_at DATETIME(6) COMMENT 'Source-clock lease deadline.',
-	revision BIGINT NOT NULL COMMENT 'Physical slot revision for guarded writes.' DEFAULT 0,
-	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
-	PRIMARY KEY (id),
-	KEY ix_created_at (created_at),
-	KEY ix_updated_at (updated_at),
-	UNIQUE KEY uk_store_key_session_kind_session_key (store_key, session_kind, session_key)
-)ENGINE=InnoDB COMMENT='Stable source turn lease slot, including the idle fence high-water mark.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
-
-CREATE TABLE ai_turn_admissions (
-	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(32) NOT NULL COMMENT 'Physical StateStore partition.',
-	session_kind SMALLINT NOT NULL COMMENT 'Conversation or standalone turn slot.',
-	execution_id VARBINARY(128) NOT NULL COMMENT 'Exact coordination execution identity.',
-	session_key VARBINARY(128) NOT NULL COMMENT 'Exact coordination session identity.',
-	retired_request_key VARBINARY(64) COMMENT 'Original request identity, retained only after retirement.',
-	route_kind SMALLINT NOT NULL COMMENT 'Active request or retired execution route.',
-	route_key VARBINARY(128) NOT NULL COMMENT 'Exact active request or retired execution identity.',
-	request_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Digest of the admitted request.',
-	owner_id VARBINARY(32) NOT NULL COMMENT 'Producer that acquired the admission.',
-	lease_fence BIGINT NOT NULL COMMENT 'Lease fencing generation.',
-	cancel_requested BOOL NOT NULL COMMENT 'Whether the current admission was cancelled.',
-	receipt_id VARBINARY(32) NOT NULL COMMENT 'Latest source mutation receipt identifier.',
-	receipt_kind VARCHAR(8) NOT NULL COMMENT 'Latest source mutation operation.',
-	control_id BIGINT COMMENT 'Local row address of the execution authority; rebuilt on restore.',
-	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
-	PRIMARY KEY (id),
-	KEY ix_created_at (created_at),
-	KEY ix_updated_at (updated_at),
-	UNIQUE KEY uk_store_key_execution_id (store_key, execution_id),
-	UNIQUE KEY uk_store_key_route_kind_route_key (store_key, route_kind, route_key)
-)ENGINE=InnoDB COMMENT='Source turn admission and its latest operation receipt, retained after release.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
-
-CREATE TABLE ai_task_graphs (
-	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
-	`key` VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
-	scope_key VARBINARY(768) NULL COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.',
-	subject_id VARBINARY(128) NULL COMMENT 'Exact UTF-8 subject identifier used for lookups within a record scope.',
-	parent_key VARBINARY(768) NULL COMMENT 'Bounded binary parent identity used by hierarchical list queries.',
-	sort_key LONGBLOB NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
-	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current SQL-queryable state for record kinds with persisted state-machine semantics.',
-	storage_revision BIGINT NOT NULL COMMENT 'Physical compare-and-swap revision incremented by every record mutation.',
-	lease_owner TEXT NULL COMMENT 'Current durable lease owner for record kinds using claim and fencing semantics.',
-	lease_fence BIGINT NOT NULL COMMENT 'Monotonic fencing token for the current durable record lease.' DEFAULT 0,
-	lease_expires_at DATETIME(6) NULL COMMENT 'Database-authoritative expiry time of the current durable lease.',
-	payload_json JSON NOT NULL COMMENT 'Canonical domain JSON object.',
-	payload_bytes LONGBLOB NULL COMMENT 'Optional binary content body owned by this record; ordinary domain state remains JSON.',
-	key_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Single SHA-256 lookup projection of the complete key; raw identity must also match.',
-	scope_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Single SHA-256 lookup projection of the complete scope_key; raw identity must also match.',
-	parent_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Single SHA-256 lookup projection of the complete parent_key; raw identity must also match.',
-	sort_prefix VARBINARY(128) NOT NULL COMMENT 'First 128 bytes of the full sort key; non-unique query projection only.',
-	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
-	PRIMARY KEY (id),
-	KEY ix_created_at (created_at),
-	KEY ix_store_key_state_sort_prefix (store_key, state, sort_prefix),
-	KEY ix_updated_at (updated_at),
-	UNIQUE KEY uk_store_key_key_locator (store_key, key_locator)
-)ENGINE=InnoDB COMMENT='Authoritative TaskGraph state and recovery ordering.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
 
 CREATE TABLE ai_state_facts (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
-	stream_key VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the append-only fact stream.',
+	store_key VARBINARY(64) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
+	stream_key VARBINARY(640) NOT NULL COMMENT 'Exact bounded binary identity of the append-only fact stream.',
 	sequence BIGINT NOT NULL COMMENT 'Strictly increasing position of the fact within its stream.',
-	owner_key VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the runtime record that owns this fact.',
+	owner_key VARBINARY(640) NOT NULL COMMENT 'Exact bounded binary identity of the runtime record that owns this fact.',
 	kind VARCHAR(32) NOT NULL COMMENT 'Fact kind such as execution_event, step_event, step_checkpoint, or step_effect.',
 	subject_id VARBINARY(128) NULL COMMENT 'Exact UTF-8 subject identifier grouping facts such as one tool call.',
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Queryable fact state such as checkpoint completeness or tool-effect lifecycle state.',
@@ -177,8 +110,8 @@ CREATE TABLE ai_state_facts (
 
 CREATE TABLE ai_state_counters (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
-	stream_key VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the monotonic sequence counter.',
+	store_key VARBINARY(64) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
+	stream_key VARBINARY(640) NOT NULL COMMENT 'Exact bounded binary identity of the monotonic sequence counter.',
 	value BIGINT NOT NULL COMMENT 'Last committed value allocated by the sequence.',
 	stream_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Single SHA-256 lookup projection of the complete stream_key; raw identity must also match.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -191,9 +124,9 @@ CREATE TABLE ai_state_counters (
 
 CREATE TABLE ai_state_operations (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
-	operation_key VARBINARY(768) NOT NULL COMMENT 'Binary operation address, at most 768 bytes.',
-	stream_key VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the ordered operation stream.',
+	store_key VARBINARY(64) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
+	operation_key VARBINARY(301) NOT NULL COMMENT 'Binary operation address, at most 301 bytes.',
+	stream_key VARBINARY(640) NOT NULL COMMENT 'Exact bounded binary identity of the ordered operation stream.',
 	sequence BIGINT NOT NULL COMMENT 'Strictly increasing position of the operation within its stream.',
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Current durable operation state used by replay and completion logic.',
 	compactable BOOL NOT NULL COMMENT 'Whether a terminal operation may be removed by ledger compaction.',
@@ -214,14 +147,18 @@ CREATE TABLE ai_state_operations (
 
 CREATE TABLE ai_step_runs (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(274) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
-	run_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
+	store_key VARBINARY(146) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
+	run_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
 	conversation_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Original upstream conversation identifier.',
-	parent_run_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Original upstream parent run identifier.',
+	parent_run_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Original upstream parent run identifier.',
 	agent_name LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Upstream agent name.',
 	metadata LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream string metadata encoded as JSON.',
 	started_at VARCHAR(64) NOT NULL COMMENT 'Original ISO 8601 run start time.',
 	registration_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Upstream registration invocation identifier.',
+	turn_source_generation BIGINT COMMENT 'Adopted Conversation generation; absent for independent Step runs.',
+	turn_source_phase VARCHAR(12) COMMENT 'Subordinate split handoff phase; never an independent lease.',
+	turn_source_receipt VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Exact source receipt identity matched by Conversation reconciliation.',
+	turn_source_pin JSON COMMENT 'Retained immutable source checkpoint and transcript references.',
 	managed_start_key VARBINARY(128) COMMENT 'Exact first managed start identity; NULL means metadata admission only.',
 	store_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Single SHA-256 lookup projection of the complete store_key; raw identity must also match.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -236,10 +173,10 @@ CREATE TABLE ai_step_runs (
 
 CREATE TABLE ai_step_run_admissions (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(128) NOT NULL COMMENT 'Exact namespace, tenant and domain partition admitting this run.',
-	`key` VARBINARY(768) NOT NULL COMMENT 'Canonical local run admission identity, independent of the registration owner.',
-	scope_key VARBINARY(768) COMMENT 'Conversation lookup identity derived from the validated domain projection.',
-	parent_key VARBINARY(768) COMMENT 'Parent-run lookup identity derived from the validated domain projection.',
+	store_key VARBINARY(64) NOT NULL COMMENT 'Exact namespace, tenant and domain partition admitting this run.',
+	`key` VARBINARY(231) NOT NULL COMMENT 'Canonical local run admission identity, independent of the registration owner.',
+	scope_key VARBINARY(308) COMMENT 'Conversation lookup identity derived from the validated domain projection.',
+	parent_key VARBINARY(239) COMMENT 'Parent-run lookup identity derived from the validated domain projection.',
 	sort_key LONGBLOB NOT NULL COMMENT 'Stable ordering by projected start time and complete admission identity.',
 	storage_revision BIGINT NOT NULL COMMENT 'Optimistic local publication and release fence, independent of canonical registration.',
 	payload_json JSON NOT NULL COMMENT 'Typed canonical registration reference and actual domain projection differences; no copied run body.',
@@ -260,15 +197,15 @@ CREATE TABLE ai_step_run_admissions (
 
 CREATE TABLE ai_step_tool_operations (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
-	`key` VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
-	scope_key VARBINARY(768) COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.',
+	store_key VARBINARY(64) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
+	`key` VARBINARY(234) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
+	scope_key VARBINARY(308) COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.',
 	subject_id VARBINARY(128) COMMENT 'Exact UTF-8 subject identifier used for lookups within a record scope.',
-	parent_key VARBINARY(768) COMMENT 'Bounded binary parent identity used by hierarchical list queries.',
+	parent_key VARBINARY(309) COMMENT 'Bounded binary parent identity used by hierarchical list queries.',
 	sort_key LONGBLOB NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Current SQL-queryable state for record kinds with persisted state-machine semantics.',
 	storage_revision BIGINT NOT NULL COMMENT 'Physical compare-and-swap revision incremented by every record mutation.',
-	lease_owner TEXT COMMENT 'Current durable lease owner for record kinds using claim and fencing semantics.',
+	lease_owner VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Current durable lease owner for record kinds using claim and fencing semantics.',
 	lease_fence BIGINT NOT NULL COMMENT 'Monotonic fencing token for the current durable record lease.' DEFAULT 0,
 	lease_expires_at DATETIME(6) NULL COMMENT 'Database-authoritative expiry time of the current durable lease.',
 	payload_json JSON NOT NULL COMMENT 'Canonical domain JSON object.',
@@ -291,9 +228,9 @@ CREATE TABLE ai_step_tool_operations (
 	UNIQUE KEY uk_store_key_key_locator (store_key, key_locator)
 )ENGINE=InnoDB COMMENT='Authoritative Step tool effect ledger, including dispatch fencing and durable receipts.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
 
-CREATE TABLE ai_step_messages (
+CREATE TABLE ai_messages (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(274) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
+	store_key VARBINARY(146) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
 	sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the canonical uncompressed bytes for the partition content type.',
 	message LONGBLOB NULL COMMENT 'Raw or compressed canonical content bytes, absent for native attachment manifests.',
 	compression VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Message body compression codec: raw or zlib.',
@@ -309,9 +246,9 @@ CREATE TABLE ai_step_messages (
 	UNIQUE KEY uk_store_locator_sha256 (store_locator, sha256)
 )ENGINE=InnoDB COMMENT='Immutable typed content bytes: native messages and accepted execution payloads in disjoint partitions.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
 
-CREATE TABLE ai_step_sequences (
+CREATE TABLE ai_message_sequences (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(274) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
+	store_key VARBINARY(146) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
 	sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the immutable sequence node.',
 	message_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the referenced upstream message JSON.',
 	tree_count BIGINT NOT NULL COMMENT 'Number of ordered message occurrences in this tree.',
@@ -329,11 +266,11 @@ CREATE TABLE ai_step_sequences (
 
 CREATE TABLE ai_step_snapshots (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(274) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
-	run_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
+	store_key VARBINARY(146) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
+	run_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
 	step_index BIGINT NOT NULL COMMENT 'Upstream graph step index.',
 	conversation_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Original upstream conversation identifier.',
-	parent_run_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Original upstream parent run identifier.',
+	parent_run_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Original upstream parent run identifier.',
 	agent_name LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Upstream agent name.',
 	timestamp VARCHAR(64) NOT NULL COMMENT 'Original ISO 8601 snapshot time.',
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream complete or interrupted state.',
@@ -353,14 +290,14 @@ CREATE TABLE ai_step_snapshots (
 
 CREATE TABLE ai_step_events (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(274) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
-	run_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
+	store_key VARBINARY(146) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
+	run_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
 	kind VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream boundary event kind.',
 	outcome VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Owned lifecycle outcome, absent for ordinary upstream events.',
 	step_index BIGINT NOT NULL COMMENT 'Upstream graph step index.',
 	timestamp VARCHAR(64) NOT NULL COMMENT 'Original ISO 8601 event time.',
 	conversation_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Original upstream conversation identifier.',
-	parent_run_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Original upstream parent run identifier.',
+	parent_run_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Original upstream parent run identifier.',
 	agent_name LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Upstream agent name.',
 	tool_call_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Upstream tool call identifier.',
 	tool_name LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Upstream tool name.',
@@ -475,7 +412,7 @@ CREATE TABLE ai_object_chunks (
 
 CREATE TABLE ai_trace_events (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(128) NOT NULL COMMENT 'Exact Trace store partition identity.',
+	store_key VARBINARY(64) NOT NULL COMMENT 'Exact Trace store partition identity.',
 	run_id VARBINARY(128) NOT NULL COMMENT 'Original UTF-8 agent run identifier.',
 	agent_conversation_id VARBINARY(128) NULL COMMENT 'Inline event conversation identity; Native references retain source ownership.',
 	parent_agent_run_id VARBINARY(128) NULL COMMENT 'Inline event parent run identity; Native references retain source ownership.',
@@ -486,9 +423,9 @@ CREATE TABLE ai_trace_events (
 	kind VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Trace event type.',
 	step_index BIGINT NOT NULL COMMENT 'Original agent graph step index.',
 	timestamp VARCHAR(64) NOT NULL COMMENT 'Original event timestamp encoded as ISO 8601.',
-	order_key VARBINARY(64) NOT NULL COMMENT 'UTC event timestamp and sequence for stable chronological paging.',
+	order_key VARBINARY(16) NOT NULL COMMENT 'UTC event timestamp and sequence for stable chronological paging.',
 	request_identity VARBINARY(128) NULL COMMENT 'Original model request correlation string; leading zeros remain significant.',
-	request_number VARBINARY(128) NULL COMMENT 'Canonical decimal request number used only for numeric filtering.',
+	request_number VARBINARY(54) NULL COMMENT 'Unsigned binary request number used only for numeric filtering.',
 	message_identity VARBINARY(128) NULL COMMENT 'Successful response message identity; other message metadata remains in the body.',
 	tool_call_id VARBINARY(128) NULL COMMENT 'Original UTF-8 tool call identifier.',
 	tool_name LONGBLOB NULL COMMENT 'Untruncated inline tool name as UTF-8 bytes; null for Native references.',
@@ -509,7 +446,7 @@ CREATE TABLE ai_trace_events (
 
 CREATE TABLE ai_metric_definitions (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	namespace VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Metrics namespace owning the definition.',
+	namespace VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Metrics namespace owning the definition.',
 	metric_name VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Versioned metric definition name.',
 	revision BIGINT NOT NULL COMMENT 'Metric semantic revision.',
 	observation_kind VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical observation kind consumed by the metric.',
@@ -524,7 +461,7 @@ CREATE TABLE ai_metric_definitions (
 
 CREATE TABLE ai_metric_observations (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	namespace VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original Metrics namespace retained after pruning.',
+	namespace VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original Metrics namespace retained after pruning.',
 	observation_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original observation identity retained after pruning.',
 	payload_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the canonical ObservationEnvelope payload.',
 	kind VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical observation kind query projection.',
@@ -545,3 +482,49 @@ CREATE TABLE ai_metric_observations (
 -- Official StepStore physical mapping.
 
 
+
+-- Regenerable conversation authority
+
+CREATE TABLE ai_sessions (
+	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
+	scope_key VARBINARY(32) NOT NULL COMMENT 'Partition of one tenant in the configured session store.',
+	session_key VARBINARY(64) NOT NULL COMMENT 'Exact session identity.',
+	status VARCHAR(8) NOT NULL COMMENT 'Session lifecycle status.',
+	revision BIGINT NOT NULL COMMENT 'Compare-and-swap revision of the session.',
+	active_turn_id VARBINARY(64) COMMENT 'Accepted turn occupying the session.',
+	last_turn_no BIGINT NOT NULL COMMENT 'Last finalized turn number.',
+	config_json JSON NOT NULL COMMENT 'Session metadata, workspace path and instruction scopes.',
+	lineage_json JSON COMMENT 'Immutable referenced turn ranges for a fork.',
+	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (id),
+	INDEX ix_created_at (created_at),
+	INDEX ix_updated_at (updated_at),
+	UNIQUE INDEX uk_scope_key_session_key (scope_key, session_key)
+)ENGINE=InnoDB ROW_FORMAT=DYNAMIC COMMENT='Identity, configuration and publication head of a regenerable conversation.' CHARSET=utf8mb4 COLLATE utf8mb4_bin;
+
+CREATE TABLE ai_session_turns (
+	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
+	scope_key VARBINARY(32) NOT NULL COMMENT 'Partition of one tenant in the configured session store.',
+	session_key VARBINARY(64) NOT NULL COMMENT 'Session owning the turn.',
+	turn_id VARBINARY(64) NOT NULL COMMENT 'Exact public turn identity.',
+	request_key VARBINARY(64) NOT NULL COMMENT 'Idempotency key scoped to the session.',
+	turn_no BIGINT NOT NULL COMMENT 'Sequential turn position within the session.',
+	context_from BIGINT NOT NULL COMMENT 'First selected context position, inclusive.',
+	context_through BIGINT NOT NULL COMMENT 'Finalized context boundary at admission.',
+	state VARCHAR(10) NOT NULL COMMENT 'Admission, cancellation or terminal state.',
+	generation BIGINT NOT NULL COMMENT 'Fencing generation of the accepted producer.',
+	lease_until BIGINT COMMENT 'Expiry in database-clock seconds since epoch.',
+	binding_key VARBINARY(32) NOT NULL COMMENT 'Frozen Agent binding in the same scope.',
+	request_json JSON NOT NULL COMMENT 'Accepted principal and canonical request.',
+	split_source_receipt VARBINARY(64) COMMENT 'Exact separately committed Step receipt; absent for same-group publication.',
+	result_json JSON COMMENT 'Canonical terminal output and continuation material.',
+	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (id),
+	INDEX ix_created_at (created_at),
+	INDEX ix_updated_at (updated_at),
+	UNIQUE INDEX uk_scope_key_session_key_request_key (scope_key, session_key, request_key),
+	UNIQUE INDEX uk_scope_key_session_key_turn_no (scope_key, session_key, turn_no),
+	UNIQUE INDEX uk_scope_key_turn_id (scope_key, turn_id)
+)ENGINE=InnoDB ROW_FORMAT=DYNAMIC COMMENT='Authoritative admission and publication of one regenerable conversation turn.' CHARSET=utf8mb4 COLLATE utf8mb4_bin;

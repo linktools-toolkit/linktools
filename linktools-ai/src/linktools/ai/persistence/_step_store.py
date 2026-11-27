@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import copy, deepcopy
 from dataclasses import dataclass, field, fields, replace
+from functools import partial
 from itertools import groupby
 from typing import TYPE_CHECKING
 from weakref import WeakKeyDictionary, WeakSet, ref
@@ -43,7 +44,8 @@ from ._payload import encode_payload_bytes, decode_payload_bytes
 from ..model.messages import combine_model_message_payloads, decode_model_message_payloads, encode_model_messages
 from ._native_checkpoint import NativeCheckpoint
 from ._step_backup import NativeStepBackup
-from ._step_maintenance import StepContentCleanupResult, purge_step_content
+from ._split_step_snapshot import SPLIT_SOURCE_COLUMNS, require_no_unpaired_split_pins
+from ._step_maintenance import StepContentCleanupResult, canonical_checkpoint_prune_guard, purge_step_content
 from ._step_schema import build_step_sql_metadata
 from .state import SqlStateTransaction, SqlMutationObserver, StateStore, StateTransaction, SqlStateRowReader
 from ..steps import (
@@ -71,6 +73,13 @@ _SNAPSHOT_ADAPTER = TypeAdapter(ContinuableSnapshot)
 _BATCH_SIZE = 128
 _RUN_CACHE_SIZE = 128
 _RUN_CACHE_BYTES = 1024 * 1024
+_STEP_TABLE_NAMES = {
+    "runs": "ai_step_runs",
+    "events": "ai_step_events",
+    "snapshots": "ai_step_snapshots",
+    "messages": "ai_messages",
+    "sequences": "ai_message_sequences",
+}
 _EVENT_RUN_FIELDS = ("conversation_id", "parent_run_id", "agent_name", "metadata")
 _EVENT_SOURCE_COLUMNS = tuple(field.name for field in fields(StepEvent)) + (
     "outcome", "store_key", "run_fields", "body_sha256", "fields_sha256",
@@ -123,6 +132,12 @@ class StepWriteReceipt:
     run_fields: _RunFields | None = None
     native_messages: NativeMessageReceipt | None = None
     lifecycle_keys: tuple[str, ...] = ()
+
+
+
+
+class StepRunAlreadyRegistered(ValueError):
+    """An immutable native run registration already owns this identity."""
 
 
 class SqlStepStore:
@@ -243,6 +258,8 @@ class SqlStepStore:
             return result
 
     async def register_run(self, record: RunRecord) -> None:
+        validate_native_step_ids(run_id=record.run_id, conversation_id=record.conversation_id,
+                                 parent_run_id=record.parent_run_id)
         await self.initialize()
 
         async def write(session: "AsyncSession") -> _RunFields:
@@ -338,7 +355,7 @@ class SqlStepStore:
                                 raise ValueError("native terminal source outcome is corrupt")
                             source = self._with_terminal(source, terminal)
                     return source
-            raise ValueError(
+            raise StepRunAlreadyRegistered(
                 f"run_id {record.run_id!r} is already in the store; run_id is single-shot"
             )
         return _RunFields.from_row(values, engine=self._context.engine)
@@ -398,6 +415,8 @@ class SqlStepStore:
 
     async def import_run(self, record: RunRecord) -> None:
         """Import metadata independently of native lifecycle-event publication."""
+        validate_native_step_ids(run_id=record.run_id, conversation_id=record.conversation_id,
+                                 parent_run_id=record.parent_run_id)
         await self.initialize()
         source = await self._context.run_mutation(
             lambda session: self._import_run(session, record), domain="steps.run_metadata",
@@ -489,6 +508,8 @@ class SqlStepStore:
         if type(fixed_error_source) is not bool or fixed_error_source and (
                 event.kind != "tool_call_failed" or event.idempotency_key is None):
             raise ValueError("fixed error sources require keyed tool failure events")
+        validate_native_step_ids(run_id=event.run_id, conversation_id=event.conversation_id,
+                                 parent_run_id=event.parent_run_id)
         await self.initialize()
         replay_keys = {id(event): encode_native_replay_key(event.idempotency_key)}
 
@@ -576,6 +597,52 @@ class SqlStepStore:
         # without body proof fails closed rather than adding a speculative read.
         await self._write_events(session, (event,), source=source, started=event)
         return self._with_terminal(source, event)
+
+    async def _record_cold_cancelled_lifecycle(
+        self, transaction: StateTransaction, *, run_id: str, conversation_id: str, occurred_at,
+    ) -> None:
+        """Append a real cold Stop event to an existing authenticated native run."""
+        from sqlalchemy import and_, func, select
+
+        if not isinstance(transaction, SqlStateTransaction):
+            raise TypeError("native SQL records require a SQL state transaction")
+        runs, events, checkpoints = (self._table(name) for name in ("runs", "events", "snapshots"))
+        start = events.alias("cold_cancel_native_start")
+        statement = select(
+            *runs.c, *(start.c[name].label("source_" + name) for name in _EVENT_SOURCE_COLUMNS),
+        ).select_from(runs.join(start, and_(
+            start.c.store_key == runs.c.store_key, start.c.store_locator == runs.c.store_locator,
+            start.c.run_id == runs.c.run_id, start.c.idempotency_key == runs.c.managed_start_key,
+        ))).where(*self._run_predicates(runs, run_id))
+
+        async def append(session: "AsyncSession") -> None:
+            row = (await session.execute(statement)).mappings().one_or_none()
+            if row is None:
+                raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+            try:
+                started = self.decode_started_source(
+                    {name: row["source_" + name] for name in _EVENT_SOURCE_COLUMNS}, run=row,
+                )
+                source = self._with_started(_RunFields.from_row(row, engine=self._context.engine), started)
+                if (started.kind != "run_started" or started.run_id != run_id
+                        or started.conversation_id != conversation_id
+                        or row["managed_start_key"] != encode_native_replay_key(started.idempotency_key)):
+                    raise ValueError("native managed start has another owner")
+            except ValueError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            last_event, last_checkpoint = (await session.execute(select(
+                select(func.max(events.c.step_index)).where(*self._run_predicates(events, run_id)).scalar_subquery(),
+                select(func.max(checkpoints.c.step_index)).where(*self._run_predicates(checkpoints, run_id)).scalar_subquery(),
+            ))).one()
+            step = max(index for index in (started.step_index, last_event, last_checkpoint) if index is not None)
+            await self._write_lifecycle_event(session, NativeLifecycleEvent(
+                run_id=run_id, kind="run_failed", step_index=step, outcome="cancelled", timestamp=occurred_at,
+                conversation_id=started.conversation_id, parent_run_id=started.parent_run_id,
+                agent_name=started.agent_name, metadata=dict(started.metadata),
+                idempotency_key=NativeLifecycleEvent.source_key(),
+            ), source=source)
+
+        await transaction.run_sql(self._context, append)
 
     async def read_fixed_events(
         self, keys: Sequence[tuple[str, str]], *, transaction: SqlStateRowReader,
@@ -902,8 +969,8 @@ class SqlStepStore:
         runs = {}
         managed_starts = {}
         for name in ("runs", "events", "snapshots"):
-            table = metadata.tables[f"ai_step_{name}"]
-            columns = {column.name for column in table.columns} - {"id", "updated_at", "created_at"}
+            table = metadata.tables[_STEP_TABLE_NAMES[name]]
+            columns = {column.name for column in table.columns} - {"id", "updated_at", "created_at", *SPLIT_SOURCE_COLUMNS}
             seen = set()
             for row in getattr(backup, name):
                 if set(row) != columns or row["store_key"] != backup.store_key:
@@ -962,6 +1029,12 @@ class SqlStepStore:
         self, reader: SqlStateRowReader, *, accept: Callable[[object], None] | None = None,
         validate_messages: bool = True,
     ) -> NativeStepBackup:
+        return await self._capture_backup(reader, accept=accept, validate_messages=validate_messages)
+
+    async def _capture_backup(
+        self, reader: SqlStateRowReader, *, accept: Callable[[object], None] | None = None,
+        validate_messages: bool = True, paired_split: bool = False,
+    ) -> NativeStepBackup:
         """Capture and strictly verify every owner row in the caller's read transaction.
 
         The caller begins a consistent read and captures the shared message
@@ -978,10 +1051,12 @@ class SqlStepStore:
         if not self.backup_supported:
             raise ValueError("native backup cannot include an external effect ledger")
         batches = []
+        excluded = {"id", "updated_at", "created_at", *SPLIT_SOURCE_COLUMNS}
         for name in ("runs", "events", "snapshots"):
             table = self._table(name)
-            columns = tuple(column for column in table.columns
-                            if column.name not in {"id", "updated_at", "created_at"})
+            if name == "runs" and not paired_split:
+                await require_no_unpaired_split_pins(reader, self._context, table, self._store_key)
+            columns = tuple(column for column in table.columns if column.name not in excluded)
             rows = []
             cursor = 0
             while True:
@@ -1130,9 +1205,13 @@ class SqlStepStore:
             existing_runs.update((row["run_id"], row) for row in rows)
         for row in backup.runs:
             existing = existing_runs.get(row["run_id"])
-            if existing is not None and (_RUN_ADAPTER.validate_python(self._record_data(existing))
-                                         != _RUN_ADAPTER.validate_python(self._record_data(row))):
-                raise ValueError("native backup registration differs from its canonical owner")
+            if existing is not None:
+                if any(existing[name] is not None for name in SPLIT_SOURCE_COLUMNS):
+                    raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Native restore cannot replace a split Step handoff")
+                if _RUN_ADAPTER.validate_python(self._record_data(existing)) != _RUN_ADAPTER.validate_python(
+                    self._record_data(row)
+                ):
+                    raise ValueError("native backup registration differs from its canonical owner")
         for name in ("runs", "events", "snapshots"):
             table = self._table(name)
             # Individual inserts preserve ordering even on dialects that do not
@@ -1218,6 +1297,60 @@ class SqlStepStore:
         if integrity is None or integrity[0] != raw_digest:
             return False
         return self._seed_snapshot_baseline(run_id, root.sequence, integrity)
+
+    def _seed_retained_checkpoint_prefix(
+        self, root: NativeMessageRoot, run_id: str, history: Sequence[ModelMessage],
+    ) -> bool:
+        """Authenticate a cold same-owner checkpoint against the already restored context."""
+        if root.count > len(history) or len(root.slices) != 1:
+            return False
+        messages = self._frozen_messages.snapshot(history[:root.count])
+        proof = self._message_content.adopt_checkpoint_prefix(root, messages)
+        if proof is None:
+            return False
+        integrity = messages.encoded_digest()
+        self._remember_message_proof(proof, integrity=integrity, messages=messages)
+        return self._seed_snapshot_baseline(run_id, proof.root, integrity)
+
+    def _retained_checkpoint_seed(
+        self, row: Mapping[str, object],
+    ) -> Callable[[str, Sequence[ModelMessage]], bool] | None:
+        if row.get("prefix_root") is None:
+            return None
+        try:
+            root = self.message_root(self.snapshot_message_sequence({
+                "messages": row["prefix_messages"], "sequence_root": row["prefix_root"],
+            }))
+        except ValueError:
+            # This unrelated optional checkpoint is not a source of conversation truth.
+            return None
+        return partial(self._seed_retained_checkpoint_prefix, root)
+
+    def _can_project_checkpoint_prefix(self) -> bool:
+        # The indexed text comparison plus exact byte match uses these dialects' casts.
+        return self._max_cached_messages > 0 and self._context.engine.dialect.name in {"sqlite", "mysql"}
+
+    def _project_checkpoint_prefix(self, statement: "Select", turns: "Table", *, session_id: str, through: int) -> "Select":
+        """Project the one prior local Step descriptor without a separate read."""
+        from sqlalchemy import LargeBinary, String, and_, cast, false, select
+
+        snapshots = self._table("snapshots")
+        source = snapshots.alias("prior_complete")
+        scope = (source.c.store_locator == self._store_locator, source.c.store_key == self._store_key)
+        latest = select(source.c.id).where(
+            *scope, source.c.run_id == cast(turns.c.turn_id, String()),
+            cast(source.c.run_id, LargeBinary()) == turns.c.turn_id,
+            source.c.conversation_id == session_id,
+            cast(source.c.conversation_id, LargeBinary()) == turns.c.session_key,
+            source.c.pruned == false(), source.c.state == "complete",
+        ).order_by(source.c.id.desc()).limit(1).correlate(turns).scalar_subquery()
+        return statement.select_from(turns.outerjoin(snapshots, and_(
+            turns.c.turn_no == through, turns.c.state == "succeeded", turns.c.split_source_receipt.is_(None),
+            turns.c.request_json["graph_execution"].as_string().is_(None),
+            snapshots.c.id == latest,
+        ))).add_columns(
+            snapshots.c.messages.label("prefix_messages"), snapshots.c.sequence_root.label("prefix_root"),
+        )
 
     def inherit_snapshot_baseline(self, run_id: str, *, source_run_id: str) -> bool:
         """Carry a committed or read-back source run's content into its next attempt."""
@@ -1473,6 +1606,7 @@ class SqlStepStore:
     async def write_prepared_step(
         self, transaction: StateTransaction, prepared: PreparedStep, *,
         confirmed: StepWriteReceipt | None = None,
+        turn_guard: Callable[[StateTransaction], Awaitable[None]] | None = None,
     ) -> StepWriteReceipt:
         """Join the existing same-engine transaction without opening another.
 
@@ -1490,6 +1624,8 @@ class SqlStepStore:
             encode_native_replay_key(None) if event.idempotency_key is None else key
             for event, key in zip(prepared.events, prepared.event_keys, strict=True)
         ))
+        if turn_guard is not None:
+            await turn_guard(transaction)
         return await transaction.run_sql(
             self._context, lambda session: self._write_prepared_step(
                 session, publication, confirmed=confirmed,
@@ -1617,6 +1753,8 @@ class SqlStepStore:
         return receipt
 
     async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
+        validate_native_step_ids(run_id=snapshot.run_id, conversation_id=snapshot.conversation_id,
+                                 parent_run_id=snapshot.parent_run_id)
         await self.initialize()
         prepared = await self._prepare_snapshot(snapshot)
 
@@ -1700,6 +1838,98 @@ class SqlStepStore:
                 if len(cache) > self._max_cached_messages:
                     cache.popitem(last=False)
 
+    async def _capture_turn_checkpoint_row(
+        self, session: "AsyncSession", *, run_id: str, conversation_id: str,
+        replay_key: str | None,
+    ):
+        from sqlalchemy import false, select
+
+        table = self._table("snapshots")
+        query = select(table).where(
+            *self._run_predicates(table, run_id),
+            table.c.conversation_id == conversation_id,
+            table.c.pruned == false(),
+        )
+        if replay_key is not None:
+            query = query.where(table.c.idempotency_key == encode_native_replay_key(replay_key))
+        row = (await session.execute(query.order_by(table.c.id.desc()).limit(1))).mappings().one_or_none()
+        if row is None:
+            return None
+        try:
+            sequence = self.snapshot_message_sequence(row)
+        except ValueError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        return row, sequence
+
+    async def _require_same_native_message_occurrences(
+        self, transaction: SqlStateRowReader, left: NativeMessageRoot, right: NativeMessageRoot,
+    ) -> None:
+        """Prove the same scoped ordered content without selecting message bodies."""
+        self._message_content.validate_root(left)
+        self._message_content.validate_root(right)
+        if left.count != right.count or (left.group_id, left.store_key) != (right.group_id, right.store_key):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if left == right:
+            return
+        roots = (left, right)
+        try:
+            query = self._message_content.range_query(roots, _identities_only=True)
+            if query is None:
+                raise ValueError("native occurrence roots are missing")
+            rows = await transaction.read_sql_rows(self._context, query.statement)
+            expected, actual = await self._message_content.hydrate_ranges(roots, rows, _identities_only=True)
+        except ValueError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if expected != actual:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+    async def _capture_complete_turn_checkpoint_root(
+        self, session: "AsyncSession", *, run_id: str, conversation_id: str, replay_key: str,
+    ) -> NativeMessageRoot:
+        """Read the already-published exact official Step snapshot root only."""
+        selected = await self._capture_turn_checkpoint_row(
+            session, run_id=run_id, conversation_id=conversation_id, replay_key=replay_key,
+        )
+        if selected is None:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        row, sequence = selected
+        if row["state"] != "complete" or not sequence.count:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return self.message_root(sequence)
+
+    async def capture_turn_checkpoint(
+        self, session: "AsyncSession", *, run_id: str, conversation_id: str,
+        replay_key: str | None = None,
+        source: Callable[[NativeMessageRoot, str, int], None] | None = None,
+    ) -> Callable[[], Awaitable[ContinuableSnapshot]] | None:
+        """Capture the exact retained checkpoint in the turn owner's transaction."""
+        selected = await self._capture_turn_checkpoint_row(
+            session, run_id=run_id, conversation_id=conversation_id, replay_key=replay_key,
+        )
+        if selected is None:
+            return None
+        row, sequence = selected
+        query = self._message_content.range_query((sequence,))
+        rows = () if query is None else (await session.execute(query.statement)).mappings().all()
+
+        async def hydrate() -> ContinuableSnapshot:
+            try:
+                readback, = await self._message_content.read_hydrated_ranges(
+                    (sequence,), rows,
+                    read_object=None if self._message_archive is None else self._message_archive.read_payload_object,
+                )
+                snapshot, raw = self._decode_snapshot(row, readback.payloads)
+            except ValueError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            integrity = hashlib.sha256(raw).hexdigest(), len(raw)
+            self._remember_message_proof(self._message_content.adopt_read(readback), integrity=integrity)
+            self._seed_snapshot_baseline(run_id, readback.root, integrity)
+            if source is not None:
+                source(self.message_root(readback.root), *integrity)
+            return snapshot
+
+        return hydrate
+
     async def latest_snapshot(
         self, *, run_id: str, include_interrupted: bool = False,
     ) -> ContinuableSnapshot | None:
@@ -1763,6 +1993,17 @@ class SqlStepStore:
         if last_complete is not None:
             complete_safe = or_(complete_safe, table.c.id < last_complete)
         conditions += (complete_safe,)
+        runs = self._table("runs")
+        source_has_pin = select(runs.c.id).where(
+            *self._run_predicates(runs, run_id),
+            runs.c.turn_source_phase.in_(("sealed", "published", "waiting", "ready", "resuming", "resume_hold")),
+            runs.c.turn_source_pin["checkpoint_id"].as_string().is_not(None),
+        ).exists()
+        canonical_guard = (~source_has_pin,)
+        if self._message_archive is not None:
+            metadata = self._message_archive.store.storage_group.metadata
+            canonical_guard += (canonical_checkpoint_prune_guard(metadata, self._store_key, run_id),)
+        conditions += canonical_guard
         after = 0
         while True:
             retired = (await session.execute(select(table.c.id).where(
@@ -1772,7 +2013,7 @@ class SqlStepStore:
                 break
             ids = tuple(row.id for row in retired)
             await session.execute(table.update().where(
-                *self._run_predicates(table, run_id), table.c.id.in_(ids),
+                *self._run_predicates(table, run_id), table.c.id.in_(ids), *canonical_guard,
             ).values(pruned=True, messages="{}", sequence_root=None, updated_at=sql_audit_now()))
             after = retired[-1].id
             if len(retired) < 128:
@@ -1928,7 +2169,7 @@ class SqlStepStore:
         return NativeCheckpoint.restore_descriptor(snapshot, descriptor["checkpoint"]), raw
 
     def _table(self, name: str) -> "Table":
-        return self._metadata.tables[f"ai_step_{name}"]
+        return self._metadata.tables[_STEP_TABLE_NAMES[name]]
 
     def _run_values(self, run_id: str) -> "dict[str, SqlValue]":
         validate_resource_id(run_id)

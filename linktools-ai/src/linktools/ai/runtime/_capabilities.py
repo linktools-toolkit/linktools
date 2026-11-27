@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import copy
 from typing import TYPE_CHECKING, cast
 
@@ -123,6 +123,7 @@ async def compose_platform_capabilities(
     transcript_start: int = 0,
     initial_output_retries_used: int = 0,
     tool_operations: ToolOperationBridge | None = None,
+    stage_session_trace: bool = False,
 ) -> tuple[AbstractCapability[None], ...]:
     capabilities: list[AbstractCapability[None]] = []
     run_recorder = recorder or AgentRunRecorder(
@@ -231,9 +232,12 @@ async def compose_platform_capabilities(
                         lifecycle_observer_types=(AtomicStepPersistence, TraceCapability),
                     )
                     persistence.native_registration = registration
+            if isinstance(capability.store, RuntimeStepStore) and capability.store._canonical_turn_boundary:
+                capability.store._output_retries_used = persistence.checkpoint_output_retries_used
             return bind_step_persistence(
                 capability, run_id=agent_run_id, parent_run_id=parent_agent_run_id,
-                store=capability.store if tool_operations is None else RuntimeStepStore(
+                store=capability.store if tool_operations is None or isinstance(capability.store, RuntimeStepStore)
+                else RuntimeStepStore(
                     capability.store, tool_operations,
                     native_boundary=isinstance(capability, AtomicStepPersistence),
                     output_retries_used=persistence.checkpoint_output_retries_used,
@@ -247,6 +251,14 @@ async def compose_platform_capabilities(
             )
         for enabled, feature, service in ((guarantees[2], TraceCapability, TraceService),):
             if isinstance(capability, feature):
+                if stage_session_trace:
+                    bound_types.add(feature)
+                    # Transport capture would buffer full HTTP bodies before the observer limit.
+                    trace = TraceCapability(commit=capability.commit) if capability.record_http_bodies else capability
+                    return trace.bind(
+                        service(persistence, canonical_lifecycle=True),
+                        model_request_seq=run_recorder.model_request_seq_for_tool_call,
+                    )
                 if not enabled:
                     return None
                 bound_types.add(feature)

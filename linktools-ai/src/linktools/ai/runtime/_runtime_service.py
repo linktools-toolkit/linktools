@@ -44,11 +44,14 @@ from ..errors import AIError, ErrorCode
 
 
 if TYPE_CHECKING:
+    from ._regenerable_turn import _RegenerableTurnRunner
+    from ..core import ThinkingValue
     from ..inputs import InputCaptures
     from ..history import History
     from ..asset import AssetStoreReader
     from ..capability import AssetCapability
     from ._factory import _AgentLifecycle
+    from ._native_session import _NativeTurnRead
 from .agent_execution import AgentExecutionPort
 from ._agent import Agent, Session
 from ..execution import Execution
@@ -281,6 +284,7 @@ class Runtime(Generic[AppT]):
                         persistence=self._state, app=self.app, features=self._feature_source,
                         metrics=self._metrics_dataset, authorization=self._authorization,
                         auto_recover=self._auto_recover, lifecycle=self._agent_lifecycle,
+                        wake_graph=self._wake_owned_graph,
                     )
                     self._asset_sources = MappingProxyType(dict(components.asset_sources))
                     if components.metric_control is not None:
@@ -294,6 +298,8 @@ class Runtime(Generic[AppT]):
                         tree_streamer=components.tree_streamer, metric_control=components.metric_control,
                         _binding_resolver=components.binding_resolver, input_captures=components.input_captures,
                         memory_scope=components.memory_scope,
+                        native_turn_read=components.native_turn_read, turn_runner=components.turn_runner,
+                        require_session_available=components.require_session_available,
                     )
                 self._ready = True
             return self
@@ -315,6 +321,11 @@ class Runtime(Generic[AppT]):
                 _log_secondary_cleanup("runtime.body", cleanup_error)
                 raise exc from cleanup_error
             raise
+
+    async def _wake_owned_graph(self, graph_id: str, tenant_id: str) -> None:
+        for engine in tuple(self._task_engines):
+            if await engine.wake_owned_graph(graph_id, tenant_id=tenant_id):
+                return
 
     async def _bind_tasks(self, *definitions: Task[AppT, object] | TaskExpander) -> TaskEngine[AppT]:
         async with self._close_lock:
@@ -358,7 +369,7 @@ class Runtime(Generic[AppT]):
         catalog: AgentCatalog,
         compiler: AgentCompiler,
         execution: ExecutionService,
-        session: SessionService,
+        session: SessionService | None,
         approval: ApprovalService,
         external: ExternalService,
         event: EventService,
@@ -375,6 +386,9 @@ class Runtime(Generic[AppT]):
         _binding_resolver: "_AgentBindingResolver | None" = None,
         input_captures: "InputCaptures | None" = None,
         memory_scope: str | None = None,
+        native_turn_read: "_NativeTurnRead | None" = None,
+        turn_runner: "_RegenerableTurnRunner | None" = None,
+        require_session_available: "Callable[[], Awaitable[None]] | None" = None,
     ) -> None:
         if any(
             value is None
@@ -382,7 +396,6 @@ class Runtime(Generic[AppT]):
                 catalog,
                 compiler,
                 execution,
-                session,
                 approval,
                 external,
                 event,
@@ -403,7 +416,11 @@ class Runtime(Generic[AppT]):
         )
         self._session_service = session
         self._sessions = RuntimeSessions(
-            session, self._get_session, start_session=self._start_existing_session, bind_session=self._session_handle, ensure_open=self._ensure_open,
+            session, self._get_session, start_session=self._start_existing_session,
+            bind_session=self._session_handle, ensure_open=self._ensure_open,
+            turn_runner=turn_runner,
+            runtime=self,
+            native_turn_read=native_turn_read, require_session_available=require_session_available,
         )
         self._approvals = approval
         self._external_calls = external
@@ -607,7 +624,7 @@ class Runtime(Generic[AppT]):
         self._ensure_open()
         validate_resource_id(session_id)
         resolved_principal = self._resolve_principal(principal)
-        view = await self._session_service.get(
+        view = await self.sessions._agent_session_service().get(
             session_id,
             principal=resolved_principal,
         )
@@ -616,7 +633,8 @@ class Runtime(Generic[AppT]):
     async def _start_existing_session(
         self, session_id: str, user_prompt: UserPromptInput, *, principal: Principal,
         idempotency_key: str | None = None, output: "type[BaseModel] | None" = None,
-        correlation: Mapping[str, object] | None = None,
+        correlation: Mapping[str, object] | None = None, files: Sequence[str] = (),
+        planning: bool | None = None, thinking: "ThinkingValue | None" = None,
     ) -> "Execution[AppT]":
         from ..core import validate_idempotency_key
         from ..model import validate_user_input
@@ -629,12 +647,12 @@ class Runtime(Generic[AppT]):
 
         async def start(agent_id, resume):
             return await self._get_agent(agent_id).execution_port.start(
-                prompt, files=(), output=output, principal=principal, session_id=session_id,
-                idempotency_key=key, mode="run", planning=None, thinking=None,
+                prompt, files=files, output=output, principal=principal, session_id=session_id,
+                idempotency_key=key, mode="run", planning=planning, thinking=thinking,
                 correlation=correlation, _resume=resume)
 
         with sql_observation_scope("runtime.session.start"):
-            return await self._session_service.start_existing(session_id, principal, key, start)
+            return await self.sessions._agent_session_service().start_existing(session_id, principal, key, start)
 
     def _session_handle(self, view: SessionView, principal: Principal) -> Session[AppT]:
         return Session(self, view.agent_id, None, view.session_id, principal)

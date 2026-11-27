@@ -1,30 +1,32 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from linktools.ai.persistence import Persistence
 """A durable retention closure proves publication across process boundaries."""
-from ._runtime_test_helpers import model_features
 
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
-from linktools.ai.persistence import Persistence
-from linktools.ai.core import ExecutionStatus
+from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.history import History
 from linktools.ai.runtime import Runtime
-from linktools.ai.persistence import PersistenceStorage, PersistencePlan
+from linktools.ai.persistence import Persistence, PersistencePlan, PersistenceStorage
 from linktools.ai.persistence.state import active_state_scope
 from linktools.ai.persistence.contracts import ExecutionTerminalPublication
 from linktools.ai.storage import StorageRoute
 
+from ._runtime_test_helpers import model_features
 from .test_conversation_output_retention import _NAMESPACE, _features, _models
 from .test_incremental_projection_boundaries import _storage
 from .test_retention_read_io import _controller, _execution
 
 pytestmark = pytest.mark.asyncio
+
+
+class _HostAuthorization(TenantAuthorizationPolicy):
+    """Authorize this fixture’s native SQL Session operations."""
 
 
 @pytest.mark.parametrize("cached", ("absent", "pending"))
@@ -104,46 +106,60 @@ async def test_closed_public_results_reuse_proof_across_runtime(tmp_path, monkey
         execution=StorageRoute.sqlite(tmp_path / "execution.db"),
         conversation=StorageRoute.sqlite(tmp_path / ("conversation.db" if split else "execution.db")),
     )
-    async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.from_plan(plan)) as persistence_106, Runtime.open(persistence=persistence_106, features=model_features(_models(), _features())) as runtime:
-        session = await runtime.agents.get().create_session("s")
-        result = (await session.run("retained input", timeout_seconds=5)).result
+    storage = PersistenceStorage.from_plan(plan)
+    authorization = _HostAuthorization()
+    async with (
+        Persistence.open(_NAMESPACE, storage=storage) as state,
+        Runtime.open(persistence=state, features=model_features(_models(), _features()),
+                     authorization=authorization) as runtime,
+    ):
+        result = (await runtime.agents.get().run("retained input", timeout_seconds=5)).result
         principal = runtime.default_principal
         execution_id = result.execution_id
+        await runtime.sessions.create_turn_session("s", principal=principal)
+        turn = await runtime.sessions.start("s", "canonical input", agent="default",
+                                            principal=principal, idempotency_key="turn")
+        assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
 
-    storage = PersistenceStorage.from_plan(plan)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_115, Runtime.open(persistence=persistence_115, features=model_features(_models(), _features())) as runtime:
-        record = await runtime._state.execution.executions.get(execution_id, tenant_id=principal.tenant_id)
-        assert record.retention_closed
-        receipt_reads = []
-        sessions = runtime._state.conversation.sessions
-        original = sessions.pending_turn_commit_in_transaction
+    async with (
+        Persistence.open(_NAMESPACE, storage=storage) as state,
+        Runtime.open(persistence=state, features=model_features(_models(), _features()),
+                     authorization=authorization) as runtime,
+    ):
+        record = await state.execution.executions.get(execution_id, tenant_id=principal.tenant_id)
+        assert record.retention_closed and record.session_id is None
+        turns = state.session_turns
+        turn_reads = []
+        original = turns.get_history_turn
 
-        async def count_receipt(*args, **kwargs):
-            receipt_reads.append(1)
+        async def count_turn_read(*args, **kwargs):
+            turn_reads.append(1)
             return await original(*args, **kwargs)
 
-        monkeypatch.setattr(sessions, "pending_turn_commit_in_transaction", count_receipt)
+        monkeypatch.setattr(turns, "get_history_turn", count_turn_read)
         assert (await runtime.executions.result(execution_id, principal=principal)).output == result.output
         assert await runtime._execution_service.result_payload_size(execution_id, principal=principal) > 0
-        assert receipt_reads == []
+        assert turn_reads == []
 
-        # Timeline still owns current integrity validation; a closed Execution
-        # does not waive the independent Conversation reader's responsibility.
-        async def corrupt(transaction):
-            stored = await transaction.get_record(sessions._timeline_commit_key("s", 1))
-            assert stored is not None
-            assert await transaction.replace_record(
-                replace(stored, data=dict(stored.data, execution_id="missing-execution"),
-                        storage_revision=stored.storage_revision + 1),
-                expected_storage_revision=stored.storage_revision,
+        # Corrupt only the real canonical Session owner. A retained independent
+        # Execution neither uses nor vouches for that transcript.
+        row = await turns.get_turn(turn.key)
+        assert row is not None and row["result_json"]["transcript"]
+        async with turns._context.engine.begin() as connection:
+            mutation = turns._turns.update().filter_by(**turns._turn_values(turn.key)).values(
+                result_json={**row["result_json"], "transcript": {}},
             )
-        await sessions.state_store.mutate(corrupt)
+            assert (await connection.execute(mutation)).rowcount == 1
         assert (await runtime.executions.result(execution_id, principal=principal)).output == result.output
+        assert turn_reads == []
 
-    async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.from_plan(plan), tenant_id="default", read_only=True) as history_persistence_145, History.open(persistence=history_persistence_145) as history:
+    async with (
+        Persistence.open(_NAMESPACE, storage=storage, tenant_id="default", read_only=True) as state,
+        History.open(persistence=state, authorization=authorization) as history,
+    ):
         assert (await history.result(execution_id, principal=principal)).output == result.output
         with pytest.raises(AIError) as raised:
-            await history.session_detail("s", principal=principal)
+            await history.turn_result("s", turn.key.turn_id, principal=principal)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
@@ -230,23 +246,33 @@ async def test_same_runtime_confirmed_terminal_reuses_publication_receipt(tmp_pa
 
         monkeypatch.setattr(retention, "confirm_terminal_publication", confirm)
         async with Runtime.open(persistence=state, features=model_features(_models(), _features())) as runtime:
-            session = await runtime.agents.get().create_session("receipt-session")
-            sessions = state.conversation.sessions
-            original_read = sessions.pending_turn_commit_in_transaction
             receipt_reads = []
+            if backend == "memory":
+                owner = state.conversation.sessions
+                read_source = "pending_turn_commit_in_transaction"
+                session = await runtime.agents.get().create_session("receipt-session")
+                run = session.run
+            else:
+                assert state.conversation.sessions is None
+                owner = state.execution.executions
+                read_source = "get_retention_in_transaction"
+                run = runtime.agents.get().run
+            original_read = getattr(owner, read_source)
 
             async def read_receipt(*args, **kwargs):
-                receipt_reads.append(kwargs["execution_id"])
+                receipt_reads.append(1)
                 return await original_read(*args, **kwargs)
 
-            monkeypatch.setattr(sessions, "pending_turn_commit_in_transaction", read_receipt)
-            result = (await session.run("confirmed publication", timeout_seconds=5)).result
+            monkeypatch.setattr(owner, read_source, read_receipt)
+            result = (await run("confirmed publication", timeout_seconds=5)).result
             assert result.status is ExecutionStatus.SUCCEEDED
             assert len(confirmed) == 1
             receipt = confirmed[0]
             assert isinstance(receipt, ExecutionTerminalPublication)
             terminal = receipt.execution
-            assert receipt.session_released and receipt.observed.value == terminal
+            assert receipt.observed.value == terminal
+            assert receipt.session_released is (backend == "memory")
+            assert (terminal.session_id is not None) is (backend == "memory")
             assert terminal.execution_id == result.execution_id
             assert receipt_reads == []
             assert not retention.terminal_publication_confirmed(terminal)

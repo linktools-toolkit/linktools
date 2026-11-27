@@ -45,6 +45,21 @@ async def _discard_locators(archive, run_id: str, keep_sequence: int | None) -> 
     await archive.state_store.mutate(mutate)
 
 
+def test_trace_order_key_is_fixed_binary_and_keeps_chronological_ties() -> None:
+    from linktools.ai.persistence._trace_event_store import trace_event_order_key
+
+    older = datetime(1960, 1, 1, tzinfo=timezone.utc)
+    adjacent = older + timedelta(microseconds=1)
+    latest = datetime.max.replace(tzinfo=timezone.utc)
+    converted = older.astimezone(timezone(timedelta(hours=8)))
+    first, tied, next_time, last = (
+        trace_event_order_key(older, 255), trace_event_order_key(older, 256), trace_event_order_key(adjacent, 1), trace_event_order_key(latest, (1 << 63) - 1),
+    )
+    assert all(len(key) == 16 for key in (first, tied, next_time, last))
+    assert first < tied < next_time < last
+    assert trace_event_order_key(converted, 255) == first
+
+
 @pytest.mark.asyncio
 async def test_trace_indexes_keep_cursor_cut(
     tmp_path: Path,
@@ -74,6 +89,32 @@ async def test_trace_indexes_keep_cursor_cut(
             after_timestamp=None, after_sequence=0, limit=10,
         )
         assert [sequence for sequence, _ in fresh] == [5, 1, 2, 3, 4]
+    finally:
+        await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_trace_numeric_filter_preserves_raw_request_identity(tmp_path: Path) -> None:
+    storage = Persistence(PersistenceStorage.sqlite(tmp_path / "requests.db"))
+    try:
+        archive, run_id = await _seed_trace(storage, 0)
+        run = await storage.run_store.get_agent_run(agent_run_id=run_id)
+        assert run is not None
+        await archive.register_agent_run(run, execution_id="execution")
+        metadata_key = "linktools.ai.model_request_seq"
+        timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        identities = ("000256", "9" * 128)
+        for index, identity in enumerate(identities, 1):
+            await archive.append_event(StepEvent(
+                run_id, "MODEL_REQUEST_STARTED", index, timestamp=timestamp + timedelta(seconds=index),
+                metadata={metadata_key: identity}, event_index=index,
+            ), execution_id="execution")
+        for index, identity in enumerate(identities, 1):
+            rows = await archive.list_trace_events(
+                agent_run_id=run_id, event_high_water=2,
+                after_timestamp=None, after_sequence=0, limit=10, model_request_seq=int(identity),
+            )
+            assert [(sequence, event.metadata[metadata_key]) for sequence, event in rows] == [(index, identity)]
     finally:
         await storage.close()
 

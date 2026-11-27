@@ -37,8 +37,9 @@ class Cache(InMemoryCacheBackend):
 async def publish(archive, history_id, checkpoint):
     run = (await archive.get_agent_run(agent_run_id=checkpoint.agent_run_id)
            or AgentRunRecord(checkpoint.agent_run_id, metadata={"history_id": history_id}))
+    await archive.prepare_run_registration(run)
     batch = await archive.prepare_checkpoints(run, (checkpoint,))
-    sequence = await archive.state_store.mutate(lambda tx: archive.materialize_checkpoint_in_transaction(tx, run, batch[0]))
+    sequence = await archive._mutate(lambda tx: archive.materialize_checkpoint_in_transaction(tx, run, batch[0]))
     await archive.confirm_session_context(checkpoint_sequence=sequence, prepared=batch[0])
     return sequence, batch[0].stored.projection_digest
 
@@ -52,16 +53,13 @@ async def test_exact_context_cache_matches_cold_and_survives_deferred_latest(tmp
     state = Persistence(PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache))
     await state.initialize(namespace="exact-context", tenant_id="tenant")
     try:
-        session = await state.conversation.sessions.create(_session())
+        session = replace(_session(), history_id="history")
+        await state.session_turns.create("session", config={})
+        before = dict(await state.session_turns.get_session("session"))
         archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
         summary = ModelRequest(parts=[UserPromptPart("committed summary")])
         checkpoint = replace(_checkpoint(2), context_messages=[summary])
         reference = await publish(archive, session.history_id, checkpoint)
-        cursor = ConversationCursor("run", session.history_id, 2, reference[0], reference[1])
-        await state.conversation.sessions.admit_execution("session", tenant_id="tenant", execution_id="done", expected=None)
-        await state.conversation.sessions.advance_continuation("session", tenant_id="tenant", execution_id="done", expected=None, next_cursor=cursor)
-        await state.conversation.sessions.release_execution("session", tenant_id="tenant", execution_id="done")
-        before = await state.conversation.sessions.get("session", tenant_id="tenant")
         statements = []
         engine = archive.state_store.storage_group.context.engine.sync_engine
         def capture(_connection, _cursor, statement, _parameters, _context, _many):
@@ -84,7 +82,7 @@ async def test_exact_context_cache_matches_cold_and_survives_deferred_latest(tmp
         await state.run_store.save_checkpoint(AgentRunCheckpoint("deferred", 1, [pending], state="interrupted",
             context_messages=[summary, pending], transcript_message_count_before=0))
         await state.run_store.materialize_conversation(agent_run_id="deferred", include_interrupted=True)
-        assert await state.conversation.sessions.get("session", tenant_id="tenant") == before
+        assert dict(await state.session_turns.get_session("session")) == before
         warm = await read(archive, session.history_id, reference)
         for key in cache.context_keys:
             await cache.delete(key)
@@ -96,13 +94,18 @@ async def test_exact_context_cache_matches_cold_and_survives_deferred_latest(tmp
     finally:
         await state.close()
 
+    async with Persistence.open("exact-context", storage=PersistenceStorage.sqlite(tmp_path / "state.db"),
+                                tenant_id="tenant", read_only=True) as reopened:
+        archive = reopened.run_store.read_store(PersistenceDomain.CONVERSATION)
+        assert await read(archive, session.history_id, reference) == cold
+
 
 async def test_exact_context_same_count_fact_and_corrupt_cache(tmp_path):
     cache = Cache()
     state = Persistence(PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache))
     await state.initialize(namespace="exact-context", tenant_id="tenant")
     try:
-        session = await state.conversation.sessions.create(_session())
+        session = replace(_session(), history_id="history")
         archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
         old = ModelRequest(parts=[UserPromptPart("old summary")])
         first = replace(_checkpoint(2), context_messages=[old])
@@ -134,7 +137,7 @@ async def test_exact_context_same_count_fact_and_corrupt_cache(tmp_path):
 
 @pytest.mark.parametrize("failure", ("rollback", "unknown", "resolved_unknown"))
 async def test_unconfirmed_terminal_does_not_publish_context(tmp_path, monkeypatch, failure):
-    async with _turn_state("sqlite", tmp_path) as state:
+    async with _turn_state("memory", tmp_path) as state:
         turn = _pending_turn(state)
         group = state.storage.execution.executions.state_store.storage_group
         mutate, read_many = type(group).mutate, type(group).read_many
@@ -173,45 +176,37 @@ async def test_unconfirmed_terminal_does_not_publish_context(tmp_path, monkeypat
         assert not offered
 
 
-async def test_fork_and_snapshot_keep_exact_summary_after_latest_replacement(tmp_path):
+async def test_non_sql_fork_keeps_exact_summary_after_latest_replacement(tmp_path):
     from linktools.ai.core import Principal
     from linktools.ai.session import ForkSessionRequest
-    from linktools.ai.persistence.snapshots import SnapshotLimits
-    from linktools.ai.storage import InMemoryObjectStore
     from .test_session_history_projection import _service
 
     principal = Principal("owner", "tenant")
-    storage = PersistenceStorage.sqlite(tmp_path / "source.db")
-    async with Persistence.open("exact-fork", storage=storage, tenant_id="tenant") as state:
-        session = await state.conversation.sessions.create(_session())
+    history_id = "history"
+    summary = ModelRequest(parts=[UserPromptPart("committed summary")])
+
+    async def publish_replacement(archive, identifier):
+        reference = await publish(archive, identifier, replace(_checkpoint(2), context_messages=[summary]))
+        await archive.materialize_checkpoint(AgentRunRecord("other", metadata={"history_id": identifier}),
+            AgentRunCheckpoint("other", 1, [], context_messages=[ModelRequest(parts=[UserPromptPart("replacement")])], transcript_message_count_before=0))
+        return reference
+
+    # The non-SQL Session service still owns continuation cursor and fork.
+    async with Persistence.open("exact-fork", storage=PersistenceStorage.in_memory(), tenant_id="tenant") as state:
+        session = await state.conversation.sessions.create(replace(_session(), history_id=history_id))
         archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
-        summary = ModelRequest(parts=[UserPromptPart("committed summary")])
-        reference = await publish(archive, session.history_id, replace(_checkpoint(2), context_messages=[summary]))
+        reference = await publish_replacement(archive, session.history_id)
         cursor = ConversationCursor("run", session.history_id, 2, reference[0], reference[1])
         await state.conversation.sessions.admit_execution("session", tenant_id="tenant", execution_id="publish", expected=None)
         await state.conversation.sessions.advance_continuation("session", tenant_id="tenant", execution_id="publish", expected=None, next_cursor=cursor)
         await state.conversation.sessions.release_execution("session", tenant_id="tenant", execution_id="publish")
-        await archive.materialize_checkpoint(AgentRunRecord("other", metadata={"history_id": session.history_id}),
-            AgentRunCheckpoint("other", 1, [], context_messages=[ModelRequest(parts=[UserPromptPart("replacement")])], transcript_message_count_before=0))
         service = _service(state)
         service._transcript_store = state.run_store.conversation_persistence
         await service.fork("agent", "session", ForkSessionRequest(principal, "fork", "fork-operation"))
         assert await service.load_model_context("fork", principal=principal) == (summary,)
-        source_root = (await read(archive, session.history_id, reference)).archive_root
-    objects = InMemoryObjectStore("exact-context-snapshot")
-    limits = SnapshotLimits(max_entries=2000, max_bytes=4 * 1024 * 1024)
-    async with Persistence.open("exact-fork", storage=PersistenceStorage.sqlite(tmp_path / "source.db"), tenant_id="tenant", read_only=True) as state:
-        snapshot = await state.export_snapshot(object_store=objects, limits=limits)
-    await Persistence.restore_snapshot(snapshot, object_store=objects, root=tmp_path / "restored", limits=limits)
-    async with Persistence.open("exact-fork", storage=PersistenceStorage.from_root(tmp_path / "restored"), tenant_id="tenant", read_only=True) as state:
         child = await state.conversation.sessions.get("fork", tenant_id="tenant")
-        archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
-        value = await read(archive, child.history_id, reference)
-        assert value.model_messages() == (summary,)
-        assert value.archive_root.group_id != source_root.group_id
         assert child.continuation.checkpoint_sequence == reference[0]
         assert child.continuation.projection_digest == reference[1]
-
 
 async def test_context_cache_preserves_references_and_opaque_tool_values(tmp_path):
     import hashlib
@@ -233,7 +228,7 @@ async def test_context_cache_preserves_references_and_opaque_tool_values(tmp_pat
         ToolReturnPart("read", [reference, opaque], tool_call_id="read-call")])
     cache = Cache()
     async with Persistence.open("reference-context", storage=PersistenceStorage.sqlite(tmp_path / "reference.db", cache=cache), tenant_id="tenant") as state:
-        session = await state.conversation.sessions.create(_session())
+        session = replace(_session(), history_id="history")
         archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
         selected = await publish(archive, session.history_id, replace(_checkpoint(2), context_messages=[message]))
         hot = await read(archive, session.history_id, selected)
@@ -254,7 +249,7 @@ async def test_context_cache_put_failure_does_not_fail_confirmed_terminal(tmp_pa
         async def put(self, key, content):
             raise OSError("cache unavailable")
 
-    async with _turn_state("sqlite", tmp_path) as state:
+    async with _turn_state("memory", tmp_path) as state:
         archive = state.storage.run_store.read_store(PersistenceDomain.CONVERSATION)
         archive._context_cache = Unavailable()
         turn = _pending_turn(state)

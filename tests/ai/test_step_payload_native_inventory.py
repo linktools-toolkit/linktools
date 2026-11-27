@@ -21,7 +21,7 @@ async def test_same_digest_payload_partition_is_not_in_native_offline_closure(tm
         native = await state.create_step_store()
         try:
             context = state.execution.executions.state_store.storage_group.context
-            table = build_step_sql_metadata().tables["ai_step_messages"]
+            table = build_step_sql_metadata().tables["ai_messages"]
             raw = encode_model_messages((ModelResponse(parts=[TextPart("same bytes")]),))
             digest = hashlib.sha256(raw).hexdigest()
             model_key = native_store_key("shared-bytes", "tenant")
@@ -46,7 +46,7 @@ async def test_native_inventory_rejects_unknown_or_malformed_partition(tmp_path:
         native = await state.create_step_store()
         try:
             context = state.execution.executions.state_store.storage_group.context
-            table = build_step_sql_metadata().tables["ai_step_messages"]
+            table = build_step_sql_metadata().tables["ai_messages"]
             key = b"unknown" if damage == "tuple" else payload_store_key("shared-bytes", "tenant")
             async with context.sessions() as session:
                 await session.execute(insert(table).values(store_key=key, store_locator="0" * 64,

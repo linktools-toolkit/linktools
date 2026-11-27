@@ -35,6 +35,7 @@ class StorageResourceRequest:
     configure_schema: Callable[["MetaData"], None] | None = None
     uses_archive: bool = False
     native_content_index: bool = False
+    defer_write_access_probe: bool = False
 
 
 def _shared_archive_cache(requests: tuple[StorageResourceRequest, ...]) -> CacheBackend | None:
@@ -159,6 +160,8 @@ class StorageResourceScope:
                 uses_archive=any(requests[index].uses_archive for index in indices),
                 native_content_index=any(requests[index].native_content_index for index in indices),
                 archive_cache=_shared_archive_cache(tuple(requests[index] for index in indices)),
+                defer_write_access_probe=(key[0] == "sql" and context.dialect.name == "sqlite" and len(indices) == 1
+                                          and requests[indices[0]].defer_write_access_probe),
             )
             self._close_actions.append(group.close)
             resource = SqlResource(group, context, metadata)

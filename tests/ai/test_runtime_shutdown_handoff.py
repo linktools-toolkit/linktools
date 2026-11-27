@@ -20,7 +20,17 @@ from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 
 from ._runtime_test_helpers import _Models
-from .test_terminal_commit_shared_runtime import _group
+from .test_terminal_commit_shared_runtime import _HostAuthorization, _group
+
+
+def _checkpointed_execution_group():
+    from linktools.ai.capability import ExecutionCapability, StepPersistenceCapability
+    from linktools.ai.core import CommitPolicy
+
+    features = _group(True)
+    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
+    features.capability(StepPersistenceCapability())
+    return features
 
 
 @pytest_asyncio.fixture(params=("sqlite", "local_sqlite", "postgresql", "mysql"))
@@ -63,6 +73,8 @@ async def handoff_storage(request: pytest.FixtureRequest, tmp_path: Path) -> Asy
 
 @pytest.mark.asyncio
 async def test_handoff_recovers_same_execution_and_next_session_turn(handoff_storage) -> None:
+    from pydantic_ai.messages import TextPart, UserPromptPart
+
     storage = handoff_storage
     entered = asyncio.Event()
 
@@ -71,9 +83,18 @@ async def test_handoff_recovers_same_execution_and_next_session_turn(handoff_sto
         await asyncio.Event().wait()
         yield "unreachable"
 
-    async with Persistence.open('shutdown-handoff', storage=storage()) as persistence_71, Runtime.open(persistence=persistence_71, features=model_features(_Models(FunctionModel(stream_function=blocked)), _group(False))) as owner:
-        session = await owner.agents.get().create_session("session")
-        execution = await session.start("Remember blue", idempotency_key="first")
+    async with (
+        Persistence.open("shutdown-handoff", storage=storage()) as state,
+        Runtime.open(
+            persistence=state, features=model_features(_Models(FunctionModel(stream_function=blocked)), _group(False)),
+            authorization=_HostAuthorization(),
+        ) as owner,
+    ):
+        principal = owner.default_principal
+        await owner.sessions.create_turn_session("session", principal=principal)
+        turn = await owner.sessions.start(
+            "session", "Remember blue", agent="default", principal=principal, idempotency_key="first",
+        )
         await asyncio.wait_for(entered.wait(), 10)
         await asyncio.wait_for(owner.handoff(), 10)
         await owner.handoff()
@@ -85,23 +106,35 @@ async def test_handoff_recovers_same_execution_and_next_session_turn(handoff_sto
         observed.append(messages)
         yield "blue"
 
-    async with Persistence.open('shutdown-handoff', storage=storage()) as persistence_86, Runtime.open(persistence=persistence_86, features=model_features(_Models(FunctionModel(stream_function=answer)), _group(False)), auto_recover=False) as successor:
-        principal = successor.default_principal
-        before = await successor.executions.inspect(execution.execution_id, principal=principal)
-        assert before.status is ExecutionStatus.STARTED
-        recovered = await successor.executions.recover(execution.execution_id,
-            principal=principal, idempotency_key="handoff-owner")
-        assert recovered.execution_id == execution.execution_id
-        await successor.executions.wait(recovered.execution_id, principal=principal, timeout_seconds=10)
-        assert (await successor.executions.inspect(execution.execution_id,
-            principal=principal)).status is ExecutionStatus.SUCCEEDED
-        session = successor.agents.get().session("session")
-        replay = await session.start("Remember blue", idempotency_key="first")
-        assert replay.execution_id == execution.execution_id
-        following = await session.start("What colour?", idempotency_key="next")
-        await asyncio.wait_for(following.wait(), 10)
-        assert following.execution_id != execution.execution_id
-        from pydantic_ai.messages import TextPart, UserPromptPart
+    async with (
+        Persistence.open("shutdown-handoff", storage=storage()) as state,
+        Runtime.open(
+            persistence=state, features=model_features(_Models(FunctionModel(stream_function=answer)), _group(False)),
+            auto_recover=False, authorization=_HostAuthorization(),
+        ) as successor,
+    ):
+        retained = await state.session_turns.get_turn(turn.key)
+        assert retained["state"] == "accepted" and retained["generation"] == 1
+        assert (await successor.history.turn_session_state("session", principal=principal))["active_turn_id"] == turn.key.turn_id
+        # Expire the retained lease without sleeping through its production duration.
+        turns = state.session_turns
+        async with turns._context.engine.begin() as connection:
+            changed = await connection.execute(
+                turns._turns.update().filter_by(**turns._turn_values(turn.key), generation=1).values(lease_until=0),
+            )
+            assert changed.rowcount == 1
+        assert await successor.sessions.recover_turn("session", turn.key.turn_id, principal=principal)
+        after = await successor.history.turn_result("session", turn.key.turn_id, principal=principal)
+        assert after["status"] == "SUCCEEDED" and after["output"] == {"text": "blue"}
+        replay = await successor.sessions.start(
+            "session", "Remember blue", agent="default", principal=principal, idempotency_key="first",
+        )
+        assert replay.key == turn.key and len(observed) == 1
+        following = await successor.sessions.start(
+            "session", "What colour?", agent="default", principal=principal, idempotency_key="next",
+        )
+        assert (await following.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
+        assert following.key.turn_id != turn.key.turn_id and len(observed) == 2
         first_parts = [part for message in observed[0] for part in message.parts]
         assert any(isinstance(part, UserPromptPart) and "Remember blue" in str(part.content)
                    for part in first_parts)
@@ -135,8 +168,7 @@ async def test_handoff_rejects_nonrecoverable_execution_without_closing_runtime(
                             cache=cache, coordination=cache), features=features) as runtime:
         features.capability(CombinedCapability([]), id="runtime.steps")
         features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()))
-        session = await runtime.agents.get().create_session("session")
-        active = await session.start("Nonrecoverable", idempotency_key="first")
+        active = await runtime.agents.get().start("Nonrecoverable", idempotency_key="first")
         await asyncio.wait_for(entered.wait(), 5)
         features.capability(StepPersistenceCapability(), id="runtime.steps")
         features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
@@ -211,7 +243,7 @@ async def test_handoff_rejects_recovery_admission_without_stopping_runtime(
         await asyncio.Event().wait()
         yield "unreachable"
 
-    features = model_features(_Models(FunctionModel(stream_function=blocked_model)), _group(False))
+    features = model_features(_Models(FunctionModel(stream_function=blocked_model)), _checkpointed_execution_group())
     storage = PersistenceStorage.sqlite(tmp_path / "state.db")
     async with Runtime.open("handoff-recovery", storage=storage, features=features) as owner:
         execution = await owner.agents.get().start("recover", idempotency_key="first")
@@ -258,7 +290,7 @@ async def test_handoff_rejects_worker_without_admission_identity(tmp_path: Path)
         await asyncio.Event().wait()
         yield "unreachable"
 
-    features = model_features(_Models(FunctionModel(stream_function=blocked)), _group(False))
+    features = model_features(_Models(FunctionModel(stream_function=blocked)), _checkpointed_execution_group())
     async with Runtime.open("handoff-unknown", storage=PersistenceStorage.sqlite(tmp_path / "state.db"),
                             features=features) as runtime:
         execution = await runtime.agents.get().start("first", idempotency_key="first")
@@ -339,7 +371,7 @@ def test_process_shutdown_recovery_preserves_execution_id(tmp_path: Path, signal
     import signal
     from ._runtime_process_test_helpers import _RuntimeProcess
 
-    owner = _RuntimeProcess(tmp_path / "process.db", phase="graceful")
+    owner = _RuntimeProcess(tmp_path / "process.db", mode="standalone", phase="graceful")
     successor = None
     try:
         execution_id = owner.initial["execution_id"]
@@ -349,7 +381,7 @@ def test_process_shutdown_recovery_preserves_execution_id(tmp_path: Path, signal
         owner.process.join(15)
         assert not owner.process.is_alive()
         assert owner.process.exitcode == (0 if signal_name == "SIGTERM" else -signal.SIGKILL)
-        successor = _RuntimeProcess(tmp_path / "process.db", execution_id=execution_id)
+        successor = _RuntimeProcess(tmp_path / "process.db", mode="standalone", execution_id=execution_id)
         assert successor.initial["status"] == "STARTED"
         successor.request("recover")
         started = successor.request("await_model")
@@ -515,7 +547,7 @@ async def test_handoff_retry_retains_admitted_execution_identity(tmp_path: Path,
         yield "unreachable"
 
     database = tmp_path / "admission.db"
-    async with Persistence.open('handoff-admission', storage=PersistenceStorage.sqlite(database)) as persistence_371, Runtime.open(persistence=persistence_371, features=model_features(_Models(FunctionModel(stream_function=blocked)), _group(False))) as owner:
+    async with Persistence.open('handoff-admission', storage=PersistenceStorage.sqlite(database)) as persistence_371, Runtime.open(persistence=persistence_371, features=model_features(_Models(FunctionModel(stream_function=blocked)), _checkpointed_execution_group())) as owner:
         start = asyncio.create_task(owner.agents.get().start("admitted", idempotency_key="start"))
         await asyncio.wait_for(admitted.wait(), 5)
         try:
@@ -530,7 +562,7 @@ async def test_handoff_retry_retains_admitted_execution_identity(tmp_path: Path,
         await asyncio.wait_for(owner.handoff(), 10)
     async def answer(messages, info):
         yield "recovered"
-    async with Persistence.open('handoff-admission', storage=PersistenceStorage.sqlite(database)) as persistence_383, Runtime.open(persistence=persistence_383, features=model_features(_Models(FunctionModel(stream_function=answer)), _group(False)), auto_recover=False) as successor:
+    async with Persistence.open('handoff-admission', storage=PersistenceStorage.sqlite(database)) as persistence_383, Runtime.open(persistence=persistence_383, features=model_features(_Models(FunctionModel(stream_function=answer)), _checkpointed_execution_group()), auto_recover=False) as successor:
         await successor.executions.recover(execution.execution_id,
             principal=successor.default_principal, idempotency_key="recover-admitted")
         await successor.executions.wait(execution.execution_id,
@@ -543,13 +575,13 @@ async def test_handoff_retry_retains_admitted_execution_identity(tmp_path: Path,
 def test_resident_runtime_finishes_prepared_result_without_model_replay(tmp_path: Path, keyed: bool) -> None:
     from ._runtime_process_test_helpers import _RuntimeProcess
 
-    owner = _RuntimeProcess(tmp_path / "finalizing.db", phase="finalizing")
+    owner = _RuntimeProcess(tmp_path / "finalizing.db", mode="standalone", phase="finalizing")
     successor = None
     try:
-        assert owner.initial["status"] == "FINALIZING"
-        successor = _RuntimeProcess(tmp_path / "finalizing.db", phase="finalizing",
+        assert owner.initial["status"] == "STARTED" and owner.initial["handoff_phase"] == "prepared"
+        successor = _RuntimeProcess(tmp_path / "finalizing.db", mode="standalone", phase="finalizing",
             execution_id=owner.initial["execution_id"], auto_recover=False)
-        assert successor.initial["status"] == "FINALIZING"
+        assert successor.initial["status"] == "STARTED" and successor.initial["handoff_phase"] == "prepared"
         owner.process.kill()
         owner.process.join(10)
         command = "recover_keyed" if keyed else "recover"
@@ -570,7 +602,7 @@ def test_resident_runtime_finishes_prepared_result_without_model_replay(tmp_path
 @pytest.mark.parametrize("synchronized,ordered_publication", (
     pytest.param(False, False, id="natural_concurrent_takeover"),
     pytest.param(True, False, id="prepared_contenders_rendezvous"),
-    pytest.param(False, True, id="cursor_advanced_before_terminal"),
+    pytest.param(False, True, id="ordered_terminal_publication"),
 ))
 def test_concurrent_finalizing_takeover_keeps_one_result_and_replay_receipt(
     tmp_path: Path, synchronized: bool, ordered_publication: bool,
@@ -579,14 +611,14 @@ def test_concurrent_finalizing_takeover_keeps_one_result_and_replay_receipt(
     import multiprocessing
     from ._runtime_process_test_helpers import _RuntimeProcess
 
-    owner = _RuntimeProcess(tmp_path / "race.db", phase="finalizing")
+    owner = _RuntimeProcess(tmp_path / "race.db", mode="standalone", phase="finalizing")
     successors = []
     context = multiprocessing.get_context("spawn")
     barrier = context.Barrier(2) if synchronized else None
     publication_events = tuple(context.Event() for _ in range(3)) if ordered_publication else ()
     try:
         for role in ("delayed", "first"):
-            successors.append(_RuntimeProcess(tmp_path / "race.db", phase="finalizing",
+            successors.append(_RuntimeProcess(tmp_path / "race.db", mode="standalone", phase="finalizing",
                 execution_id=owner.initial["execution_id"], auto_recover=False, recovery_barrier=barrier,
                 publication_order=(role, *publication_events) if ordered_publication else None))
         owner.process.kill()
@@ -609,18 +641,25 @@ def test_concurrent_finalizing_takeover_keeps_one_result_and_replay_receipt(
             successor.close()
 
 
-def test_recovery_receipt_waits_for_committed_result_publication(tmp_path: Path) -> None:
+@pytest.mark.parametrize("boundary", ("before_terminal", "before_publication"))
+def test_recovery_receipt_waits_for_committed_result_publication(tmp_path: Path, boundary: str) -> None:
     from ._runtime_process_test_helpers import _RuntimeProcess
 
-    owner = _RuntimeProcess(tmp_path / "publication.db", phase="finalizing")
-    successor = _RuntimeProcess(tmp_path / "publication.db", phase="finalizing",
+    owner = _RuntimeProcess(tmp_path / "publication.db", mode="standalone", phase="finalizing")
+    successor = _RuntimeProcess(tmp_path / "publication.db", mode="standalone", phase="finalizing",
         execution_id=owner.initial["execution_id"], auto_recover=False)
     try:
         owner.process.kill()
         owner.process.join(10)
-        interrupted = successor.request("recover_before_publication")
-        assert interrupted["status"] == "SUCCEEDED"
+        interrupted = successor.request("recover_" + boundary)
+        assert interrupted["error_code"] == "STORAGE_RECOVERY_REQUIRED"
+        assert interrupted["status"] == ("STARTED" if boundary == "before_terminal" else "SUCCEEDED")
         assert interrupted["handoff_phase"] == "prepared"
+        successor.close(check=True)
+        successor = _RuntimeProcess(tmp_path / "publication.db", mode="standalone", phase="finalizing",
+            execution_id=owner.initial["execution_id"], auto_recover=False)
+        assert successor.initial["status"] == interrupted["status"]
+        assert successor.initial["handoff_phase"] == "prepared"
         result = successor.request("recover_keyed")
         assert result["status"] == "SUCCEEDED"
         assert result["handoff_phase"] == "completed"

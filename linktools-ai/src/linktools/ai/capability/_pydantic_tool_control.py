@@ -35,9 +35,11 @@ class PydanticToolControlCapability(AbstractCapability[AgentContext[object]]):
 
     def __init__(
         self, *, before_validate: Callable[[ToolCallPart, ToolDefinition], None] | None = None,
+        _after_validate: Callable[[ToolCallPart, ToolDefinition, ValidatedToolArgs], None] | None = None,
     ) -> None:
         self.id = "linktools.ai.pydantic-tool-control"
         self._before_validate = before_validate
+        self._after_validate = _after_validate
 
     @classmethod
     def build_model_retry(cls, message: str) -> ModelRetry:
@@ -70,6 +72,14 @@ class PydanticToolControlCapability(AbstractCapability[AgentContext[object]]):
             raise self.build_model_retry(error.message) from error
         except ToolCallFailed as error:
             raise self.build_tool_failed(error.message) from error
+
+    async def after_tool_validate(
+        self, ctx: PydanticRunContext[AgentContext[object]], *,
+        call: ToolCallPart, tool_def: ToolDefinition, args: ValidatedToolArgs,
+    ) -> ValidatedToolArgs:
+        if self._after_validate is not None and not ctx.tool_call_approved:
+            self._after_validate(call, tool_def, args)
+        return args
 
     async def on_tool_execute_error(
         self,

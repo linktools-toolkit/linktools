@@ -155,9 +155,10 @@ async def test_two_runtimes_observe_preview_before_completion(tmp_path) -> None:
 async def test_covered_remote_observation_needs_no_periodic_tree_or_model_reads(
     tmp_path, monkeypatch, viewer_counts,
 ) -> None:
+    from collections import deque
     from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
     from linktools.ai.capability import AgentContext, TraceCapability
-    from linktools.ai.execution import TaskModelProjection
+    from linktools.ai.execution import TaskModelProjection, events as execution_events
     from ._runtime_test_helpers import _UsageFunctionModel
 
     calling = asyncio.Event()
@@ -192,12 +193,30 @@ async def test_covered_remote_observation_needs_no_periodic_tree_or_model_reads(
     watcher_tasks = []
     watcher_ready = [asyncio.Event() for _ in range(sum(viewer_counts))]
     first_finished = [asyncio.Event() for _ in watcher_ready]
+    diagnostics = deque(maxlen=96)
+    phase = "attach"
+    deliver = execution_events.deliver_shared_observation
+
+    def trace_observation(execution_id, position, record):
+        result = deliver(execution_id, position, record)
+        now = asyncio.get_running_loop().time()
+        deadline = record.get("authority_deadline")
+        diagnostics.append((
+            phase, "frame", record.get("kind"), record.get("producer_generation"), position,
+            record.get("model"), record.get("tree"),
+            None if deadline is None else round(deadline - now, 3),
+            asyncio.current_task().get_name(), tuple(readers),
+        ))
+        return result
+
+    monkeypatch.setattr(execution_events, "deliver_shared_observation", trace_observation)
 
     def count(reader, method, slot):
         original = getattr(reader, method)
 
         async def read(*args, **kwargs):
             readers[slot] += 1
+            diagnostics.append((phase, "read", method, asyncio.current_task().get_name(), tuple(readers)))
             return await original(*args, **kwargs)
 
         monkeypatch.setattr(reader, method, read)
@@ -234,13 +253,15 @@ async def test_covered_remote_observation_needs_no_periodic_tree_or_model_reads(
             # Allow the first producer coverage tick to reach every Web Runtime.
             await asyncio.sleep(2.5)
             baseline = tuple(readers)
+            phase = "covered idle"
             await asyncio.sleep(2.5)
-            assert tuple(readers) == baseline
+            assert tuple(readers) == baseline, tuple(diagnostics)
+            phase = "first model → tool → second model"
             first_release.set()
             await asyncio.wait_for(second_entered.wait(), 5)
             await asyncio.wait_for(asyncio.gather(*(seen.wait() for seen in first_finished)), 5)
             assert not final_release.is_set()
-            assert tuple(readers) == baseline
+            assert tuple(readers) == baseline, tuple(diagnostics)
             final_release.set()
             await asyncio.wait_for(asyncio.gather(*watcher_tasks), 5)
             assert (await execution.wait()).result.output == {"text": "done"}

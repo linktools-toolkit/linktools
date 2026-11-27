@@ -7,17 +7,25 @@ from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import Insert, Update, select
-from .test_state_turn_authority import _authority_records, _backend, _claim, _open_store, _validate_authority
+from .test_state_turn_authority import _backend, _claim, _open_store
 from linktools.ai.storage import TurnScopeIdentity
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence.turns import validate_turn_records
 from linktools.ai.persistence._sql import SqlStateStore, _SqlTransaction
 from linktools.ai.persistence._turn_sql import SqlTurnProof
-from linktools.ai.persistence._turn_sql_schema import TURN_ADMISSION_TABLE, TURN_SLOT_TABLE
+from linktools.ai.persistence._record_owner import EXECUTION_SHELL_KIND
 
 pytestmark = pytest.mark.asyncio
 
 _SCOPE = TurnScopeIdentity("turn-authority", "tenant", "runtime-pending-turn")
+
+
+async def _receipt_rows(store):
+    table = store.storage_group.metadata.tables["ai_execution_records"]
+    async with store.context.engine.connect() as conn:
+        return tuple((await conn.execute(select(table).where(
+            table.c.store_key == store.store_key, table.c.turn_receipt.is_not(None),
+        ))).mappings())
 
 
 @pytest.mark.parametrize("failure", ("acquire_rejected", "cancel_after_acquire", "final_validation"))
@@ -61,10 +69,9 @@ async def test_initial_claim_never_commits_incomplete_session(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("failure", ("acquire_rejected", "cancel_after_acquire", "final_validation"))
-async def test_initial_sql_claim_rolls_back_typed_slot_and_admission(tmp_path, monkeypatch, failure):
+async def test_initial_sql_claim_rolls_back_native_execution_receipt(tmp_path, monkeypatch, failure):
     async with _open_store("sql", tmp_path / "sql") as store:
         authority = _backend(store)
-        slot = store.storage_group.metadata.tables[TURN_SLOT_TABLE]
         original = _SqlTransaction._execute
         original_coordination = SqlTurnProof.coordination
         bound = False
@@ -72,14 +79,12 @@ async def test_initial_sql_claim_rolls_back_typed_slot_and_admission(tmp_path, m
 
         async def fault(tx, statement):
             nonlocal bound, faults
-            if isinstance(statement, Insert) and statement.table.name == TURN_ADMISSION_TABLE:
-                staged = (await original(tx, select(slot).where(slot.c.session_key == b"s"))).mappings().one()
-                assert staged["active_execution_id"] is None and staged["lease_token"] is None
+            if isinstance(statement, Insert) and statement.table.name == "ai_execution_records":
                 if failure == "acquire_rejected":
                     faults += 1
                     return SimpleNamespace(rowcount=0)
             result = await original(tx, statement)
-            if isinstance(statement, Update) and statement.table.name == TURN_SLOT_TABLE:
+            if isinstance(statement, Update) and statement.table.name == "ai_execution_records":
                 assert result.rowcount == 1
                 bound = True
                 if failure == "cancel_after_acquire":
@@ -105,13 +110,13 @@ async def test_initial_sql_claim_rolls_back_typed_slot_and_admission(tmp_path, m
         if failure != "cancel_after_acquire":
             expected = ErrorCode.STORAGE_CONFLICT if failure == "acquire_rejected" else ErrorCode.STORAGE_INTEGRITY_ERROR
             assert caught.value.code is expected
-        assert await _authority_records(store) == ()
+        assert await _receipt_rows(store) == ()
         assert await authority.read_turn(_SCOPE, "e") is None
         claimed = await _claim(authority)
         assert claimed is not None and claimed.lease is not None
-        rows = await _authority_records(store)
-        assert len(rows) == 2
-        _validate_authority(rows)
+        rows = await _receipt_rows(store)
+        assert len(rows) == 1 and rows[0]["kind"] == EXECUTION_SHELL_KIND
+        assert rows[0]["turn_token"] == claimed.lease.token.encode("ascii")
         assert await authority.read_turn(_SCOPE, "e") == replace(claimed, lease=None)
 
 
@@ -124,7 +129,7 @@ async def test_initial_claim_two_sql_connections_admit_exactly_one(tmp_path, mon
         ready = asyncio.Event()
 
         async def synchronized(tx, statement):
-            if isinstance(statement, Insert) and statement.table.name == TURN_SLOT_TABLE:
+            if isinstance(statement, Insert) and statement.table.name == "ai_execution_records":
                 arrived.add(tx)
                 if len(arrived) == 2:
                     ready.set()
@@ -139,10 +144,10 @@ async def test_initial_claim_two_sql_connections_admit_exactly_one(tmp_path, mon
                 ))
             assert len([result for result in results if result is not None]) == 1
             assert len(arrived) == 2
-            rows = await _authority_records(store)
-            assert len(rows) == 2
-            _validate_authority(rows)
+            rows = await _receipt_rows(store)
+            assert len(rows) == 1 and rows[0]["kind"] == EXECUTION_SHELL_KIND
             winner = next(result for result in results if result is not None)
+            assert rows[0]["turn_token"] == winner.lease.token.encode("ascii")
             assert await _backend(other).read_turn_by_session(_SCOPE, "s") == replace(winner, lease=None)
         finally:
             await other.close()
@@ -156,7 +161,7 @@ async def test_initial_claim_is_not_visible_before_acquire_or_after_cancel(tmp_p
         staged, release = asyncio.Event(), asyncio.Event()
 
         async def pause(tx, statement):
-            if isinstance(statement, Update) and statement.table.name == TURN_SLOT_TABLE:
+            if isinstance(statement, Update) and statement.table.name == "ai_execution_records":
                 staged.set()
                 await release.wait()
             return await original(tx, statement)
@@ -166,11 +171,11 @@ async def test_initial_claim_is_not_visible_before_acquire_or_after_cancel(tmp_p
                 patch.setattr(_SqlTransaction, "_execute", pause)
                 worker = asyncio.create_task(_claim(_backend(store)))
                 await asyncio.wait_for(staged.wait(), 5)
-                assert await _authority_records(other) == ()
+                assert await _receipt_rows(other) == ()
                 worker.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await worker
-            assert await _authority_records(other) == ()
+            assert await _receipt_rows(other) == ()
         finally:
             release.set()
             if worker is not None and not worker.done():
@@ -194,12 +199,12 @@ async def test_initial_claim_sql_statement_budget(tmp_path):
             claimed = await _claim(authority)
             assert claimed is not None and claimed.lease is not None
             # One outer-joined ownership snapshot, then fresh source time after the
-            # slot insert/guard; neither SELECT is a confirmation of our own write.
+            # unique native INSERT; neither SELECT is a readback of our own write.
             assert counts["SELECT"] == 2
-            assert counts["INSERT"] == 2 and counts["UPDATE"] == 1
+            assert counts["INSERT"] == 1 and counts["UPDATE"] == 1
             assert counts["DELETE"] == 0
         finally:
             event.remove(engine, "before_cursor_execute", count)
-        records = await _authority_records(store)
-        assert len(records) == 2
-        _validate_authority(records)
+        records = await _receipt_rows(store)
+        assert len(records) == 1 and records[0]["kind"] == EXECUTION_SHELL_KIND
+        assert records[0]["turn_token"] == claimed.lease.token.encode("ascii")

@@ -892,7 +892,9 @@ configuring the backend does not add provisional TaskGraph cursor semantics.
 ## Opt-in session display captures
 
 `runtime.sessions.refresh(session_id, principal=principal)` remains a strong
-refresh. An explicit `max_age=3` permits reuse of one complete `SessionDetail`
+refresh. Native SQL sessions return the authorized canonical session and timeline
+page and require `max_age=0`. For other session backends, an explicit
+`max_age=3` permits reuse of one complete `SessionDetail`
 for at most three seconds from the start of its original capture. `max_age` must
 be finite and non-negative; it is a caller-selected maximum, not a fixed SDK TTL.
 A shorter later maximum is respected, and a longer one never extends an existing

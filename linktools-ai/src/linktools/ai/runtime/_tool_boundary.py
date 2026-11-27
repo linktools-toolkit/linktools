@@ -42,7 +42,9 @@ from ._handoff import ToolEntryStopped, execution_handoff_scope
 from ._budget import RunBudgetContext
 from ..model.messages import bind_tool_return_attachments
 from ._harness import bind_tool_reference_origins
-from ._tool import ToolOperationBridge
+from ._tool import (
+    RuntimeToolOperationBridge, TOOL_CAPABILITY_REF_METADATA_KEY, ToolOperationBridge, ToolOperationDecision, tool_capability_ref,
+)
 from ._tool_metrics import (
     TOOL_METRICS_MANAGED_METADATA_KEY,
     ToolMetricContext,
@@ -51,28 +53,6 @@ from ._tool_metrics import (
 
 if TYPE_CHECKING:
     from ..capability import RunCallbacks
-
-
-TOOL_CAPABILITY_REF_METADATA_KEY = "linktools.ai.capability_ref"
-
-
-def tool_capability_ref(tool: ToolDefinition) -> CapabilityRef | None:
-    """Read the execution identity carried by the provided native definition."""
-    value = (tool.metadata or {}).get(TOOL_CAPABILITY_REF_METADATA_KEY)
-    return None if value is None else CapabilityRef.from_payload(value)
-
-
-def is_instruction_file_read(
-    tool_name: str, arguments: Mapping[str, object], path_fields: tuple[str, ...]
-) -> bool:
-    if tool_name != "read_file" or path_fields != ("path",):
-        return False
-    value = arguments.get("path")
-    paths = (value,) if isinstance(value, str) else value
-    return isinstance(paths, (tuple, list)) and bool(paths) and all(
-        isinstance(path, str) and path.rsplit("/", 1)[-1] == "AGENTS.md"
-        for path in paths
-    )
 
 
 class RepositoryInstructionBoundary(Protocol):
@@ -87,7 +67,6 @@ class RepositoryInstructionBoundary(Protocol):
         tool_call_id: str,
         arguments: dict[str, Any],
         path_fields: tuple[str, ...],
-        approved: bool = False,
     ) -> None: ...
 
 
@@ -98,6 +77,7 @@ class ManagedToolDescriptor:
     tool_class: ToolClass
     workspace_path_fields: tuple[str, ...] = ()
     capability_ref: CapabilityRef | None = None
+    requires_approval: bool = False
 
     def __post_init__(self) -> None:
         if self.effect_owner not in {"none", "tool_operation"}:
@@ -156,6 +136,20 @@ def require_tool_effects(
         raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "tool contract does not establish read-only effects")
 
 
+_ClaimedLeaf = Callable[
+    [ToolOperationDecision, ToolCallPart, dict[str, Any], PydanticRunContext[AgentContext[object]]],
+    Awaitable[Any],
+]
+
+
+class _NativeDelegateInterruption(AIError):
+    """A typed failure from the exact claimed native delegate, not an ordinary tool."""
+
+    def __init__(self, error: AIError, call_id: str) -> None:
+        super().__init__(error.code, str(error), operation_id=error.operation_id, safe_details=error.safe_details)
+        self.call_id = call_id
+
+
 class BoundaryToolset(AbstractToolset[AgentContext[object]]):
     """Apply workspace policy and effect durability at the final leaf call."""
 
@@ -174,6 +168,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         budget: RunBudgetContext | None = None,
         repository_boundary: RepositoryInstructionBoundary | None = None,
         result_callbacks: RunCallbacks | None = None,
+        claimed_leaves: Mapping[str, _ClaimedLeaf] | None = None,
         prepare_arguments: Callable[
             [str, dict[str, Any], PydanticRunContext[AgentContext[object]], ToolsetTool[AgentContext[object]]],
             Awaitable[dict[str, Any]],
@@ -193,6 +188,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         self._budget = budget
         self._repository_boundary = repository_boundary
         self._result_callbacks = result_callbacks
+        self._claimed_leaves = {} if claimed_leaves is None else dict(claimed_leaves)
         self._prepare_arguments = prepare_arguments
         self._exit_stack: AsyncExitStack | None = None
 
@@ -296,6 +292,17 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
     ) -> Any:
         if not isinstance(tool_args, dict):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        bridge = self._tool_operations
+        split_approved = None
+        if isinstance(bridge, RuntimeToolOperationBridge) and (
+            bridge._settled_split_resume or bridge._split_approval_ref is not None
+        ):
+            split_approved = bridge._split_approved_operation
+            if (split_approved is None or not ctx.tool_call_approved
+                    or (ctx.tool_call_id, name) != (split_approved.tool_call_id, split_approved.tool_name)
+                    or tool_capability_ref(tool.tool_def) != split_approved.capability_ref):
+                # A later model-proposed call never acquires this approval.
+                raise AIError(ErrorCode.EXECUTION_NOT_READY)
         processors = () if self._result_callbacks is None else self._result_callbacks.tool_results(ctx.tool_call_id)
         if not isinstance(tool, _BoundaryTool) or tool.boundary is not self or tool.tool_def.name != name:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -353,24 +360,22 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             )
             raise
         call = ToolCallPart(name, args=final_args, tool_call_id=call_id)
+        replay_safe = descriptor.effect_policy == "replay_safe"
         try:
-            instruction_read = self._repository_boundary is not None and is_instruction_file_read(
-                name, final_args, path_fields,
-            )
-            # An approval must bind to the frontier that the model already saw.
-            # Authorize document reads before they can advance it.
-            if instruction_read:
-                await self._authorize(name, descriptor, final_args, approved=ctx.tool_call_approved)
+            await self._authorize(name, descriptor, final_args, approved=ctx.tool_call_approved)
             if self._repository_boundary is not None:
                 await self._repository_boundary.check(
                     tool_name=name,
                     tool_call_id=call_id,
                     arguments=final_args,
                     path_fields=path_fields,
-                    approved=ctx.tool_call_approved,
                 )
-            if not instruction_read:
-                await self._authorize(name, descriptor, final_args, approved=ctx.tool_call_approved)
+        except (ApprovalRequired, CallDeferred):
+            if isinstance(bridge, RuntimeToolOperationBridge):
+                await bridge.defer_before_effect(
+                    call, final_args, replay_safe=replay_safe, capability_ref=descriptor.capability_ref,
+                )
+            raise
         except Exception as error:
             await self._record_pre_effect_error(
                 call,
@@ -378,13 +383,11 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                 error,
             )
             raise
-        bridge = self._tool_operations
-        replay_safe = descriptor.effect_policy == "replay_safe"
         decision = None
         prior_call = bridge is not None and descriptor.effect_owner == "none" and bool(
             await bridge.existing_call_ids((call_id,))
         )
-        if descriptor.effect_owner != "none" or prior_call:
+        if split_approved is not None or descriptor.effect_owner != "none" or prior_call:
             if bridge is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             decision = await bridge.begin(
@@ -392,6 +395,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                 capability_ref=descriptor.capability_ref,
             )
 
+        claimed_leaf = self._claimed_leaves.get(name)
         physical_args: dict[str, Any] | None = None
 
         async def prepare() -> None:
@@ -400,7 +404,25 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                 physical_args = await self._prepare_arguments(name, final_args, ctx, raw_tool)
 
         async def invoke(args: dict[str, Any]) -> Any:
-            result = await raw_toolset.call_tool(name, args if physical_args is None else physical_args, ctx, raw_tool)
+            if claimed_leaf is None:
+                try:
+                    result = await raw_toolset.call_tool(
+                        name, args if physical_args is None else physical_args, ctx, raw_tool,
+                    )
+                except ApprovalRequired:
+                    # An effect-free Python tool may ask for approval itself.
+                    # Park its validated input, without inventing an effect claim.
+                    if (descriptor.effect_owner == "none" and decision is None
+                            and isinstance(bridge, RuntimeToolOperationBridge)):
+                        await bridge.defer_before_effect(
+                            call, final_args, replay_safe=replay_safe, capability_ref=descriptor.capability_ref,
+                        )
+                    raise
+            else:
+                # Checked before entering: never invoke a native child for a
+                # cached result, a staged split operation, or an unmanaged leaf.
+                assert decision is not None
+                result = await claimed_leaf(decision, call, args, ctx)
             if processors:
                 if decision is None:
                     # Give projections the existing file occurrence to preserve;
@@ -412,6 +434,8 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             return bind_tool_reference_origins(ctx, result)
 
         if decision is None:
+            if claimed_leaf is not None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             if self._budget is not None:
                 await self._budget.admit_tool(call_id)
             if bridge is not None and descriptor.effect_owner != "none":
@@ -441,8 +465,9 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             await bridge.unknown(decision, error)
             raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
 
+        entered = False
+
         async def invoke_and_settle() -> Any:
-            entered = False
             def entering() -> None:
                 nonlocal entered
                 entered = True
@@ -452,7 +477,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                 result = await self._invoke(
                     call, tool.tool_def, final_args, invoke, capture=capture,
                     preflight=(bridge.require_fresh_control
-                               if self._budget is not None or self._tool_metrics is not None else None),
+                               if split_approved is not None or self._budget is not None else None),
                     entering=entering,
                 )
             except (
@@ -507,6 +532,8 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
 
         try:
             try:
+                if claimed_leaf is not None and (decision.staged or decision.replay_safe):
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                 if self._budget is not None and not decision.budget_admitted:
                     await self._budget.admit_tool(
                         call_id, operation_id=decision.operation_id, fence=decision.fence,
@@ -520,7 +547,14 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             except BaseException:
                 await bridge.defer(decision)
                 raise
-            return await invoke_and_settle()
+            try:
+                return await invoke_and_settle()
+            except AIError as error:
+                if entered and claimed_leaf is not None and error.code in {
+                    ErrorCode.EXECUTION_CANCELLED, ErrorCode.STORAGE_CONFLICT, ErrorCode.TOOL_EFFECT_UNKNOWN,
+                }:
+                    raise _NativeDelegateInterruption(error, call_id) from error
+                raise
         finally:
             if observation is not None and self._tool_metrics is not None:
                 await self._tool_metrics.record(observation)
@@ -588,6 +622,8 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             kind="tool" if descriptor.capability_ref is None else descriptor.capability_ref.kind,
             effect_policy=descriptor.effect_policy,
         )
+        if descriptor.requires_approval and not approved:
+            raise ApprovalRequired()
         policy = self._permission_policy
         if policy is None or (
             not descriptor.tool_class.startswith("filesystem")
@@ -656,6 +692,5 @@ __all__ = [
     "managed_tool_descriptor_from_metadata",
     "require_tool_effects",
     "RepositoryInstructionBoundary",
-    "is_instruction_file_read",
     "BoundaryToolset",
 ]

@@ -132,8 +132,7 @@ async def run_payload(payload):
         binding.contract={**binding.contract,'input_mime_types': ['image/png']}
         async with Persistence.open('coalesce-crash', storage=PersistenceStorage.sqlite(root/'state.db')) as persistence, Runtime.open(persistence=persistence,features=model_features(binding,features),auto_recover=False) as runtime:
             if mode == 'create':
-                session = await runtime.agents.get().create_session('session')
-                execution = await session.start('inspect',idempotency_key='one')
+                execution = await runtime.agents.get().start('inspect',idempotency_key='one')
                 (root/'execution').write_text(execution.execution_id)
                 await execution.wait(timeout_seconds=10)
                 raise AssertionError('exit not reached')

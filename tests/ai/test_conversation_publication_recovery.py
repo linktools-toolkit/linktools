@@ -1,242 +1,239 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""Publication and recovery boundaries of the native SQLite Session SDK."""
 
-from linktools.ai.persistence import Persistence
-"""Retained conversation publication recovery boundaries."""
-from ._runtime_test_helpers import model_features
-
-from dataclasses import replace
+import asyncio
+from contextlib import asynccontextmanager
 
 import pytest
-from tests.ai.test_conversation_output_retention import _NAMESPACE, _features, _models
-from linktools.ai.core import ExecutionStatus
-from linktools.ai.history import History
-from linktools.ai.runtime import Runtime
-from linktools.ai.persistence import PersistenceStorage, PersistencePlan
-from linktools.ai.storage import StorageRoute
+from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
+
+from linktools.ai.capability import AgentContext, SessionCapability
+from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence.contracts import (
-    ExecutionRecoveryState,
-    RecoveryHandoffPhase,
-)
+from linktools.ai.history import History
+from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.runtime import Runtime, RuntimeFeatures
+
+from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
+
+_NAMESPACE = "native-publication-recovery"
+_SESSION = "session"
+
+
+class _Authorization(TenantAuthorizationPolicy):
+    """Explicit host policy for native turns."""
+
+
+def _features(calls, effects):
+    async def effect(context: AgentContext[None]) -> str:
+        del context
+        effects.append("once")
+        return "confirmed"
+
+    async def model(messages, info):
+        calls.append((tuple(
+            part.content
+            for message in messages if isinstance(message, ModelRequest)
+            for part in message.parts if isinstance(part, UserPromptPart)
+        ), info.instructions or "", tuple(
+            part.content
+            for message in messages if isinstance(message, ModelResponse)
+            for part in message.parts if isinstance(part, TextPart)
+        )))
+        if isinstance(messages[-1], ModelRequest):
+            if any(isinstance(part, UserPromptPart) and part.content == "effect input" for part in messages[-1].parts):
+                return ModelResponse(parts=[ToolCallPart("effect", {}, "original-effect")])
+            for part in messages[-1].parts:
+                if isinstance(part, ToolReturnPart):
+                    assert part.content == "confirmed"
+        return ModelResponse(parts=[TextPart("answer")])
+
+    features = RuntimeFeatures(_NAMESPACE)
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
+    features.tool(effect, effect_policy="non_replay_safe")
+    features.agent("default", model="default", allow_tools=("effect",))
+    return model_features(_Models(_UsageFunctionModel(model)), features)
+
+
+@asynccontextmanager
+async def _host(storage, calls, effects):
+    async with (
+        Persistence.open(_NAMESPACE, storage=storage) as state,
+        Runtime.open(persistence=state, features=_features(calls, effects), authorization=_Authorization()) as runtime,
+    ):
+        yield state, runtime
+
+
+async def _send(runtime, prompt, request_id):
+    return await runtime.sessions.start(
+        _SESSION, prompt, principal=runtime.default_principal,
+        agent=runtime.agents.get(), idempotency_key=request_id,
+    )
+
+
+async def _expire(turns, key, *, generation=1):
+    async with turns._context.engine.begin() as connection:
+        expired = await connection.execute(turns._turns.update().filter_by(
+            **turns._turn_values(key), generation=generation, state="accepted",
+        ).values(lease_until=0))
+        assert expired.rowcount == 1
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("prior_turn", [False, True])
-async def test_unknown_release_must_not_report_success_without_envelope(
-    tmp_path, monkeypatch, prior_turn
-):
-    storage = PersistenceStorage.from_plan(
-        PersistencePlan(
-            execution=StorageRoute.sqlite(tmp_path / "e.db"),
-            conversation=StorageRoute.sqlite(tmp_path / "c.db"),
-        )
-    )
-    try:
-        async with Persistence.open(_NAMESPACE, storage=storage) as persistence_33, Runtime.open(persistence=persistence_33, features=model_features(_models(), _features())) as runtime:
-            session = await runtime.agents.get().create_session("s")
-            if prior_turn:
-                await session.run("prior committed turn", timeout_seconds=5)
-            seq = 2 if prior_turn else 1
-            sessions = runtime._state.conversation.sessions
-            original = sessions.state_store.mutate
-            calls = 0
+async def test_unknown_release_must_not_report_success_without_envelope(tmp_path, monkeypatch, prior_turn):
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db")
+    calls, effects = [], []
+    rejected = asyncio.Event()
+    async with _host(storage, calls, effects) as (state, runtime):
+        principal = runtime.default_principal
+        await runtime.agents.get().create_session(_SESSION, principal=principal)
+        if prior_turn:
+            prior = await _send(runtime, "prior committed turn", "prior")
+            assert (await prior.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
 
-            async def lose_release(callback, *args, **kwargs):
-                nonlocal calls
-                if callback.__name__ == "release_conversation":
-                    calls += 1
-                    raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
-                return await original(callback, *args, **kwargs)
+        assert state.session_turns is not None
 
-            monkeypatch.setattr(sessions.state_store, "mutate", lose_release)
-            execution = await session.start("prompt")
+        async def lose_release(_key, *, state, **_options):
+            assert state == "succeeded"
+            rejected.set()
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(state.session_turns, "finish", lose_release)
+            turn = await _send(runtime, "effect input", "request")
+            await asyncio.wait_for(rejected.wait(), 5)
             with pytest.raises(AIError) as raised:
-                await execution.wait(timeout_seconds=5)
-            assert raised.value.code in {
-                ErrorCode.STORAGE_COMMIT_UNKNOWN,
-                ErrorCode.STORAGE_RECOVERY_REQUIRED,
-            }
-            tenant = runtime.default_principal.tenant_id
-            principal = runtime.default_principal
-            execution_id = execution.execution_id
-            commits = await sessions.list_timeline_commits(
-                "s", tenant_id=tenant, start_turn_seq=seq, end_turn_seq=seq + 1
-            )
-            assert commits == ()
-            raw = await runtime._state.execution.executions.get(execution_id, tenant_id=tenant)
-            header = await sessions.get("s", tenant_id=tenant)
-            recovery = await runtime._state.execution.executions.get(
-                execution_id, tenant_id=tenant
-            )
-            assert header.active_execution_id == execution_id
-            assert not raw.retention_closed
-            assert recovery.recovery_state is ExecutionRecoveryState.HANDOFF
-            assert recovery.recovery.handoff_phase is RecoveryHandoffPhase.PREPARED
-            with pytest.raises(AIError) as result_error:
-                await runtime.executions.result(execution_id, principal=principal)
-            assert result_error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
-            with pytest.raises(AIError) as size_error:
-                await runtime._execution_service.result_payload_size(
-                    execution_id, principal=principal
-                )
-            assert size_error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
-            async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.from_plan(storage.plan), tenant_id="default", read_only=True) as history_persistence_84, History.open(persistence=history_persistence_84) as history:
-                with pytest.raises(AIError) as history_error:
-                    await history.result(execution_id, principal=principal)
-                assert history_error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
-            monkeypatch.setattr(sessions.state_store, "mutate", original)
-    except AIError as close_error:
-        assert close_error.code in {
-            ErrorCode.STORAGE_COMMIT_UNKNOWN,
-            ErrorCode.STORAGE_RECOVERY_REQUIRED,
-        }
-    storage = PersistenceStorage.from_plan(
-        PersistencePlan(
-            execution=StorageRoute.sqlite(tmp_path / "e.db"),
-            conversation=StorageRoute.sqlite(tmp_path / "c.db"),
-        )
-    )
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_102, Runtime.open(persistence=persistence_102, features=model_features(_models(), _features()), auto_recover=True) as runtime:
-        recovered_commits = await runtime._state.conversation.sessions.list_timeline_commits(
-            "s", tenant_id=principal.tenant_id, start_turn_seq=seq, end_turn_seq=seq + 1
-        )
-        result = (
-            await runtime.executions.wait(
-                execution_id, principal=principal, timeout_seconds=5
-            )
-        ).result
-        page = await runtime.sessions.timeline("s", principal=principal)
-        assert len(page.items) == seq and page.items[-1].items
-        assert page.items[-1].output == result.output
-        assert recovered_commits[0].start_message_index == (2 if prior_turn else 0)
-        assert recovered_commits[0].end_message_index == (4 if prior_turn else 2)
-        assert len(page.items[-1].items) == 1
+                await turn.wait_final(timeout_seconds=5)
+            assert raised.value.code in {ErrorCode.STORAGE_COMMIT_UNKNOWN, ErrorCode.STORAGE_RECOVERY_REQUIRED}
+            view = await runtime.history.turn_result(_SESSION, turn.key.turn_id, principal=principal)
+            assert not view["conversation_committed"] and view["output"] is None
+            session = await runtime.history.turn_session_state(_SESSION, principal=principal)
+            assert session["active_turn_id"] == turn.key.turn_id
+            page = await runtime.history.turn_session(_SESSION, principal=principal)
+            assert len(page["timeline"]["items"]) == int(prior_turn)
+            async with (
+                Persistence.open(_NAMESPACE, storage=storage, read_only=True) as reader,
+                History.open(persistence=reader, authorization=_Authorization()) as history,
+            ):
+                cold_view = await history.turn_result(_SESSION, turn.key.turn_id, principal=principal)
+                assert cold_view["conversation_committed"] is False and cold_view["output"] is None
+        receipts = await state.checkpoint.tools.list_by_execution(turn.key.turn_id, tenant_id=principal.tenant_id)
+        assert len(receipts) == 1
+        await _expire(state.session_turns, turn.key)
+
+    async with _host(storage, calls, effects) as (state, runtime):
+        joined = await _send(runtime, "effect input", "request")
+        assert joined.key == turn.key
+        assert await runtime.sessions.recover_turn(_SESSION, turn.key.turn_id, principal=principal)
+        result = await joined.wait_final(timeout_seconds=5)
+        page = await runtime.history.turn_session(_SESSION, principal=principal)
+        assert result.status is ExecutionStatus.SUCCEEDED
+        assert len(page["timeline"]["items"]) == 1 + int(prior_turn)
+        assert page["timeline"]["items"][-1] == result.view
+        assert await state.checkpoint.tools.list_by_execution(turn.key.turn_id, tenant_id=principal.tenant_id) == receipts
+    assert len(calls) == 2 + int(prior_turn) and effects == ["once"]
 
 
 @pytest.mark.asyncio
-async def test_rejected_admitted_start_retains_input(tmp_path, monkeypatch):
-    storage = PersistenceStorage.from_plan(
-        PersistencePlan(
-            execution=StorageRoute.sqlite(tmp_path / "e.db"),
-            conversation=StorageRoute.sqlite(tmp_path / "c.db"),
-        )
-    )
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_129, Runtime.open(persistence=persistence_129, features=model_features(_models(), _features())) as runtime:
-        session = await runtime.agents.get().create_session("s")
+async def test_admitted_failure_retains_input_without_publishing_an_answer(tmp_path, monkeypatch):
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db")
+    calls, effects = [], []
+    async with _host(storage, calls, effects) as (_, runtime):
+        principal = runtime.default_principal
+        await runtime.agents.get().create_session(_SESSION, principal=principal)
 
-        async def reject(*args, **kwargs):
+        async def reject(*_args, **_kwargs):
             raise AIError(ErrorCode.SESSION_CONFLICT)
 
-        original_claim = runtime._state.execution.executions.claim_start
-        monkeypatch.setattr(runtime._state.execution.executions, "claim_start", reject)
-        with pytest.raises(AIError):
-            await session.start("original rejected input")
-        sessions = runtime._state.conversation.sessions
-        head = await sessions.timeline_head(
-            "s", tenant_id=runtime.default_principal.tenant_id
-        )
-        commits = await sessions.list_timeline_commits(
-            "s",
-            tenant_id=runtime.default_principal.tenant_id,
-            start_turn_seq=1,
-            end_turn_seq=head + 1,
-        )
-        assert head == 1 and len(commits) == 1
-        owner = await runtime._state.execution.executions.get(
-            commits[0].execution_id, tenant_id=runtime.default_principal.tenant_id,
-        )
-        assert owner.stored_user_input.payload.decode() == "original rejected input"
-        assert owner.result.output is None
-        rejected_page = await session.timeline()
-        assert rejected_page.items[0].user_input["prompt"]["text"] == "original rejected input"
-        assert rejected_page.items[0].output is None
-        assert commits[0].start_message_index == commits[0].end_message_index == 0
-        monkeypatch.setattr(runtime._state.execution.executions, "claim_start", original_claim)
-        await session.run("next real input", timeout_seconds=5)
-        page = await session.timeline()
-        assert len(page.items) == 2 and page.items[0].items == ()
-        history = await session.history()
-        assert "original rejected input" not in repr(history.items)
-        assert "next real input" in repr(history.items)
+        runner = runtime.sessions._require_turn_sessions()[0]
+        with monkeypatch.context() as patch:
+            patch.setattr(runner._executor, "execute_regenerable", reject)
+            turn = await _send(runtime, "original rejected input", "rejected")
+            failed = await turn.wait_final(timeout_seconds=5)
+        assert failed.status is ExecutionStatus.FAILED
+        assert failed.view["user_input"]["prompt"] == "original rejected input"
+        assert failed.view["output"] is None and failed.view["error_code"] == ErrorCode.SESSION_CONFLICT.value
+        assert not calls
+        next_turn = await _send(runtime, "next real input", "next")
+        assert (await next_turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        page = await runtime.history.turn_session(_SESSION, principal=principal)
+        first, second = page["timeline"]["items"]
+        assert first == failed.view
+        assert second["user_input"]["prompt"] == "next real input"
+        assert second["output"] == {"text": "answer"}
+        [(prompts, instruction, previous_answers)] = calls
+        assert prompts == ("original rejected input", "next real input")
+        assert "The previous turn was interrupted. Its results were not confirmed." in instruction
+        assert previous_answers == ("[Runtime: This turn was interrupted before a final answer.]",)
+        assert effects == []
 
 
 @pytest.mark.asyncio
-async def test_closed_result_survives_receipt_corruption_but_timeline_rejects_it(tmp_path):
+async def test_corrupted_native_turn_receipt_cannot_masquerade_as_valid_history(tmp_path):
     storage = PersistenceStorage.sqlite(tmp_path / "state.db")
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_169, Runtime.open(persistence=persistence_169, features=model_features(_models(), _features())) as runtime:
-        session = await runtime.agents.get().create_session("s")
-        execution = await session.start("original input")
-        await execution.wait(timeout_seconds=5)
+    calls, effects = [], []
+    async with _host(storage, calls, effects) as (state, runtime):
         principal = runtime.default_principal
-        sessions = runtime._state.conversation.sessions
-
-        async def corrupt(transaction):
-            record = await transaction.get_record(sessions._timeline_commit_key("s", 1))
-            assert record is not None
-            malformed = replace(
-                record,
-                data=dict(record.data, end_message_index=-1),
-                storage_revision=record.storage_revision + 1,
-            )
-            assert await transaction.replace_record(
-                malformed,
-                expected_storage_revision=record.storage_revision,
-            )
-
-        await sessions.state_store.mutate(corrupt)
-        closed = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
-        assert closed is not None and closed.retention_closed
-        result = await runtime.executions.result(execution.execution_id, principal=principal)
-        assert result.status is ExecutionStatus.SUCCEEDED
+        await runtime.agents.get().create_session(_SESSION, principal=principal)
+        intact = await _send(runtime, "retained input", "intact")
+        assert (await intact.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        damaged = await _send(runtime, "damaged input", "damaged")
+        assert (await damaged.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        turns = state.session_turns
+        assert turns is not None
+        row = await turns.get_turn(damaged.key)
+        assert row is not None
+        async with turns._context.engine.begin() as connection:
+            updated = await connection.execute(turns._turns.update().filter_by(
+                **turns._turn_values(damaged.key),
+            ).values(result_json={**row["result_json"], "transcript": {}}))
+            assert updated.rowcount == 1
+        assert (await runtime.history.turn_result(_SESSION, intact.key.turn_id, principal=principal))["output"] == {"text": "answer"}
         with pytest.raises(AIError) as timeline_error:
-            await runtime.sessions.timeline("s", principal=principal)
+            await runtime.history.turn_session(_SESSION, principal=principal)
         assert timeline_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-        async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.sqlite(tmp_path / 'state.db'), tenant_id="default", read_only=True) as history_persistence_194, History.open(persistence=history_persistence_194) as history:
-            retained_result = await history.result(execution.execution_id, principal=principal)
-            assert retained_result.status is ExecutionStatus.SUCCEEDED
+
+    async with (
+        Persistence.open(_NAMESPACE, storage=storage, read_only=True) as reader,
+        History.open(persistence=reader, authorization=_Authorization()) as history,
+    ):
+        with pytest.raises(AIError) as retained_error:
+            await history.turn_result(_SESSION, damaged.key.turn_id, principal=principal)
+        assert retained_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 @pytest.mark.asyncio
 async def test_completed_receipt_old_handoff_after_later_turn(tmp_path, monkeypatch):
-    from linktools.ai.runtime._local import LocalExecutionBackend
-
-    plan = PersistencePlan(
-        execution=StorageRoute.sqlite(tmp_path / "e.db"),
-        conversation=StorageRoute.sqlite(tmp_path / "c.db"),
-    )
-    storage = PersistenceStorage.from_plan(plan)
-    old_complete = LocalExecutionBackend._complete_handoff
-    first_id = None
-
-    async def fail_first(self, checkpoint):
-        nonlocal first_id
-        if first_id is None:
-            first_id = checkpoint.execution_id
-        if checkpoint.execution_id == first_id:
-            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
-        return await old_complete(self, checkpoint)
-
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_229, Runtime.open(persistence=persistence_229, features=model_features(_models(), _features())) as runtime:
-        session = await runtime.agents.get().create_session("s")
-        monkeypatch.setattr(LocalExecutionBackend, "_complete_handoff", fail_first)
-        await session.run("first", timeout_seconds=5)
-        await session.run("second", timeout_seconds=5)
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db")
+    calls, effects = [], []
+    async with _host(storage, calls, effects) as (state, runtime):
         principal = runtime.default_principal
-        expected_page = await session.timeline()
-        expected_session = await runtime._state.conversation.sessions.get("s", tenant_id=principal.tenant_id)
-    monkeypatch.setattr(LocalExecutionBackend, "_complete_handoff", old_complete)
-    reopened = PersistenceStorage.from_plan(plan)
-    async with Persistence.open(_NAMESPACE, storage=reopened) as persistence_241, Runtime.open(persistence=persistence_241, features=model_features(_models(), _features()), auto_recover=True) as runtime:
-        page = await runtime.sessions.timeline("s", principal=principal)
-        assert len(page.items) == 2
-        assert page.items == expected_page.items
-        current = await runtime._state.conversation.sessions.get("s", tenant_id=principal.tenant_id)
-        assert current.continuation == expected_session.continuation
-        assert current.active_execution_id is None
-        checkpoint = await runtime._state.execution.executions.get(first_id, tenant_id=principal.tenant_id)
-        assert checkpoint.recovery_state is ExecutionRecoveryState.COMPLETED
-        commits = await runtime._state.conversation.sessions.list_timeline_commits(
-            "s", tenant_id=principal.tenant_id, start_turn_seq=1, end_turn_seq=3,
-        )
-        assert [(item.start_message_index, item.end_message_index) for item in commits] == [(0, 2), (2, 4)]
+        await runtime.agents.get().create_session(_SESSION, principal=principal)
+        turns = state.session_turns
+        assert turns is not None
+        finish = turns.finish
+
+        async def lose_acknowledgement(key, **options):
+            assert await finish(key, **options)
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(turns, "finish", lose_acknowledgement)
+            first = await _send(runtime, "effect input", "first")
+            first_result = await first.wait_final(timeout_seconds=5)
+            assert first_result.status is ExecutionStatus.SUCCEEDED
+        second = await _send(runtime, "second", "second")
+        assert (await second.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        page = await runtime.history.turn_session(_SESSION, principal=principal)
+
+    async with _host(storage, calls, effects) as (_, runtime):
+        assert not await runtime.sessions.recover_turn(_SESSION, first.key.turn_id, principal=principal)
+        replay = await _send(runtime, "effect input", "first")
+        assert replay.key == first.key
+        assert (await replay.wait_final(timeout_seconds=5)).view == first_result.view
+        assert await runtime.history.turn_session(_SESSION, principal=principal) == page
+        state = await runtime.history.turn_session_state(_SESSION, principal=principal)
+        assert state["active_turn_id"] is None
+    assert len(calls) == 3 and effects == ["once"]

@@ -12,7 +12,10 @@ from pydantic_ai_harness.step_persistence import ContinuableSnapshot, InMemorySt
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.core import RESOURCE_ID_MAX_BYTES, agent_conversation_id, agent_run_id, validate_resource_id
+from linktools.ai.core import (
+    AGENT_RUN_ID_MAX_BYTES, RESOURCE_ID_MAX_BYTES, agent_conversation_id, agent_run_id,
+    validate_agent_run_id, validate_resource_id,
+)
 from linktools.ai.steps import native_store_locator
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import SqlStepStore
@@ -42,17 +45,20 @@ def test_resource_id_rejects_invalid_bytes_without_normalizing(value: str) -> No
 
 @pytest.mark.asyncio
 async def test_native_id_boundaries_and_unicode_round_trip_exactly(native: SqlStepStore) -> None:
-    identifiers = ("x" * RESOURCE_ID_MAX_BYTES, "😀" * 32, "café", "cafe\u0301", "a b", "A B")
+    identifiers = ("x" * AGENT_RUN_ID_MAX_BYTES, "😀" * (AGENT_RUN_ID_MAX_BYTES // 4),
+                   "café", "cafe\u0301", "a b", "A B")
     for value in identifiers:
-        assert validate_resource_id(value) == value
-        run = RunRecord(run_id=value, conversation_id=value, parent_run_id=value)
-        event = StepEvent(run_id=value, conversation_id=value, parent_run_id=value,
+        conversation = value + "x" * (RESOURCE_ID_MAX_BYTES - len(value.encode("utf-8")))
+        assert validate_resource_id(conversation) == conversation
+        assert validate_agent_run_id(value) == value
+        run = RunRecord(run_id=value, conversation_id=conversation, parent_run_id=value)
+        event = StepEvent(run_id=value, conversation_id=conversation, parent_run_id=value,
                           kind="run_started", step_index=0, idempotency_key="same-key")
-        snapshot = ContinuableSnapshot(run_id=value, conversation_id=value, parent_run_id=value,
+        snapshot = ContinuableSnapshot(run_id=value, conversation_id=conversation, parent_run_id=value,
                                         step_index=0, messages=[], idempotency_key="same-key")
         await native.commit_step(run=run, events=(event,), snapshot=snapshot)
         assert await native.get_run(run_id=value) == run
-        assert await native.list_runs(conversation_id=value, parent_run_id=value) == [run]
+        assert await native.list_runs(conversation_id=conversation, parent_run_id=value) == [run]
         assert await native.list_events(run_id=value) == [event]
         assert await native.latest_snapshot(run_id=value) == snapshot
     assert {run.run_id for run in await native.list_runs()} == set(identifiers)
@@ -61,7 +67,8 @@ async def test_native_id_boundaries_and_unicode_round_trip_exactly(native: SqlSt
 @pytest.mark.asyncio
 @pytest.mark.parametrize("field", ("run_id", "conversation_id", "parent_run_id"))
 async def test_native_writers_reject_oversized_identity_before_publishing(native: SqlStepStore, field: str) -> None:
-    invalid = {field: "😀" * 32 + "x"}
+    max_bytes = RESOURCE_ID_MAX_BYTES if field == "conversation_id" else AGENT_RUN_ID_MAX_BYTES
+    invalid = {field: "😀" * (max_bytes // 4) + "x"}
     run = replace(RunRecord(run_id="run"), **invalid)
     event = replace(StepEvent(run_id="run", kind="run_started", step_index=0), **invalid)
     snapshot = replace(ContinuableSnapshot(run_id="run", step_index=0, messages=[]), **invalid)
@@ -103,7 +110,8 @@ async def test_native_queries_and_official_reader_reject_oversized_ids(native: S
 
 @pytest.mark.parametrize("field", ("run_id", "conversation_id", "parent_run_id"))
 def test_portable_runs_and_runtime_projections_reject_oversized_ids(field: str) -> None:
-    invalid = "x" * (RESOURCE_ID_MAX_BYTES + 1)
+    max_bytes = RESOURCE_ID_MAX_BYTES if field == "conversation_id" else AGENT_RUN_ID_MAX_BYTES
+    invalid = "x" * (max_bytes + 1)
     record = replace(RunRecord(run_id="run"), **{field: invalid})
     with pytest.raises(AIError):
         OfficialStepReader.project_run(record)
@@ -133,9 +141,11 @@ def test_runtime_id_generators_fit_the_native_resource_contract() -> None:
     values = dict(namespace="runtime", tenant_id="tenant", execution_id=execution)
     conversation = agent_conversation_id(**values)
     run = agent_run_id(**values, agent_run_seq=1)
-    for generated in (conversation, run):
-        assert len(generated.encode("utf-8")) == 66
-        assert validate_resource_id(generated) == generated
+    assert len(conversation.encode("utf-8")) == 66
+    assert validate_resource_id(conversation) == conversation
+    assert len(run.encode("utf-8")) == 54
+    assert validate_agent_run_id(run) == run
+    assert run == agent_run_id(**values, agent_run_seq=1)
     assert conversation == agent_conversation_id(**values)
     assert run != agent_run_id(**values, agent_run_seq=2)
     with pytest.raises(AIError):

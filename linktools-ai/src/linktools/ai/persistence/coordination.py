@@ -44,6 +44,7 @@ class PendingTurnCoordination:
 
     def __init__(self, cache: CacheBackend | None, backend: TurnCoordinationBackend, *, namespace: str, tenant_id: str) -> None:
         self._state_authority: StateTurnCoordination | None = None
+        self._split_session_execution_receipts = False
         self._cache = cache
         self._backend = backend
         self._namespace = validate_persistence_namespace(namespace)
@@ -65,9 +66,13 @@ class PendingTurnCoordination:
     @classmethod
     def for_state(
         cls, cache: CacheBackend | None, backend: StateTurnCoordination, *, namespace: str, tenant_id: str,
+        _split_session_execution_receipts: bool = False,
     ) -> PendingTurnCoordination:
         bound = cls(cache, backend, namespace=namespace, tenant_id=tenant_id)
         bound._state_authority = backend
+        if _split_session_execution_receipts and (backend._coowned or backend._sql_source(bound._scope.scope) is None):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        bound._split_session_execution_receipts = _split_session_execution_receipts
         return bound
 
     @property
@@ -92,8 +97,19 @@ class PendingTurnCoordination:
 
     def execution_authority(self, coordinated: TurnCoordination | None):
         """Return a typed proof only for the explicitly composed SQL Runtime owner."""
+        if self._state_authority is None or not self._state_authority._coowned:
+            return None
+        return self._sql_execution_authority(coordinated)
+
+    def _execution_reservation_authority(self, coordinated: TurnCoordination | None):
+        """Authorize exact in-place publication, not ongoing cross-group writes."""
+        if not self._split_session_execution_receipts:
+            return self.execution_authority(coordinated)
+        return self._sql_execution_authority(coordinated)
+
+    def _sql_execution_authority(self, coordinated: TurnCoordination | None):
         source = self._state_authority
-        if coordinated is None or coordinated.lease is None or source is None or not source._coowned:
+        if coordinated is None or coordinated.lease is None or source is None:
             return None
         if source._sql_source(self._scope.scope) is None:
             return None
@@ -105,6 +121,18 @@ class PendingTurnCoordination:
 
         return ExecutionAuthority(self._scope, coordinated.execution_id, identity[2],
                                   lease.token, lease.fence)
+
+    def _enter_existing_owner(
+        self, *, session_key: str, request_key: str, request_digest: str, execution_id: str, owner_id: str,
+    ) -> TurnScope:
+        source = self._state_authority
+        identity = dict(session_key=session_key, request_key=request_key, request_digest=request_digest,
+                        execution_id=execution_id, owner_id=owner_id)
+        if source is not None:
+            # State coordination selects native SESSION, STANDALONE or
+            # split regrant; non-SQL state still uses its own enter semantics.
+            return source._enter_existing(self._scope, **identity)
+        return self.enter(**identity)
 
     def durable_write_fence(self, coordinated: TurnCoordination, target) -> SourceTurnWriteFence | None:
         authority = self.execution_authority(coordinated)
@@ -149,15 +177,12 @@ class PendingTurnCoordination:
 
     async def publish(
         self, record: ExecutionRecord, coordination: TurnCoordination,
-        *, request_identity_version: int = 2,
     ) -> None:
         """Publish an owner's pending observation, never a terminal result.
 
         Publication neither confirms ownership nor promises cache retention.
         Readers confirm authority after reading these generation-scoped bytes.
         """
-        if type(request_identity_version) is not int or request_identity_version not in (1, 2):
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         if coordination.lease is None:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         if record.execution_id != coordination.execution_id or not self._is_pending(record):
@@ -173,7 +198,6 @@ class PendingTurnCoordination:
             "owner_id": coordination.owner_id,
             "principal_id": record.principal_id,
             "principal_kind": record.principal_kind,
-            "request_identity_version": request_identity_version,
             "record": encode_domain(replace(record, input_context=None)),
         }
         state_fence = ({"fence": coordination.lease.fence}
@@ -210,14 +234,9 @@ class PendingTurnCoordination:
         current = await self._read_request(request_key, tenant_id=tenant_id)
         return None if current is None else current[0]
 
-    async def read_request_identity_version(self, request_key: str, *, tenant_id: str) -> int | None:
-        """Read the live owner's projection version without inferring absence from a lost view."""
-        current = await self._read_request(request_key, tenant_id=tenant_id)
-        return None if current is None else current[2]
-
     async def _read_request(
         self, request_key: str, *, tenant_id: str,
-    ) -> tuple[ExecutionRecord, TurnCoordination, int] | None:
+    ) -> tuple[ExecutionRecord, TurnCoordination] | None:
         if tenant_id != self._tenant_id:
             return None
         if not isinstance(self._backend, TurnAdmissionReader):
@@ -252,7 +271,7 @@ class PendingTurnCoordination:
             return receipt, None
         if pending is None or not self._same_generation(confirmed, owner):
             raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
-        return None, pending[0]
+        return None, pending
 
     async def read_session_owner(
         self, session_id: str, *, tenant_id: str,
@@ -289,7 +308,7 @@ class PendingTurnCoordination:
         current = await self._read_execution(execution_id)
         if current is None:
             return None
-        record, coordination, _ = current
+        record, coordination = current
         if (record.agent_run_seq != 1 or record.producer_generation < 1
                 or record.producer_claim_id is None
                 or record.producer_claim_id != coordination.owner_id):
@@ -339,7 +358,7 @@ class PendingTurnCoordination:
                 return None
             if cache_error is not None:
                 raise cache_error
-            record = None if pending is None else pending[0]
+            record = pending
         else:
             current = await self._read_execution(pointer["execution_id"], owner_id=pointer["owner_id"])
             record = None if current is None else current[0]
@@ -347,7 +366,7 @@ class PendingTurnCoordination:
 
     async def _read_execution(
         self, execution_id: str, *, owner_id: str | None = None,
-    ) -> tuple[ExecutionRecord, TurnCoordination, int] | None:
+    ) -> tuple[ExecutionRecord, TurnCoordination] | None:
         current = await self._backend.read_turn(self._scope, execution_id)
         if (
             current is None or current.execution_id != execution_id
@@ -360,12 +379,11 @@ class PendingTurnCoordination:
         confirmed = await self._backend.read_turn(self._scope, execution_id)
         if confirmed is None or not self._same_generation(confirmed, current):
             return None
-        record, identity_version = pending
-        return record, confirmed, identity_version
+        return pending, confirmed
 
     async def _read_pending_bytes(
         self, current: TurnCoordination, *, fence: int | None = None,
-    ) -> tuple[ExecutionRecord, int] | None:
+    ) -> ExecutionRecord | None:
         if self._cache is None:
             return None
         content = await self._cache.get(self._record_key(current))
@@ -381,9 +399,6 @@ class PendingTurnCoordination:
                 or (fence is not None and (type(envelope.get("fence")) is not int or envelope["fence"] != fence))
             ):
                 return None
-            identity_version = envelope.get("request_identity_version", 1)
-            if type(identity_version) is not int or identity_version not in (1, 2):
-                raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
             record = decode_domain(envelope.get("record"), ExecutionRecord)
             if (
                 record.execution_id != current.execution_id
@@ -394,7 +409,7 @@ class PendingTurnCoordination:
                 return None
         except (AIError, TypeError, ValueError):
             return None
-        return record, identity_version
+        return record
 
     async def cancel(self, execution_id: str, *, tenant_id: str) -> bool:
         if tenant_id != self._tenant_id:

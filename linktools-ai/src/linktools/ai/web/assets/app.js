@@ -74,8 +74,10 @@ function showInspector(open, focus=false) {
   if(focus){const target=open?(state.view==='executions'?$('execution-meta'):$('inspector-close')):$(closingActivity?'activity-mode':'actions-toggle');target.focus();if(open)target.scrollIntoView({block:'nearest'});}
 }
 function renderCurrentState() {
-  const owner=state.view==='sessions'?state.session?.active_execution_id:null,info=owner===state.observedExecution?state.observedInfo:state.execution;
-  let label='No execution selected';
+  const ordinary=state.view==='sessions' && state.config?.turn_sessions;
+  const owner=state.view==='sessions'?(ordinary?state.session?.active_turn_id:state.session?.active_execution_id):null;
+  const info=ordinary?null:owner===state.observedExecution?state.observedInfo:state.execution;
+  let label=ordinary?'No conversation selected':'No execution selected';
   if(state.session && state.view==='sessions') {
     if(!state.config?.read_only && !sessionWatch?.ready)label='Session availability unknown · synchronizing';
     else if(state.session.status!=='OPEN')label=`Session ${state.session.status}${owner?' · occupied':''}`;
@@ -86,10 +88,10 @@ function renderCurrentState() {
   else if(state.executionError)label='Execution unavailable';
   else if(state.selectedExecution || state.selectedSession)label='Loading…';
   $('current-status').textContent=label;
-  $('current-status').hidden=label==='Session available' && !['CANCELLED','FAILED'].includes(state.observedInfo?.status);
+  $('current-status').hidden=label==='Session available' && (ordinary || !['CANCELLED','FAILED'].includes(state.observedInfo?.status));
   $('recovery-shortcut').hidden=!owner || !['RECOVERY_REQUIRED','CANCELLING','START_UNKNOWN'].includes(info?.status);
   $('current-status').classList.toggle('error',state.session?.status==='CLEANUP_REQUIRED' || Boolean(info && (!state.session || owner===info.execution_id) && ['FAILED','START_UNKNOWN','RECOVERY_REQUIRED'].includes(info.status)));
-  $('show-active').hidden=!owner || owner===state.selectedExecution;
+  $('show-active').hidden=ordinary || !owner || owner===state.selectedExecution;
   $('stop-run').setAttribute('aria-label',`Stop selected execution ${state.selectedExecution || ''}`);
 }
 async function api(path, {body, signal}={}) {
@@ -97,20 +99,38 @@ async function api(path, {body, signal}={}) {
   const response = await fetch(path, {method:body ? 'POST':'GET', signal, cache:'no-store',
     headers:body ? {'Content-Type':'application/json', 'X-LinkTools-Console':'1'} : {},
     body:body ? JSON.stringify(body) : undefined});
-  const payload = await response.json();
+  const raw=await response.text();
+  let payload;
+  try {payload=JSON.parse(raw);}
+  catch {
+    const reset=/^(?:(?:write|read) )?ECONNRESET\b/.test(raw.trimStart());
+    const message=reset?'Connection reset (ECONNRESET)':'Server returned a non-JSON response';
+    const error=new Error(`${message} (HTTP ${response.status})`);
+    error.code=reset?'CONNECTION_RESET':'INVALID_RESPONSE';
+    throw error;
+  }
   if (!response.ok) {
-    const code = payload.error_code || payload.code || 'REQUEST_FAILED';
-    const error = new Error(`${code}${payload.message ? ': '+payload.message : ''}`);
-    error.code=code; error.path=path; error.details=payload; error.context=`${body ? 'POST':'GET'} ${path.split('?')[0]}`; throw error;
+    const code = payload?.error_code || payload?.code || 'REQUEST_FAILED';
+    const error = new Error(`${code}${payload?.message ? ': '+payload.message : ''}`);
+    error.code=code;error.details=payload;throw error;
   }
   return payload;
-  } catch(error) {error.path=path;error.context ||= `${body ? 'POST':'GET'} ${path.split('?')[0]}`;throw error;}
+  } catch(error) {
+    error.path=path;error.context ||= `${body ? 'POST':'GET'} ${path.split('?')[0]}`;
+    if(!error.details && body?.request_id)error.details={operation_id:body.request_id};
+    throw error;
+  }
 }
-async function mutate(path, payload, {newAttemptOn=[],scope=''}={}) {
-  const key = scope + path + JSON.stringify(payload);
+// Nine random bytes encode to twelve unpadded URL-safe ASCII characters.
+function shortAttemptId() {
+  return btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(9))))
+    .replaceAll('+','-').replaceAll('/','_');
+}
+async function mutate(path, payload, {newAttemptOn=[],scope='',shortRequest=false, intent=payload}={}) {
+  const key = scope + path + JSON.stringify(intent);
   let operation = state.pending.get(key);
   if (operation?.running) return operation.running;
-  if (!operation) { operation={id:crypto.randomUUID()}; state.pending.set(key, operation); }
+  if (!operation) { operation={id:shortRequest?shortAttemptId():crypto.randomUUID()}; state.pending.set(key, operation); }
   operation.running=api(path, {body:{...payload, request_id:operation.id}});
   try { const result=await operation.running; state.pending.delete(key); return result; }
   catch(error) {
@@ -119,16 +139,33 @@ async function mutate(path, payload, {newAttemptOn=[],scope=''}={}) {
   }
   finally { operation.running=null; }
 }
+function activeTurnAction() {
+  const id=state.session?.active_turn_id;
+  const turn=state.turns.find(row=>row.turn_id===id);
+  if(turn?.blockedGeneration && !turn.conversation_committed && (turn.liveGeneration || 0)<=turn.blockedGeneration)return 'abandon';
+  return turn?.can_recover===true?'recover':'cancel';
+}
 function setDisabled() {
   renderCurrentState();
   const readonly=!state.config || state.config.read_only;
   document.querySelectorAll('[data-view]').forEach(node=>node.disabled=!state.config);
+  $('open-plan').hidden=readonly || !state.config?.turn_sessions;
   $('settings').disabled=!state.config;$('open-record').disabled=!state.config;
   $('open-recovery').disabled=readonly || !state.selectedExecution;
   ['new-session','welcome-new'].forEach(id => $(id).disabled=readonly);
-  ['send','planning','thinking','prompt'].forEach(id => $(id).disabled=readonly || !state.session || state.session.status === 'CLOSED' || !state.selectedSession);
-  $('send').disabled ||= sessionSendBlocked();
+  const composerDisabled=readonly || !state.session || state.session.status==='CLOSED' || !state.selectedSession;
+  ['planning','thinking','thinking-toggle','prompt'].forEach(id=>$(id).disabled=composerDisabled);
+  if(composerDisabled)setThinkingPanel(false);
+  const ordinary=Boolean(state.config?.turn_sessions) && state.view==='sessions';
   ['rename-session','fork-session','close-session'].forEach(id => $(id).disabled=readonly || !state.session);
+  if(ordinary){
+    const busy=state.session?.status!=='OPEN' || Boolean(state.session?.active_turn_id)
+      || sessionSubmissions.has(state.selectedSession);
+    for(const [id,action] of [['rename-session','update'],['close-session','close']])
+      $(id).disabled ||= busy || state.actionsPending.has(`session:${state.selectedSession}:${action}`);
+  }
+  $('choose-attachments').hidden=!ordinary || readonly || !state.config?.attachment_upload;
+  $('choose-attachments').disabled=$('turn-files').disabled=readonly || !ordinary || state.session?.status!=='OPEN';
   const ending=state.actionsPending.has(`${state.selectedExecution}:end-stopped`);
   const recoverable=['RECOVERY_REQUIRED','PENDING_START','STARTED','CANCELLING'].includes(state.execution?.status);
   ['retry','fork-run','end-stopped'].forEach(id => $(id).disabled=readonly || !state.execution || ending);
@@ -139,26 +176,64 @@ function setDisabled() {
   $('export').disabled=!state.execution || !terminal(state.execution.status);
   $('run-recovery').disabled=!state.execution;
   $('detail-view').disabled=!state.execution;
-  $('native-mode').disabled=!state.selectedExecution;$('activity-mode').disabled=!state.selectedExecution;
+  $('native-mode').hidden=ordinary;
+  $('native-mode').disabled=ordinary || !state.selectedExecution;
+  $('activity-mode').textContent=ordinary?'Trace':'Activity';
+  $('activity-mode').disabled=ordinary?!state.config.turn_trace || !defaultOrdinaryTurn():!state.selectedExecution;
   $('detail-turn-picker').hidden=state.view!=='sessions';
+  $('detail-view').disabled=ordinary;
+  $('detail-view-picker').hidden=ordinary;
+  $('execution-actions').hidden=ordinary;
+  $('run-actions').hidden=ordinary;
   const needsRecovery=['RECOVERY_REQUIRED','START_UNKNOWN','CANCELLING'].includes(state.execution?.status);
-  $('detail-attention').hidden=!needsRecovery && state.execution?.status!=='FAILED';
+  $('detail-attention').hidden=ordinary || !needsRecovery && state.execution?.status!=='FAILED';
   $('detail-attention-text').textContent=state.execution?.status==='FAILED'?`Failed${state.execution.error_code?' · '+state.execution.error_code:''}. Actions offers retry or fork.`:needsRecovery?`${state.execution.status.replaceAll('_',' ')}${state.execution.error_code?' · '+state.execution.error_code:''}. Review the recorded state before continuing.`:'';
   $('detail-recovery').hidden=!needsRecovery;
-  $('recovery-controls').hidden=state.tab!=='recovery';
-  $('session-details').hidden=state.tab!=='overview' || state.view!=='sessions' || !state.session || state.execution?.session_id!==state.session.session_id;
-  const active=state.session?.active_execution_id===state.observedExecution?state.observedInfo:null;
+  $('recovery-controls').hidden=ordinary || state.tab!=='recovery';
+  $('session-details').hidden=ordinary || state.tab!=='overview' || state.view!=='sessions' || !state.session || state.execution?.session_id!==state.session.session_id;
+  const active=!ordinary && state.session?.active_execution_id===state.observedExecution?state.observedInfo:null;
   $('end-active').hidden=readonly || !active || !['RECOVERY_REQUIRED','PENDING_START','STARTED','CANCELLING'].includes(active.status) && state.endReadbackId!==active.execution_id;
   $('end-active').disabled=Boolean(active && [...state.actionsPending].some(key=>key.startsWith(`${active.execution_id}:`)));
-  const stoppable=!readonly && state.execution && !terminal(state.execution.status);
+  const stoppable=!ordinary && !readonly && state.execution && !terminal(state.execution.status);
   $('stop-run').hidden=!stoppable;
-  $('cancel').hidden=readonly || !active || terminal(active.status);
   $('inspector-active-stop').hidden=readonly || !active || terminal(active.status) || active.execution_id===state.selectedExecution;
   $('inspector-active-stop').disabled=readonly || !active || state.actionsPending.has(`${active.execution_id}:end-stopped`);
-  $('cancel').setAttribute('aria-label',`Stop current execution ${active?.execution_id || ''}`);
-  $('stop-run').disabled=ending;$('cancel').disabled=Boolean(active && state.actionsPending.has(`${active.execution_id}:end-stopped`));
+  $('stop-run').disabled=ordinary || ending;
   $('fork-session').disabled=readonly || !state.session || state.actionsPending.has(`session:${state.selectedSession}:fork`);
   $('turns-more').disabled=state.actionsPending.has(`session:${state.selectedSession}:turns`);
+  const turn=ordinary ? state.session?.active_turn_id : null;
+  const stop=state.view==='sessions' && !readonly && (ordinary?Boolean(turn):Boolean(active && !terminal(active.status)));
+  const stopPending=ordinary?state.actionsPending.has(`turn:${turn}`)
+    :Boolean(active && (state.actionsPending.has(`${active.execution_id}:cancel`)
+      || state.actionsPending.has(`${active.execution_id}:end-stopped`)));
+  const send=$('send'), reader=$('reader-stop');
+  const turnAction=stop && ordinary ? activeTurnAction() : 'cancel';
+  const recover=turnAction==='recover' || turnAction==='abandon';
+  const stopping=ordinary && stop && !recover && state.turns.some(row=>row.turn_id===turn && row.status==='CANCELLING');
+  const activeLabel=recover?'Recover':stopping?'Stopping…':'Stop';
+  const activeAriaLabel=recover?'Recover current turn':stopping?'Stopping current turn':'Stop current turn';
+  send.type=stop?'button':'submit';
+  const actionLabel=stop?activeLabel:'Send ↑';
+  if(send.textContent!==actionLabel)send.textContent=actionLabel;
+  send.setAttribute('aria-label',stop?activeAriaLabel:'Send message');
+  send.classList.toggle('danger',stop && !recover);send.classList.toggle('primary',!stop || recover);
+  send.disabled=stop?stopPending || stopping:composerDisabled || sessionSendBlocked();
+  reader.hidden=!stop || state.conversationMode==='chat';
+  reader.disabled=stopPending || stopping;
+  if(reader.textContent!==activeLabel)reader.textContent=activeLabel;
+  reader.setAttribute('aria-label',activeAriaLabel);
+  if(ordinary){
+    $('open-recovery').hidden=true;$('show-active').hidden=true;$('recovery-shortcut').hidden=true;
+    $('inspector-toggle').hidden=true;
+    if(turn && sessionWatch?.ready){
+      const status=state.turns.find(row=>row.turn_id===turn)?.status;
+      $('current-status').hidden=false;
+      $('current-status').classList.toggle('error',recover || status==='RECOVERY_REQUIRED');
+      $('current-status').textContent=recover || status==='RECOVERY_REQUIRED'?'Recovery required'
+        :status==='WAITING_DEFERRED'?'Waiting for approval or tool results':'Turn in progress';
+    }
+  } else {$('open-recovery').hidden=false;$('inspector-toggle').hidden=false;$('inspector-toggle').textContent='Run details';}
+
 }
 function renderPage() {
   const sessions=state.view==='sessions', executions=state.view==='executions', metrics=state.view==='metrics';
@@ -167,7 +242,8 @@ function renderPage() {
   $('page-heading').hidden=sessions && Boolean(state.selectedSession);
   $('conversations-home').hidden=sessions;
   $('conversation-view').hidden=metrics || sessions && !state.selectedSession;
-  $('conversation-column').hidden=!sessions || state.conversationMode==='activity';
+  const inspectorMode=state.conversationMode==='activity';
+  $('conversation-column').hidden=!sessions || inspectorMode;
   $('conversation-nav').hidden=!sessions || !state.selectedSession;
   for(const [id,mode] of [['chat-mode','chat'],['native-mode','original'],['activity-mode','activity']])$(id).classList.toggle('active',state.conversationMode===mode);
   $('welcome').hidden=!sessions || Boolean(state.selectedSession);
@@ -176,11 +252,16 @@ function renderPage() {
   (executions?$('execution-list'):$('sidebar-browse')).append($('browse-panel'));
   $('composer').hidden=!sessions || !state.selectedSession || state.conversationMode!=='chat';
   $('conversation-column').classList.toggle('reading',state.conversationMode==='original');
-  const cancelHome=$(sessions && state.conversationMode!=='chat'?'reader-actions':'composer-actions');if($('cancel').parentElement!==cancelHome)cancelHome.append($('cancel'));
-  $('session-details').hidden=!sessions;
+  if($('composer').hidden)setThinkingPanel(false);
+  $('reader-stop').hidden=$('send').type!=='button' || state.conversationMode==='chat';
+  const traceWorkspace=sessions && inspectorMode && state.config?.turn_sessions;
+  $('session-details').hidden=!sessions || Boolean(state.config?.turn_sessions);
+  $('inspector').classList.toggle('trace-workspace-mode',Boolean(traceWorkspace));
+  $('trace-stats').hidden=!traceWorkspace;
+  $('trace-earlier-turns').hidden=!traceWorkspace || !state.turnCursor;
   $('inspector-close').hidden=executions;
-  $('inspector').classList.toggle('execution-page',executions || sessions && state.conversationMode==='activity');
-  if(executions || sessions && state.conversationMode==='activity')showInspector(true);
+  $('inspector').classList.toggle('execution-page',executions || sessions && inspectorMode);
+  if(executions || sessions && inspectorMode)showInspector(true);
   $('execution-live').hidden=!executions;
   if($('live'))clear('live');clear('execution-live');renderLive();
 }
@@ -206,7 +287,7 @@ function setView(view, refreshSelection=true) {
 }
 function navigateView(view) {
   const params=new URLSearchParams({view});
-  if(view==='sessions' && state.selectedSession){params.set('session',state.selectedSession);if(state.conversationInspectorOpen && state.conversationExecution)params.set('execution',state.conversationExecution);}
+  if(view==='sessions' && state.selectedSession){params.set('session',state.selectedSession);if(!state.config?.turn_sessions && state.conversationInspectorOpen && state.conversationExecution)params.set('execution',state.conversationExecution);}
   if(view==='executions' && state.browserExecution)params.set('execution',state.browserExecution);
   if(location.hash==='#'+params)return setView(view);
   location.hash='#'+params;
@@ -233,8 +314,9 @@ async function loadList(more=false) {
     if(!more)state.listSessionReads.clear();
     payload.items.forEach(item=>state.listSessionReads.set(item.session_id,sessionReadGeneration));
   }
-  state.listCursor=payload.next_cursor; $('list-more').hidden=!state.listCursor; $('list-scope').hidden=!payload.recent_only;
-  $('list-scope').textContent='Showing recent sessions in read-only mode';
+  state.listCursor=payload.next_cursor; $('list-more').hidden=!state.listCursor;
+  $('list-scope').hidden=!payload.recent_only && !payload.scope_required;
+  $('list-scope').textContent=payload.scope_required?'Open a conversation by ID; this host does not list workspace sessions.':'Showing recent sessions in read-only mode';
   renderList();
 }
 function setListFilterAvailability() {
@@ -272,17 +354,25 @@ function renderList() {
     const node=button('',async () => navigate(session ? id:null,session ? null:id),`list-item${active?' active':''}`);node.dataset.listKey=`${state.view}:${id}`;
     node.append(element('span','list-title',session ? item.metadata?.title || short(id) : short(id)));
     const sub=element('span','list-subtitle');
-    sub.append(element('i',`status-dot ${item.status==='FAILED'?'failed':item.active_execution_id || !terminal(item.status) && !session ? 'running':''}`));
-    sub.append(element('span','',session ? `${item.active_execution_id?'Running · ':item.status==='CLOSED'?'Closed · ':''}${item.agent_id || 'Agent'}` : `${item.status} · ${item.agent_id || 'task'} · ${short(id)}`));
-    node.title=`${item.status} · ${item.agent_id || 'task'} · ${id}`;
+    const running=session?Boolean(state.config?.turn_sessions?item.active_turn_id:item.active_execution_id):!terminal(item.status);
+    sub.append(element('i',`status-dot ${item.status==='FAILED'?'failed':running?'running':''}`));
+    const label=session && state.config?.turn_sessions
+      ? (running?'Running':item.status==='CLOSED'?'Closed':short(id))
+      : session ? `${running?'Running · ':item.status==='CLOSED'?'Closed · ':''}${item.agent_id || 'Agent'}`
+      : `${item.status} · ${item.agent_id || 'task'} · ${short(id)}`;
+    sub.append(element('span','',label));
+    node.title=[item.status,item.agent_id,id].filter(Boolean).join(' · ');
     node.append(sub); $('list').append(node);
   });
   if(focus)[...$('list').children].find(node=>node.dataset.listKey===focus)?.focus({preventScroll:true});
 }
 function stopStream() { state.stream?.abort(); state.stream=null;cancelLiveRender(); }
 let sessionWatch=null;
+function legacySessionWatch() {
+  return sessionWatch?.ordinary ? null : sessionWatch;
+}
 function hasExecutionStream(id) {
-  const watch=sessionWatch,execution=watch?.execution;
+  const watch=legacySessionWatch(),execution=watch?.execution;
   return Boolean(id && (state.stream || watch?.ready && (execution?.id===id && !execution.paused
     || watch.refresh.releasedTurn===id && !watch.refresh.failed)));
 }
@@ -290,15 +380,486 @@ let observationRead=null;
 let terminalHistoryRead=null;
 const sessionSubmissions=new Set();
 function sessionSendBlocked() {
-  return state.session?.status!=='OPEN' || sessionSubmissions.has(state.selectedSession) || Boolean(state.session?.active_execution_id)
+  const owner=state.config?.turn_sessions?state.session?.active_turn_id:state.session?.active_execution_id;
+  return state.session?.status!=='OPEN' || sessionSubmissions.has(state.selectedSession) || Boolean(owner)
     || !state.config?.read_only && (!sessionWatch || !sessionWatch.ready);
 }
 function stopSessionWatch() {
   sessionWatch?.source.close();sessionWatch=null;
 }
+function ordinaryStatus(value) {
+  return ({accepted:'PENDING_START',cancelling:'CANCELLING',open:'OPEN',closed:'CLOSED'})[value] || String(value || '').toUpperCase();
+}
+function ordinaryInput(prompt,attachments=[]) {
+  return {
+    version:1,prompt:typeof prompt==='string'?{kind:'text',text:prompt}:prompt,files:[],
+    attachments:attachments.map(({display_name,source,media_type,size})=>({
+      display_name,source,media_type,size,identifier:display_name || (source==='workspace'?'Workspace file':undefined),
+    })),
+  };
+}
+function ordinaryTurnNode(turn, previous=null) {
+  const node=element('article','turn');node.dataset.turn=turn.turn_id;
+  node.toolRows=previous?.toolRows || new Map();
+  node.thinkingRows=new Map();
+  node.livePartBodies=new Map();
+  const appendThought=(part,text,elapsed,running=false,open=false)=>{
+    const card=previous?.thinkingRows?.get(part) || thinkingMessage('Thinking',text);
+    if(card.body.textContent!==text)card.body.textContent=text;
+    if(open)card.open=true;
+    card.classList.toggle('process-running',running);
+    showProcessElapsed(card,elapsed);
+    node.thinkingRows.set(part,card);
+    answers.append(card);
+    return card.body;
+  };
+  node.append(userMessage(ordinaryInput(turn.user_input?.prompt,turn.user_input?.attachments)));
+  const answers=element('div','turn-saved-answers');
+  const items=turn.items?.length?turn.items:(turn.output?.text?[{item_kind:'assistant',content:turn.output.text}]:[]);
+  const tools=new Map((turn.process || []).map(row=>[row.key,row]));
+  const placed=new Set();
+  const appendTool=row=>{
+    if(!row || placed.has(row.key) || !Object.hasOwn(processToolStatus,row.status))return;
+    placed.add(row.key);answers.append(toolProcessRow(node.toolRows,row,true));
+  };
+  const openThoughts=new Map(),seenThoughts=new Set();
+  if(turn.conversation_committed && previous?.thinkingRows?.size){
+    for(const [part,card] of previous.thinkingRows){
+      const text=part.text ?? part.content;
+      openThoughts.set(text,!openThoughts.has(text) && card.open);
+    }
+    for(const item of items)if(item.item_kind==='thinking'){
+      if(seenThoughts.has(item.content))openThoughts.delete(item.content);
+      seenThoughts.add(item.content);
+    }
+  }
+  for(const item of items) {
+    if(item.item_kind==='assistant' && typeof item.content==='string')answers.append(markdownMessage(item.content));
+    if(item.item_kind==='structured_output')answers.append(rawDetail(item.content,'Structured output'));
+    if(item.item_kind==='thinking' && typeof item.content==='string' && item.content.trim()) {
+      appendThought(item,item.content,item.elapsed_ms,false,openThoughts.get(item.content));
+    }
+    if(item.item_kind==='tool_call')appendTool(tools.get(`tool:${item.tool_call_id}`));
+  }
+  const parts=(turn.conversation_committed?turn.interruptedPreview:turn.liveParts) || [];
+  const disconnected=!turn.conversation_committed && turn.previewGap!=null;
+  for(const part of parts){
+    if(part.tool){
+      appendTool(disconnected && part.tool.status==='RUNNING' ? {...part.tool,status:'UNCONFIRMED'} : part.tool);
+      continue;
+    }
+    let body;
+    if(part.kind==='thinking'){
+      body=appendThought(part,part.text,part.elapsedMs,!turn.conversation_committed && !disconnected && !part.done);
+    } else {
+      body=previous?.livePartBodies?.get(part);
+      if(body)updateMarkdownMessage(body,part.text);
+      else body=markdownMessage(part.text);
+      answers.append(body);
+    }
+    if(!turn.conversation_committed)node.livePartBodies.set(part,body);
+  }
+  for(const key of node.toolRows.keys())if(!placed.has(key))node.toolRows.delete(key);
+  node.append(answers);
+  if(!turn.conversation_committed && (turn.previewGap!=null || !turn.previewHasPrefix))
+    node.append(element('p','muted','Live preview is incomplete. The final reply will appear here.'));
+  if(turn.abandoned)node.append(element('p','muted','Turn ended without replaying tools. Earlier tool effects may be unconfirmed.'));
+  else if(turn.error_code)node.append(element('p','muted',turn.status==='CANCELLED'?'Turn cancelled.':turn.error_code));
+  const heading={RECOVERY_REQUIRED:'Recovery required',WAITING_DEFERRED:'Waiting for approval or tool results',CANCELLING:'Cancelling…'}[turn.status];
+  if(heading)node.append(element('div','turn-heading',heading));
+  return node;
+}
+function patchOrdinaryTurn(turn) {
+  const index=state.turns.findIndex(row=>row.turn_id===turn.turn_id);
+  const before=index<0?null:state.turns[index];
+  if(before?.conversation_committed && !turn.conversation_committed)return;
+  if(index<0)state.turns.push(turn);else state.turns[index]={...before,...turn};
+  state.turns.sort((a,b)=>(a.turn_no || Infinity)-(b.turn_no || Infinity));
+  const container=$('conversation'), node=[...container.children].find(row=>row.dataset.turn===turn.turn_id);
+  const content=ordinaryTurnNode(state.turns.find(row=>row.turn_id===turn.turn_id),node);
+  const follows=container.scrollTop+container.clientHeight>=container.scrollHeight-40;
+  if(node)node.replaceWith(content);
+  else {
+    container.querySelector(':scope > .empty')?.remove();
+    const current=state.turns.findIndex(value=>value.turn_id===turn.turn_id);
+    const next=new Set(state.turns.slice(current+1).map(value=>value.turn_id));
+    container.insertBefore(content,[...container.children].find(row=>next.has(row.dataset.turn)) || $('live') || null);
+  }
+  if(follows)container.scrollTop=container.scrollHeight;
+}
+function ordinaryOccupancy(watch, revision, turn, lastTurn) {
+  if(!Number.isSafeInteger(revision) || revision < (watch.snapshot?.revision ?? -1))return;
+  watch.snapshot={...watch.snapshot, revision, active_turn_id:turn};
+  if(Number.isSafeInteger(lastTurn))watch.snapshot.last_turn_no=lastTurn;
+  if(state.session && revision>=state.session.revision)Object.assign(state.session,watch.snapshot);
+}
+async function catchUpOrdinary(watch, through=null) {
+  if(through===null)watch.needsCatchUp=true;
+  else watch.targetHead=Math.max(watch.targetHead || 0,through);
+  if(watch.catchUp)return watch.catchUp;
+  const current=()=>sessionWatch===watch && state.selectedSession===watch.id;
+  const read=(async()=>{
+    while(current() && (watch.needsCatchUp || watch.targetHead>watch.committedThrough)){
+      watch.needsCatchUp=false;watch.targetHead=0;
+      await readOrdinaryGap(watch,current);
+    }
+  })();
+  watch.catchUp=read;
+  try {await read;} finally {if(watch.catchUp===read)watch.catchUp=null;}
+}
+function installOrdinaryGapTurns(incoming) {
+  if(!incoming.size)return;
+  const container=$('conversation');
+  const follows=container.scrollTop+container.clientHeight>=container.scrollHeight-40;
+  const nodes=new Map([...container.children].map(node=>[node.dataset.turn,node]));
+  const rows=new Map(state.turns.map(row=>[row.turn_id,row]));
+  for(const [id,turn] of incoming){
+    const before=rows.get(id);
+    if(before?.conversation_committed)incoming.delete(id);
+    else rows.set(id,{...before,...turn});
+  }
+  if(!incoming.size)return;
+  state.turns=[...rows.values()].sort((a,b)=>(a.turn_no || Infinity)-(b.turn_no || Infinity));
+  container.querySelector(':scope > .empty')?.remove();
+  let anchor=$('live') || null;
+  for(let i=state.turns.length-1;i>=0;--i){
+    const turn=state.turns[i],node=nodes.get(turn.turn_id);
+    if(incoming.has(turn.turn_id)){
+      const content=ordinaryTurnNode(turn,node);
+      if(node)node.replaceWith(content);else container.insertBefore(content,anchor);
+      anchor=content;
+    } else if(node)anchor=node;
+  }
+  if(follows)container.scrollTop=container.scrollHeight;
+}
+function advanceOrdinaryHistory(watch,through) {
+  let covered=Math.max(watch.committedThrough ?? 0,through);
+  // Terminal notices received while paging may already fill the next slots.
+  for(const turn of state.turns){
+    if(turn.turn_no===covered+1 && turn.conversation_committed)covered++;
+  }
+  watch.committedThrough=covered;
+}
+async function readOrdinaryGap(watch,current) {
+  // A terminal frame may overtake the read, but cannot prove a skipped range.
+  const after=watch.committedThrough;
+  const payload=await readSession(watch.id);
+  if(!current())return;
+  if(acceptSession(payload))renderSessionHeader();
+  watch.readActive();
+  if(!payload.timeline)return;
+  const through=payload.session.last_turn_no;
+  const incoming=new Map();
+  let timeline=payload.timeline, complete=false;
+  // Read at most two normal history pages per reconnect; deeper history
+  // remains reachable via Load earlier turns without claiming it was seen.
+  for(let page=0;page<2;++page){
+    const items=timeline.items || [];
+    for(const turn of items)if(after===null || turn.turn_no>after)incoming.set(turn.turn_id,turn);
+    if(after===null || !timeline.next_cursor || !items.length || items[0].turn_no<=after+1){
+      complete=after===null || !timeline.next_cursor || (items.length && items[0].turn_no<=after+1);
+      break;
+    }
+    if(page===0){
+      const earlier=await api(sessionURL(watch.id,'',{limit:'50',cursor:timeline.next_cursor}));
+      if(!current())return;
+      timeline=earlier.timeline;
+    }
+  }
+  installOrdinaryGapTurns(incoming);
+  if(!complete && timeline.next_cursor){
+    const gap=watch.historyGap;
+    if(!gap || through>gap.through){
+      watch.historyGap={through};
+      state.turnCursor=timeline.next_cursor;
+    }
+  } else if(complete && Number.isSafeInteger(through)){
+    advanceOrdinaryHistory(watch,through);
+    if(watch.historyGap && through>=watch.historyGap.through)watch.historyGap=null;
+  }
+  if(after===null && !state.hasEarlierTurns)state.turnCursor=timeline.next_cursor || null;
+  $('turns-more').hidden=!state.turnCursor;
+  renderList();setDisabled();
+}
+function watchOrdinarySession(id) {
+  stopSessionWatch();
+  const source=new EventSource(sessionURL(id,'events',{view:'chat'}));
+  const watch={id,source,ready:false,ordinary:true,snapshot:null,opened:false,catchUp:null,committedThrough:null};
+  sessionWatch=watch;
+  const current=()=>sessionWatch===watch && state.selectedSession===id;
+  const activeTurn=()=>state.session?.session_id===id ? state.session.active_turn_id : watch.snapshot?.active_turn_id;
+  watch.readActive=({refresh=false}={})=>{
+    const turnId=activeTurn();
+    const prior=state.turns.find(row=>row.turn_id===turnId);
+    if(!turnId || prior?.conversation_committed || (prior && !refresh))return;
+    if(watch.activeRead?.id===turnId){
+      if(watch.activeRead.frames!==null){
+        if(refresh)watch.activeRead.refresh=true;
+        return;
+      }
+      if(!refresh)return;
+    }
+    const lost=watch.lostRead?.id===turnId ? watch.lostRead : null;
+    const read={id:turnId,frames:[],units:0,generation:lost?.generation || prior?.liveGeneration || 0,
+      overflow:Boolean(lost),priorGeneration:prior?.liveGeneration,priorStatus:prior?.status};
+    watch.activeRead=read;
+    void api(sessionURL(id,'',{turn_id:turnId})).then(turn=>{
+      if(!current() || watch.activeRead!==read || activeTurn()!==turnId
+        || state.turns.some(row=>row.turn_id===turnId && row.conversation_committed))return;
+      const row=state.turns.find(item=>item.turn_id===turnId);
+      if(prior && (row?.liveGeneration!==read.priorGeneration || row?.status!==read.priorStatus))return;
+      patchOrdinaryTurn(!row && !turn.conversation_committed && read.overflow
+        ? {...turn,liveGeneration:read.generation,liveParts:[],previewGap:read.generation} : turn);
+      if(!turn.conversation_committed){
+        for(const frame of read.frames || [])applyPreview(frame);
+        setDisabled();
+        const waiting=read.waiting;
+        const shown=state.turns.find(item=>item.turn_id===turnId);
+        if(waiting && shown && (shown.liveGeneration || 0)<=waiting.generation
+          && waiting.revision>=(watch.snapshot?.revision ?? -1)){
+          patchOrdinaryTurn({...shown,status:'WAITING_DEFERRED',can_recover:false});
+          setDisabled();
+        }
+      }
+    }).catch(error=>{
+      if(current() && watch.activeRead===read && activeTurn()===turnId
+        && !state.turns.some(row=>row.turn_id===turnId))showError(error);
+    }).finally(()=>{
+      read.frames=null;
+      if(read.refresh && current() && watch.activeRead===read && activeTurn()===turnId)
+        watch.readActive({refresh:true});
+    });
+  };
+  const dirtyParts=new Set();
+  function applyPreview(frame) {
+    if(activeTurn()!==frame.turn_id)return;
+    const turn=state.turns.find(row=>row.turn_id===frame.turn_id && !row.conversation_committed);
+    if(!turn || turn.liveGeneration>frame.generation || turn.previewGap===frame.generation)return;
+    const reset=turn.liveGeneration!==frame.generation;
+    if(reset){turn.liveGeneration=frame.generation;turn.liveParts=[];turn.previewGap=null;turn.previewHasPrefix=false;}
+    if(frame.type==='preview_reset'){
+      turn.liveParts=turn.liveParts.filter(part=>part.modelKey!==frame.model_key || part.attempt!==frame.attempt);
+      patchOrdinaryTurn(turn);
+      return;
+    }
+    if(frame.type==='thinking_completed'){
+      const part=turn.liveParts.find(part=>part.kind==='thinking' && part.modelKey===frame.model_key
+        && part.attempt===frame.attempt && part.index===frame.part_index);
+      if(!part || !Number.isSafeInteger(frame.elapsed_ms) || frame.elapsed_ms<0)return;
+      part.done=true;part.elapsedMs=frame.elapsed_ms;
+      const node=[...$('conversation').children].find(row=>row.dataset.turn===turn.turn_id);
+      const card=node?.thinkingRows?.get(part);
+      if(card){
+        card.classList.remove('process-running');
+        showProcessElapsed(card,part.elapsedMs);
+      }
+      return;
+    }
+    if(frame.type==='progress'){
+      const item=frame.item;
+      if(item?.kind!=='model' || typeof item.key!=='string'
+        || !['RUNNING','SUCCEEDED','FAILED','CANCELLED'].includes(item.status))return;
+      if(item.status==='RUNNING')return;
+      const node=[...$('conversation').children].find(row=>row.dataset.turn===turn.turn_id);
+      for(const part of turn.liveParts)if(part.kind==='thinking' && part.modelKey===item.key){
+        part.done=true;
+        node?.thinkingRows?.get(part)?.classList.remove('process-running');
+      }
+      return;
+    }
+    if(frame.type==='tool'){
+      const item=frame.item;
+      if(item?.kind!=='tool' || typeof item.key!=='string' || !Object.hasOwn(processToolStatus,item.status))return;
+      const previous=turn.liveParts.find(part=>part.tool?.key===item.key);
+      if(previous){
+        previous.tool=mergeProcessRow(previous.tool,item);
+        const node=[...$('conversation').children].find(row=>row.dataset.turn===turn.turn_id);
+        if(node?.toolRows?.has(item.key))toolProcessRow(node.toolRows,previous.tool,true);
+      } else {
+        turn.liveParts.push({tool:item});
+        patchOrdinaryTurn(turn);
+      }
+      return;
+    }
+    const kind=frame.delta_kind;
+    if(typeof frame.text!=='string' || (kind!=='text' && kind!=='thinking') || !frame.text)return;
+    const tail=turn.liveParts.at(-1);
+    const matches=part=>part?.kind===kind && part.modelKey===frame.model_key
+      && part.attempt===frame.attempt && part.index===frame.part_index;
+    const scoped=typeof frame.model_key==='string' && Number.isSafeInteger(frame.attempt)
+      && Number.isSafeInteger(frame.part_index);
+    const part=matches(tail)?tail:scoped?turn.liveParts.find(matches):null;
+    if(!part){
+      if(!scoped && tail?.kind==='thinking')tail.done=true;
+      turn.liveParts.push({kind,text:frame.text,modelKey:frame.model_key,attempt:frame.attempt,index:frame.part_index});
+      patchOrdinaryTurn(turn);
+      return;
+    }
+    part.text+=frame.text;
+    dirtyParts.add(part);
+    if(!watch.paint)watch.paint=requestAnimationFrame(()=>{
+      watch.paint=null;
+      if(current()){
+        const node=[...$('conversation').children].find(item=>item.dataset.turn===activeTurn());
+        for(const part of dirtyParts){
+          const body=node?.livePartBodies?.get(part);
+          if(!body)continue;
+          if(part.kind==='thinking')body.textContent=part.text;
+          else updateMarkdownMessage(body,part.text);
+        }
+      }
+      dirtyParts.clear();
+    });
+  }
+  source.addEventListener('session_error',event=>{
+    if(!current())return;
+    source.close();watch.ready=false;setDisabled();
+    try {
+      const code=JSON.parse(event.data).error_code;
+      notice(code==='EXECUTION_CONCURRENCY_LIMIT_EXCEEDED'
+        ? 'Too many conversations are being watched. Close another conversation or try Refresh.' : code);
+    } catch {notice('Conversation unavailable');}
+  });
+  source.onerror=()=>{
+    if(!current())return;
+    watch.ready=false;
+    const active=activeTurn();
+    const row=state.turns.find(item=>item.turn_id===active && !item.conversation_committed);
+    if(row?.liveGeneration && row.previewGap!==row.liveGeneration)
+      patchOrdinaryTurn({...row,previewGap:row.liveGeneration});
+    const read=watch.activeRead;
+    if(read?.id===active && read.frames?.length){read.frames=[];read.overflow=true;}
+    setDisabled();
+  };
+  source.addEventListener('turn',event=>{
+    if(!current())return;
+    let frame;try {frame=JSON.parse(event.data);}catch{return;}
+    if(frame.type==='snapshot'){
+      const reconnected=watch.opened;watch.opened=true;watch.ready=true;
+      const snapshot=frame.session;
+      if(snapshot && snapshot.revision >= (watch.snapshot?.revision ?? -1)){
+        watch.snapshot={...snapshot,status:ordinaryStatus(snapshot.status ?? snapshot.state)};
+        if(state.session && watch.snapshot.revision>=state.session.revision){
+          Object.assign(state.session,watch.snapshot);
+          renderSessionHeader();
+        }
+      }
+      setDisabled();renderList();
+      if(reconnected){
+        const discarded=watch.activeRead;
+        watch.lostRead=discarded?.overflow ? {id:discarded.id,generation:discarded.generation} : null;
+        watch.activeRead=null;watch.phaseRead=null;
+      }
+      watch.readActive({refresh:reconnected});
+      if(watch.committedThrough!==null && watch.snapshot?.last_turn_no>watch.committedThrough)
+        void catchUpOrdinary(watch,watch.snapshot.last_turn_no).catch(showError);
+      return;
+    }
+    if(frame.type==='gap'){
+      if(frame.phase==='producer_stopped' && frame.turn_id && frame.turn_id===activeTurn()){
+        const row=state.turns.find(turn=>turn.turn_id===frame.turn_id);
+        const stopped=`${frame.turn_id}:${frame.generation}`;
+        if((row?.liveGeneration || 0)<=frame.generation && watch.lastStopped!==stopped){
+          watch.lastStopped=stopped;
+          watch.readActive({refresh:true});
+        }
+        return;
+      }
+      if(['cancelling','waiting'].includes(frame.phase) && frame.turn_id && frame.turn_id===activeTurn()){
+        const turnId=frame.turn_id;
+        const before=state.turns.find(row=>row.turn_id===turnId);
+        const status=frame.phase==='waiting'?'WAITING_DEFERRED':'CANCELLING';
+        if(before?.status===status || watch.phaseRead?.turnId===turnId && watch.phaseRead.status===status)return;
+        const read={turnId,status,generation:before?.liveGeneration};
+        watch.phaseRead=read;
+        void api(sessionURL(id,'',{turn_id:turnId})).then(turn=>{
+          const row=state.turns.find(item=>item.turn_id===turnId);
+          if(!current() || watch.phaseRead!==read || activeTurn()!==turnId || row?.conversation_committed
+            || (before && row?.liveGeneration!==read.generation))return;
+          if(turn.status===status){patchOrdinaryTurn(turn);setDisabled();}
+          else if(turn.conversation_committed || frame.phase==='cancelling')return catchUpOrdinary(watch);
+        }).catch(error=>{if(current() && activeTurn()===turnId)showError(error);})
+          .finally(()=>{if(watch.phaseRead===read)watch.phaseRead=null;});
+      } else void catchUpOrdinary(watch).catch(showError);
+      return;
+    }
+    if(!frame.turn_id)return;
+    if(frame.type==='admitted'){
+      const row=state.turns.find(item=>item.turn_id===frame.turn_id);
+      const bufferedGeneration=watch.activeRead?.id===frame.turn_id ? watch.activeRead.generation : 0;
+      if(row?.conversation_committed || Math.max(row?.liveGeneration || 0,bufferedGeneration)>frame.generation
+        || frame.revision<(watch.snapshot?.revision ?? -1) && activeTurn()!==frame.turn_id)return;
+      ordinaryOccupancy(watch,frame.revision,frame.turn_id);
+      const missingPreview=bufferedGeneration===frame.generation && watch.activeRead?.overflow;
+      const preview=row?.liveGeneration===frame.generation && !missingPreview ? {}
+        : {liveGeneration:frame.generation,liveParts:[],previewGap:missingPreview?frame.generation:null};
+      // An authorized history read can reveal an active turn, not prove its preview prefix was observed.
+      patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status:'STARTED',can_recover:false,
+        user_input:ordinaryInput(frame.prompt,frame.attachments),items:[],conversation_committed:false,previewHasPrefix:true,
+        blockedGeneration:frame.generation>(row?.blockedGeneration || 0)?null:row.blockedGeneration,...preview});
+    } else if(frame.type==='waiting'){
+      const row=state.turns.find(item=>item.turn_id===frame.turn_id);
+      if(activeTurn()!==frame.turn_id || row?.conversation_committed
+        || (row?.liveGeneration || 0)>frame.generation || frame.revision<(watch.snapshot?.revision ?? -1))return;
+      if(row)patchOrdinaryTurn({...row,status:'WAITING_DEFERRED',can_recover:false});
+      else {
+        watch.readActive();
+        if(watch.activeRead?.id===frame.turn_id)watch.activeRead.waiting=frame;
+      }
+    } else if(['delta','tool','progress','preview_reset','thinking_completed'].includes(frame.type)){
+      if(state.turns.some(row=>row.turn_id===frame.turn_id)){
+        applyPreview(frame);
+      } else if(activeTurn()===frame.turn_id){
+        watch.readActive();
+        const read=watch.activeRead;
+        if(read?.id!==frame.turn_id || read.generation>frame.generation || !read.frames)return;
+        if(read.generation!==frame.generation){
+          read.generation=frame.generation;read.frames=[];read.units=0;read.overflow=false;
+        }
+        if(read.overflow)return;
+        // Do not show a disconnected tail as a complete text segment.
+        if(read.frames.length>=128 || read.units+event.data.length>64*1024){
+          read.frames=[];read.overflow=true;
+        } else {
+          read.frames.push(frame);read.units+=event.data.length;
+        }
+      }
+      return;
+    } else if(frame.type==='terminal'){
+      const previous=state.turns.find(row=>row.turn_id===frame.turn_id);
+      const bufferedGeneration=watch.activeRead?.id===frame.turn_id ? watch.activeRead.generation : 0;
+      if(Math.max(previous?.liveGeneration || 0,bufferedGeneration)>frame.generation)return;
+      ordinaryOccupancy(watch,frame.revision,null,frame.turn_no);
+      const previousHead=watch.committedThrough;
+      if(frame.turn_no===(previousHead ?? 0)+1)watch.committedThrough=frame.turn_no;
+      else if(previousHead!==null && frame.turn_no>previousHead+1)
+        // A newer terminal can arrive while a reconnect page is in flight.
+        // Only a jump means there is another missing range to reconcile.
+        void catchUpOrdinary(watch,frame.turn_no).catch(showError);
+      const status=ordinaryStatus(frame.status ?? frame.state),items=frame.items || [],process=frame.process || [];
+      const interruptions=(status==='FAILED' || status==='CANCELLED') && !items.length && !process.length
+        && previous?.liveGeneration===frame.generation;
+      // Keep this browser's preview only. A failed turn does not prove that a
+      // running tool failed, so preserve completed rows and mark open ones interrupted.
+      const interruptedPreview=interruptions
+        ? previous?.interruptedPreview || previous?.liveParts?.map(part=>{
+          const interrupted=status==='CANCELLED'?'CANCELLED':'INTERRUPTED';
+          if(part.tool?.status==='RUNNING')return {tool:{...part.tool,status:interrupted}};
+          return part;
+        }) : null;
+      const input=status==='CANCELLED' && frame.prompt==='' && previous?.user_input
+        ? previous.user_input : ordinaryInput(frame.prompt,frame.attachments);
+      patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status,
+        user_input:input,items,process,liveParts:[],previewGap:null,interruptedPreview,
+        output:frame.output,error_code:frame.error_code,conversation_committed:true});
+    }
+    renderList();setDisabled();
+  });
+}
 function watchSession(id, {restart=false}={}) {
   if(state.config?.read_only || !id){stopSessionWatch();return;}
   if(sessionWatch?.id===id && !restart)return;
+  if(state.config?.turn_sessions){watchOrdinarySession(id);return;}
   const prior=sessionWatch?.id===id?sessionWatch:null;
   if(prior?.execution?.id===state.observedExecution) {
     // A new EventSource starts without the previous connection's Last-Event-ID.
@@ -309,7 +870,7 @@ function watchSession(id, {restart=false}={}) {
   const source=new EventSource(sessionURL(id,'events',{view:'chat'}));
   const watch={id,source,ready:false,snapshot:prior?.snapshot || null,revision:prior?.revision ?? null,
     externalOwner:prior?.externalOwner ?? null,releasedExecution:prior?.releasedExecution ?? null,
-    execution:null,externalProcess:prior?.externalProcess || new Map(),refresh:prior?.refresh || {attempt:null,failed:false,reconnect:0}};
+    execution:null,published:null,externalProcess:prior?.externalProcess || new Map(),refresh:prior?.refresh || {attempt:null,failed:false,reconnect:0}};
   if(prior)watch.refresh.reconnect++;
   sessionWatch=watch;
   const current=()=>sessionWatch===watch && state.selectedSession===id && !watch.failed;
@@ -352,6 +913,18 @@ function watchSession(id, {restart=false}={}) {
     }
   };
   source.addEventListener('execution',receiveFrame);
+  source.addEventListener('session_turn',event=>{
+    if(!current() || !watch.ready)return;
+    let value;
+    try{value=JSON.parse(event.data);}catch{return;}
+    const turn=value?.turn;
+    if(!turn?.execution_id || !turn.conversation_committed || !Number.isSafeInteger(value.revision))return;
+    if(watch.snapshot?.active_execution_id===turn.execution_id)
+      watch.published={id:turn.execution_id,revision:value.revision};
+    const payload={session:{session_id:id},timeline:{items:[turn]}};
+    reconcileOlderTurn(payload,turn.execution_id);
+    settleReleasedTurn(payload,turn.execution_id,current);
+  });
   for(const delta of ['text','thinking'])source.addEventListener(delta,message=>receiveFrame(message,delta));
   source.addEventListener('session_process',event=>{
     if(!current() || !watch.ready)return;
@@ -409,8 +982,11 @@ function watchSession(id, {restart=false}={}) {
     const releasedTurn=previousExternal && previousExternal!==value.active_execution_id ? previousExternal
       : replacedLocal || (reconnected && watch.refresh.failed ? watch.refresh.releasedTurn : null);
     if(releasedTurn)watch.refresh.releasedTurn=releasedTurn;
-    if(state.session && releasedTurn)refreshSessionTimeline(watch,value.active_execution_id,releasedTurn);
-    else if(state.session && !value.active_execution_id && !streamWillRefresh && !watch.execution?.settling && (!watch.refresh.releasedTurn || watch.refresh.failed)
+    const confirmedRelease=!reconnected && previousOwner && previousOwner!==value.active_execution_id
+      && watch.published?.id===previousOwner && watch.published.revision===value.revision;
+    if(previousOwner!==value.active_execution_id)watch.published=null;
+    if(state.session && releasedTurn && !confirmedRelease)refreshSessionTimeline(watch,value.active_execution_id,releasedTurn);
+    else if(!confirmedRelease && state.session && !value.active_execution_id && !streamWillRefresh && !watch.execution?.settling && (!watch.refresh.releasedTurn || watch.refresh.failed)
       && (reconnected && watch.refresh.failed || Number.isSafeInteger(timelineRevision) && value.revision>timelineRevision))refreshSessionTimeline(watch,null,previousOwner || null);
     if(!releasedTurn && state.session && value.active_execution_id
       && (reconnected || value.revision!==previousRevision || value.active_execution_id!==previousOwner))
@@ -428,9 +1004,10 @@ function refreshActiveTurn(watch) {
 }
 function reconcileLiveHistory(timeline) {
   if(!timeline)return;
-  if(sessionWatch)for(const turn of timeline.items)if(turn.conversation_committed) {
-    sessionWatch.externalProcess.delete(turn.execution_id);
-    if(sessionWatch.refresh.releasedTurn===turn.execution_id)sessionWatch.refresh.releasedTurn=null;
+  const watch=legacySessionWatch();
+  if(watch)for(const turn of timeline.items)if(turn.conversation_committed) {
+    watch.externalProcess.delete(turn.execution_id);
+    if(watch.refresh.releasedTurn===turn.execution_id)watch.refresh.releasedTurn=null;
   }
   if(!timeline.items.some(turn=>turn.execution_id===state.observedExecution && turn.conversation_committed))return;
   if(state.view==='sessions' && state.conversationMode==='chat' && (liveRenderFrame!==null || liveRenderTimer!==null))renderLive();
@@ -532,7 +1109,7 @@ async function readSession(id, {metadataOnly=false,executionId=null,active=false
   try {
     try {return {...await api(sessionURL(id,'',query)),readGeneration};}
     catch(error) {
-      if(metadataOnly || executionId || error.code!=='SESSION_HISTORY_UNAVAILABLE')throw error;
+      if(state.config?.turn_sessions || metadataOnly || executionId || error.code!=='SESSION_HISTORY_UNAVAILABLE')throw error;
       const payload=await api(sessionURL(id,'',{include_timeline:'false'}));
       return {...payload,timeline_error:error.message,readGeneration};
     }
@@ -571,6 +1148,12 @@ function unavailableSelection(error) {
 function acceptSession(payload) {
   if(payload.session.session_id!==state.selectedSession || payload.readGeneration<state.sessionAppliedGeneration)return false;
   const watch=sessionWatch?.id===state.selectedSession?sessionWatch:null;
+  if(state.config?.turn_sessions){
+    const fresh={...payload.session,status:ordinaryStatus(payload.session.status ?? payload.session.state)};
+    state.session=watch?.snapshot?.revision>=fresh.revision?{...fresh,...watch.snapshot}:fresh;
+    state.sessionError=false;state.sessionAppliedGeneration=payload.readGeneration;
+    return true;
+  }
   const revision=payload.session.revision;
   if(watch && Number.isSafeInteger(revision) && (watch.revision===null || revision>watch.revision)) {
     // HTTP can observe another process's update before this process's stream.
@@ -590,11 +1173,40 @@ function acceptSession(payload) {
 function renderSessionHeader() {
   if(!state.session)return;
   $('conversation-title').textContent=state.session.metadata?.title || 'Conversation';
-  $('conversation-meta').textContent=`${state.session.agent_id}${state.session.status==='CLOSED'?' · CLOSED':''}${state.session.history_quality!=='complete'?' · history '+state.session.history_quality:''}`;
-  $('session-details').replaceChildren(rawDetail(state.session,'Session metadata'));
+  $('conversation-meta').textContent=[
+    state.config?.turn_sessions ? state.session.cwd : state.session.agent_id,
+    state.session.status==='CLOSED'?'CLOSED':null,
+    state.session.history_quality && state.session.history_quality!=='complete'?'history '+state.session.history_quality:null,
+  ].filter(Boolean).join(' · ');
+  if(!state.config?.turn_sessions)$('session-details').replaceChildren(rawDetail(state.session,'Session metadata'));
 }
 const thinkingLevels=['low','medium','high','xhigh','max'];
 const thinkingLabels=['Low','Medium','High','Extra high','Maximum'];
+const thinkingPreferenceKey='linktools.ai-web.thinking';
+function setThinkingPanel(open) {
+  $('thinking-panel').hidden=!open;
+  $('thinking-toggle').setAttribute('aria-expanded',String(open));
+  if(open)$('thinking').focus();
+}
+function renderComposerModel() {
+  const model=state.config?.model || 'Model';
+  $('composer-model-name').textContent=model;
+  $('thinking-toggle').title=`${model} · Thinking settings`;
+}
+
+function restoreThinkingPreference() {
+  try {
+    const index=thinkingLevels.indexOf(localStorage.getItem(thinkingPreferenceKey));
+    if(index>=0)$('thinking').value=String(index);
+  } catch {
+    // The slider still works if this browser blocks local storage.
+  }
+  renderThinking();
+}
+function saveThinkingPreference() {
+  renderThinking();
+  try {localStorage.setItem(thinkingPreferenceKey,readThinking());} catch {}
+}
 function readThinking() {
   return thinkingLevels[Number($('thinking').value)] || 'low';
 }
@@ -602,14 +1214,46 @@ function renderThinking() {
   const label=thinkingLabels[thinkingLevels.indexOf(readThinking())];
   $('thinking-value').textContent=label;$('thinking').setAttribute('aria-valuetext',label);
 }
+let turnUploads=[];
+function renderAttachments() {
+  $('queued-attachments').replaceChildren(...turnUploads.map(entry=>{
+    const row=element('li','',entry.file.name);
+    const remove=element('button','quiet','Remove');
+    remove.type='button';remove.setAttribute('aria-label',`Remove ${entry.file.name}`);
+    remove.onclick=()=>{turnUploads=turnUploads.filter(item=>item!==entry);saveDraft();renderAttachments();};
+    row.append(remove);return row;
+  }));
+}
+function selectAttachments() {
+  const picker=$('turn-files'), files=Array.from(picker.files);picker.value='';
+  if(!files.length)return;
+  const limit=state.config.attachment_upload;
+  if(turnUploads.length+files.length>limit.max_files || files.some(file=>!file.size)){
+    notice(`Choose up to ${limit.max_files} nonempty files.`);return;
+  }
+  const totalBytes=turnUploads.reduce((total,{file})=>total+file.size,0)+files.reduce((total,file)=>total+file.size,0);
+  if(totalBytes>limit.max_bytes){
+    notice(`Attachments must total at most ${limit.max_bytes.toLocaleString()} bytes.`);return;
+  }
+  turnUploads=[...turnUploads,...files.map(file=>({file,id:shortAttemptId()}))];
+  saveDraft();renderAttachments();
+}
+function readAttachment(file) {
+  return new Promise((resolve,reject)=>{
+    const reader=new FileReader();
+    reader.onerror=()=>reject(new Error('Could not read attachment.'));
+    reader.onload=()=>resolve({name:file.name,media_type:file.type,data:reader.result.slice(reader.result.indexOf(',')+1)});
+    reader.readAsDataURL(file);
+  });
+}
 function saveDraft() {
   if(!state.selectedSession)return;
-  state.drafts.set(state.selectedSession,{prompt:$('prompt').value,planning:$('planning').checked,thinking:$('thinking').value});
+  state.drafts.set(state.selectedSession,{prompt:$('prompt').value,planning:$('planning').checked,uploads:turnUploads});
 }
 function restoreDraft(sessionId) {
-  const draft=state.drafts.get(sessionId) || {prompt:'',planning:false,thinking:'0'};
-  $('prompt').value=draft.prompt;
-  $('planning').checked=draft.planning;$('thinking').value=draft.thinking ?? '0';renderThinking();
+  const draft=state.drafts.get(sessionId) || {prompt:'',planning:false};
+  $('prompt').value=draft.prompt;turnUploads=draft.uploads || [];renderAttachments();
+  $('planning').checked=draft.planning;
 }
 async function openSelection(sessionId, executionId, {preserveInspector=false}={}) {
   const preserveObservation=Boolean(sessionId && sessionId===state.selectedSession);saveDraft();
@@ -621,6 +1265,7 @@ async function openSelection(sessionId, executionId, {preserveInspector=false}={
   state.nativeTimeline=null;
   if(!preserveObservation)state.session=null;
   state.sessionError=false;state.executionError=false; state.execution=null; state.turns=[]; state.turnCursor=null; state.hasEarlierTurns=false;state.timelineError='';
+  if(state.config?.turn_sessions && state.view==='sessions'){executionId=null;state.selectedExecution=null;state.conversationMode='chat';}
   const explicitExecution=Boolean(executionId) || state.view==='executions';$('action-menu').open=false;$('run-actions').open=false;
   closeSidebar();renderPage();
   if(!preserveInspector)showInspector(explicitExecution,explicitExecution && Boolean(sessionId || executionId));
@@ -633,10 +1278,25 @@ async function openSelection(sessionId, executionId, {preserveInspector=false}={
       const payload=await readSession(sessionId);
       if (generation!==state.generation) return;
       if(acceptSession(payload)){
-        state.turns=payload.timeline?.items || [];state.turnCursor=payload.timeline?.next_cursor || null;state.timelineError=payload.timeline_error || '';
-        reconcileLiveHistory(payload.timeline);
+        state.turns=state.config?.turn_sessions
+          ? mergePage(payload.timeline?.items || [],state.turns,item=>item.turn_id).sort((a,b)=>(a.turn_no || Infinity)-(b.turn_no || Infinity))
+          : payload.timeline?.items || [];
+        state.turnCursor=payload.timeline?.next_cursor || null;state.timelineError=payload.timeline_error || '';
+        if(!state.config?.turn_sessions)reconcileLiveHistory(payload.timeline);
       }
       else if(!state.session)return;
+      if(state.config?.turn_sessions){
+        if(sessionWatch?.id===sessionId && Number.isSafeInteger(payload.session.last_turn_no))
+          sessionWatch.committedThrough=Math.max(sessionWatch.committedThrough ?? 0,payload.session.last_turn_no);
+        renderSessionHeader();renderConversation();setDisabled();renderList();
+        if(sessionWatch?.ready){
+          sessionWatch.readActive();
+          if(sessionWatch.snapshot?.last_turn_no>sessionWatch.committedThrough)
+            void catchUpOrdinary(sessionWatch,sessionWatch.snapshot.last_turn_no).catch(showError);
+        }
+        if(focusComposer && generation===state.generation)$('prompt').focus();
+        return;
+      }
       if(sessionWatch?.ready && sessionWatch.refresh.releasedTurn)
         refreshSessionTimeline(sessionWatch,sessionWatch.snapshot.active_execution_id,sessionWatch.refresh.releasedTurn);
       else refreshActiveTurn(sessionWatch);
@@ -654,19 +1314,36 @@ async function openSelection(sessionId, executionId, {preserveInspector=false}={
 async function moreTurns() {
   const generation=state.generation,id=state.selectedSession,cursor=state.turnCursor,noticeRevision=state.noticeRevision,key=`session:${id}:turns`;
   if(!id || !cursor || state.actionsPending.has(key))return;
-  state.actionsPending.add(key);$('turns-more').disabled=true;
+  const watch=sessionWatch,gap=watch?.historyGap;
+  state.actionsPending.add(key);$('turns-more').disabled=true;$('trace-earlier-turns').disabled=true;
   try {
     const payload=await api(sessionURL(id,"",{limit:"50",cursor}));
     if(generation!==state.generation || id!==state.selectedSession)return;
     // Earlier pages supply history only; their session owner may predate live readback.
-    state.turns=mergePage(payload.timeline.items,state.turns,item=>item.execution_id);state.turnCursor=payload.timeline.next_cursor;state.hasEarlierTurns=true;
-    renderConversation({prepend:true});
+    state.turns=mergePage(payload.timeline.items,state.turns,item=>item.turn_id || item.execution_id);
+    if(gap)state.turns.sort((a,b)=>(a.turn_no || Infinity)-(b.turn_no || Infinity));
+    if(cursor===state.turnCursor){
+      state.turnCursor=payload.timeline.next_cursor;state.hasEarlierTurns=true;
+      if(gap && watch.historyGap===gap && (!state.turnCursor || payload.timeline.items[0]?.turn_no<=(watch.committedThrough ?? 0)+1)){
+        advanceOrdinaryHistory(watch,gap.through);
+        watch.historyGap=null;
+      }
+    }
+    if(nativeTurnInspector() && state.conversationMode==='activity' && !$('inspector').hidden){
+      chooseOrdinaryInspectionTurn();
+      $('trace-earlier-turns').hidden=!state.turnCursor;
+    } else renderConversation({prepend:true});
   } catch(error) {
     if(generation===state.generation && id===state.selectedSession && noticeRevision===state.noticeRevision)throw error;
-  } finally {state.actionsPending.delete(key);$('turns-more').disabled=state.actionsPending.has(`session:${state.selectedSession}:turns`);}
+  } finally {
+    state.actionsPending.delete(key);
+    const pending=state.actionsPending.has(`session:${state.selectedSession}:turns`);
+    $('turns-more').disabled=pending;$('trace-earlier-turns').disabled=pending;
+  }
 }
 function renderTurnPickers() {
-  const options=state.turns.map((turn,index)=>({id:turn.execution_id,label:`Turn ${index+1} · ${date(turn.created_at)} · ${turn.status} · ${short(turn.execution_id)}`}));
+  if(nativeTurnInspector())return;
+  const options=state.turns.filter(turn=>turn.execution_id).map((turn,index)=>({id:turn.execution_id,label:`Turn ${index+1} · ${date(turn.created_at)} · ${turn.status} · ${short(turn.execution_id)}`}));
   if(state.selectedExecution && !options.some(option=>option.id===state.selectedExecution))options.push({id:state.selectedExecution,label:`Execution ${short(state.selectedExecution)}`});
   const signature=json(options);
   for(const id of ['detail-turn','request-turn']) {
@@ -682,6 +1359,7 @@ const processToolStatus={RUNNING:'In progress',SUCCEEDED:'Completed',FAILED:'Fai
 const processToolReason=new Map([
   ['AUTHORIZATION_DENIED','Permission denied.'],
   ['TOOL_RETRY_REQUIRED','The tool requested a retry.'],
+  ['TOOL_EXECUTION_FAILED','Tool execution failed.'],
   ['STORAGE_NOT_FOUND','The requested resource was not found.'],
   ['REQUEST_FIELD_INVALID','The request was invalid.'],
 ]);
@@ -754,7 +1432,7 @@ function turnProcess() {
 }
 function conversationProcessRows(executionId, saved, live) {
   const rows=new Map((saved || []).map(row=>[row.key,row]));
-  for(const source of [sessionWatch?.externalProcess.get(executionId),live]) {
+  for(const source of [legacySessionWatch()?.externalProcess.get(executionId),live]) {
     if(source)for(const row of source.values())rows.set(row.key,mergeProcessRow(rows.get(row.key),row));
   }
   return [...rows.values()];
@@ -879,7 +1557,7 @@ function renderConversation({prepend=false}={}) {
   if(state.timelineError)container.append(element('p','empty',`${state.timelineError} · Inspect retained executions; loaded turns may be incomplete.`));
   if(original) {
     const section=element('section','model-requests');renderNativeTimeline(section,{conversation:true});container.append(section);renderTurnPickers();
-  } else state.turns.forEach(turn=>container.append(renderTurn(turn)));
+  } else state.turns.forEach(turn=>container.append(turn.turn_id?ordinaryTurnNode(turn):renderTurn(turn)));
   if (!state.turns.length && !state.timelineError && !original)container.append(element('p','empty',state.selectedSession ? 'Send a message to get started.':'Choose an execution to inspect.'));
   if(original){const preview=element('details','live-preview');preview.append(element('summary','','Live preview · not original response'),live);container.append(preview);}else container.append(live);
   renderLive(liveFocus);restoreRequestFocus(container,requestFocus);
@@ -1061,7 +1739,10 @@ function renderLiveTools(live,wanted) {
   wanted.push(live.toolsNode);
 }
 function renderLive(liveFocus=document.activeElement?.dataset?.liveFocus) {
-  cancelLiveRender();const started=performance.now();
+  cancelLiveRender();
+  // Canonical session views never render legacy execution observation.
+  if(state.view==='sessions' && state.config?.turn_sessions)return;
+  const started=performance.now();
   try {
   let live=$('live');
   if(state.view==='executions'){live=$('execution-live');if(state.selectedExecution!==state.observedExecution){live.replaceChildren();return;}}
@@ -1361,7 +2042,7 @@ function readerDetail(key,label,className) {
   detail.append(summary);return detail;
 }
 function renderNativeTimeline(container,{conversation=false}={}) {
-  const view=state.nativeTimeline;
+  const view=state.nativeTimeline,readerHttp=state.readerHttp;
   container.classList.add('native-reader');
   const toolbar=element('div','native-toolbar');container.append(toolbar);
   if(conversation){
@@ -1372,7 +2053,7 @@ function renderNativeTimeline(container,{conversation=false}={}) {
   if(!view || view.id!==state.selectedExecution){container.append(element('p','muted','Loading model records…'));return;}
   const choices=[];
   for(const item of view.items){
-    if(!state.readerHttp){choices.push({key:modelKey(item),item,attempt:null,index:0});continue;}
+    if(!readerHttp){choices.push({key:modelKey(item),item,attempt:null,index:0});continue;}
     const attempts=item.client_requests || [];
     if(!attempts.length)choices.push({key:modelKey(item)+':unavailable',item,attempt:null,index:0});
     else attempts.forEach((attempt,index)=>choices.push({key:clientAttemptKey(item,index),item,attempt,index}));
@@ -1382,7 +2063,7 @@ function renderNativeTimeline(container,{conversation=false}={}) {
   if(selected)state.readerSelection=selected.key;
   if(!selected){selected=choices[0];state.readerSelection=selected?.key || null;}
   const select=element('select','native-request');select.setAttribute('aria-label','Select model request and attempt');select.dataset.requestFocus='reader:selection';
-  choices.forEach(choice=>{const option=element('option','',`Request ${choice.item.model_request_seq} · ${!state.readerHttp?'SDK record':choice.attempt?'Attempt '+(choice.index+1):'not captured'}${choice.item.agent_run_seq>1?' · run '+choice.item.agent_run_seq:''}${choice.item.purpose && choice.item.purpose!=='agent'?' · '+choice.item.purpose:''}${choice.item.execution_id!==view.id?' · '+short(choice.item.execution_id):''}`);option.value=choice.key;select.append(option);});
+  choices.forEach(choice=>{const option=element('option','',`Request ${choice.item.model_request_seq} · ${!readerHttp?'SDK record':choice.attempt?'Attempt '+(choice.index+1):'not captured'}${choice.item.agent_run_seq>1?' · run '+choice.item.agent_run_seq:''}${choice.item.purpose && choice.item.purpose!=='agent'?' · '+choice.item.purpose:''}${choice.item.execution_id!==view.id?' · '+short(choice.item.execution_id):''}`);option.value=choice.key;select.append(option);});
   select.value=state.readerSelection || '';select.disabled=!selected;select.onchange=()=>{state.readerExpanded.delete('reader:tools');state.readerSelection=select.value;state.readerCache=null;renderNativeViews();};toolbar.append(select);
   const status=selected?.attempt?.response?.status_code;
   if(status>=400 || selected?.item.status && selected.item.status!=='SUCCEEDED')toolbar.append(element('span','native-status',status>=400?`HTTP ${status}`:selected.item.status));
@@ -1390,17 +2071,17 @@ function renderNativeTimeline(container,{conversation=false}={}) {
   const actions=element('div','native-tool-actions');tools.append(actions);toolbar.append(tools);
   const closeTools=()=>{tools.open=false;state.readerExpanded.delete('reader:tools');tools.children[0].focus({preventScroll:true});};
   tools.onkeydown=event=>{if(event.key==='Escape')closeTools();};
-  const source=button(state.readerHttp?'Read model input':'Original HTTP diagnostics',async()=>{closeTools();state.readerHttp=!state.readerHttp;state.readerSelection=null;state.readerCache=null;await loadNativeTimeline(false,true);});source.dataset.requestFocus='reader:source';actions.append(source);
-  const raw=button(state.readerRaw?'Read messages':'View raw',async()=>{closeTools();state.readerRaw=!state.readerRaw;renderNativeViews();});raw.dataset.requestFocus='reader:raw';raw.disabled=!selected?.attempt;if(state.readerHttp)actions.append(raw);
-  if(state.readerHttp && selected?.attempt?.body!=null){const download=button('Download bytes',async()=>{downloadClientBody(selected.attempt,`${selected.key}-request.bin`);closeTools();});download.dataset.requestFocus='reader:download';actions.append(download);}
+  const source=button(readerHttp?'Read model input':'Original HTTP diagnostics',async()=>{closeTools();state.readerHttp=!readerHttp;state.readerSelection=null;state.readerCache=null;await loadNativeTimeline(false,true);});source.dataset.requestFocus='reader:source';actions.append(source);
+  const raw=button(state.readerRaw?'Read messages':'View raw',async()=>{closeTools();state.readerRaw=!state.readerRaw;renderNativeViews();});raw.dataset.requestFocus='reader:raw';raw.disabled=!selected?.attempt;if(readerHttp)actions.append(raw);
+  if(readerHttp && selected?.attempt?.body!=null){const download=button('Download bytes',async()=>{downloadClientBody(selected.attempt,`${selected.key}-request.bin`);closeTools();});download.dataset.requestFocus='reader:download';actions.append(download);}
   if(selected){const info=button('Inspect request',async()=>{const key=modelKey(selected.item)+':metadata';state.readerExpanded.has(key)?state.readerExpanded.delete(key):state.readerExpanded.add(key);closeTools();renderNativeViews();});info.dataset.requestFocus='reader:info';actions.append(info);}
   if(view.error)container.append(element('p','source-warning',view.error));
   if(!selected)container.append(element('p','empty',view.loading?'Loading model records…':'No records for this selection.'));
   else {
     const {item,attempt}=selected;
-    const metadata=readerDetail(modelKey(item)+':metadata','Request details','native-envelope native-info');metadata.hidden=!metadata.open;metadata.append(element('p','native-identity',`${modelLabel(item.model)} · ${item.purpose}`),element('p','source-note',state.readerHttp?'SDK-client input, in original array order. View raw and Download bytes retain the source; readable strings are decoded. Provider-server receipt is not observable here. Supported Chat, Responses and Anthropic dispatches are captured; SDK history never fills missing captures.':'Retained SDK interaction content, not provider wire bytes.'),element('pre','json',json({execution_id:item.execution_id,agent_run_seq:item.agent_run_seq,model_request_seq:item.model_request_seq,purpose:item.purpose,step_index:item.step_index,output_retry_index:item.output_retry_index,started_at:item.started_at,finished_at:item.finished_at,duration_ns:item.duration_ns,status:item.status,error_code:item.error_code,usage:item.usage,api:attempt?.api,record_http_bodies:attempt?.record_http_bodies,diagnostics:attempt?.diagnostics})));if(item.usage)metadata.append(element('p','muted',usageLabel(item.usage)));container.append(metadata);
+    const metadata=readerDetail(modelKey(item)+':metadata','Request details','native-envelope native-info');metadata.hidden=!metadata.open;metadata.append(element('p','native-identity',`${modelLabel(item.model)} · ${item.purpose}`),element('p','source-note',readerHttp?'SDK-client input, in original array order. View raw and Download bytes retain the source; readable strings are decoded. Provider-server receipt is not observable here. Supported Chat, Responses and Anthropic dispatches are captured; SDK history never fills missing captures.':'Retained SDK interaction content, not provider wire bytes.'),element('pre','json',json({execution_id:item.execution_id,agent_run_seq:item.agent_run_seq,model_request_seq:item.model_request_seq,purpose:item.purpose,step_index:item.step_index,output_retry_index:item.output_retry_index,started_at:item.started_at,finished_at:item.finished_at,duration_ns:item.duration_ns,status:item.status,error_code:item.error_code,usage:item.usage,api:attempt?.api,record_http_bodies:attempt?.record_http_bodies,diagnostics:attempt?.diagnostics})));if(item.usage)metadata.append(element('p','muted',usageLabel(item.usage)));container.append(metadata);
     const toggleInfo=metadata.ontoggle;metadata.ontoggle=()=>{toggleInfo();if(!metadata.isConnected)return;metadata.hidden=!metadata.open;if(!metadata.open && metadata.contains(document.activeElement))tools.children[0].focus({preventScroll:true});};
-    if(!state.readerHttp)sdkMessages(container,item,selected.key);
+    if(!readerHttp)sdkMessages(container,item,selected.key);
     else if(!attempt)container.append(element('p','muted',!item.client_requests_included?'Original client content was not requested.':item.status==='RUNNING'?'Request running; capture is saved on completion.':item.client_requests===null?'Original client messages were not recorded.':'No supported client dispatch was observed.'));
     else {
       try {
@@ -1543,7 +2224,7 @@ async function refreshNativeRequests(view,generation) {
 async function loadDetail(more=false, selectors={}, reuseNative=false) {
   if (!state.selectedExecution || $('inspector').hidden || state.view==='metrics') return;
   const generation=++state.detailGeneration, selection=state.generation, id=state.selectedExecution, tab=state.tab;
-  if (!more) { state.details=[]; state.detailCursor=null; $('inspector-content').classList.remove('native-reader');clear('inspector-content'); }
+  if (!more) { state.details=[]; state.detailCursor=null; $('inspector-content').classList.remove('native-reader','turn-trace');clear('inspector-content'); }
   $('detail-more').hidden=true;
   $('detail-view').value=tab;setDisabled();
   if (tab==='overview') { renderOverview(); return; }
@@ -1567,7 +2248,7 @@ async function loadDetail(more=false, selectors={}, reuseNative=false) {
   } catch(error) { if(generation===state.detailGeneration && selection===state.generation && id===state.selectedExecution && tab===state.tab) showError(error); }
 }
 function renderOverview() {
-  $('inspector-content').classList.remove('native-reader');clear('inspector-content'); const info=state.execution; if (!info) return;
+  $('inspector-content').classList.remove('native-reader','turn-trace');clear('inspector-content'); const info=state.execution; if (!info) return;
   $('inspector-content').append(properties({Agent:info.agent_id,Kind:info.binding_kind,Session:info.session_id,Lineage:info.lineage_kind,Created:date(info.created_at),Started:date(info.started_at),Finished:date(info.terminal_at),Error:info.error_code}));
   if(info.usage) { const card=element('div','detail-card'); card.append(element('h3','','Usage'),properties({Requests:info.usage.logical_requests,'Input tokens':info.usage.input_tokens,'Output tokens':info.usage.output_tokens,'Unknown usage':info.usage.unknown_usage_requests}),rawDetail(info.usage)); $('inspector-content').append(card); }
   $('inspector-content').append(rawDetail(info,'Execution metadata'));
@@ -1577,7 +2258,8 @@ function renderOverview() {
   }
 }
 function traceItem(item) {
-  const row=item.payload || {},key=`${item.execution_id}:${item.step_event_seq}`,selected=state.traceSelection===key;
+  const identity=item.turn_id || item.execution_id;
+  const row=item.payload || {},key=`${identity}:${item.step_event_seq}`,selected=state.traceSelection===key;
   const node=element('section','trace-item'),toggle=button('',async()=>{state.traceSelection=selected?null:key;renderDetails();});
   toggle.className='trace-row';toggle.dataset.requestFocus=`trace:${key}`;toggle.setAttribute('aria-expanded',String(selected));
   toggle.append(element('span','trace-seq',`#${item.step_event_seq}`),element('span','trace-label',`${(row.kind || 'Step').replaceAll('_',' ').toLowerCase()}${row.tool_name?' · '+row.tool_name:''}`));
@@ -1585,7 +2267,8 @@ function traceItem(item) {
   toggle.append(element('span','trace-duration',duration(row.duration_ns)));node.append(toggle);
   if(!selected)return node;
   const detail=element('div','trace-detail');
-  detail.append(element('p','mono',`${item.execution_id} · ${row.scope || '—'} · run ${row.agent_run_seq ?? '—'} · step ${row.step_index ?? '—'} · request #${row.model_request_seq ?? '—'}`),element('p','muted',`${row.purpose || '—'} · ${duration(row.duration_ns)}${row.token_usage?' · '+usageLabel(row.token_usage):''}`));
+  detail.append(element('p','mono',`${identity} · ${row.scope || '—'} · run ${row.agent_run_seq ?? '—'} · step ${row.step_index ?? '—'} · request #${row.model_request_seq ?? '—'}`),element('p','muted',`${row.purpose || '—'} · ${duration(row.duration_ns)}${row.token_usage?' · '+usageLabel(row.token_usage):''}`));
+  if(item.turn_id){node.append(detail);return node;}
   const selectors={};['agent_run_seq','model_request_seq','step_index','tool_call_id'].forEach(key=>{if(row[key]!=null)selectors[key]=row[key];});
   if(row.call_id)selectors.tool_call_id=row.call_id;
   const content=button('Read SDK content',async()=>{
@@ -1600,8 +2283,20 @@ function traceItem(item) {
   const raw=rawDetail(item,'Original event record');raw.children[0].dataset.requestFocus=`trace:${key}:raw`;detail.append(raw);node.append(detail);return node;
 }
 function renderDetails() {
-  $('inspector-content').classList.remove('native-reader');
-  const requestFocus=requestFocusWithin($('inspector-content'));
+  const content=$('inspector-content'),requestFocus=requestFocusWithin(content);
+  if(state.tab==='trace' && nativeTurnInspector()){
+    const workbench=$('conversation-view'),outerScroll=workbench.scrollTop;
+    const scroll=['.trace-log','.trace-record-body'].map(selector=>[selector,content.querySelector(selector)?.scrollTop ?? 0]);
+    clear('inspector-content');
+    renderOrdinaryTrace(content);
+    restoreRequestFocus(content,requestFocus);
+    for(const [selector,top] of scroll){
+      const pane=content.querySelector(selector);if(pane)pane.scrollTop=top;
+    }
+    workbench.scrollTop=outerScroll;
+    return;
+  }
+  content.classList.remove('native-reader','turn-trace');
   clear('inspector-content');
   if(['history','transcript','sdkmodels'].includes(state.tab)) {
     const note=element('div','source-note');
@@ -1747,18 +2442,18 @@ function reconcileCancellation(info, session, revision) {
   const occupied=session?.active_execution_id===info.execution_id;
   notice(`${outcome}${occupied?' Session release is not yet confirmed.':session?.active_execution_id?' Another execution now owns the session.':session?' Session released.':''}`,occupied?info.execution_id:null,revision);
 }
-async function refreshObservation(id, generation, snapshot=null) {
+async function refreshObservation(id, generation, snapshot=null, publishedTurn=false) {
   const sessionId=state.view!=='executions' && state.observedInfo?.session_id===state.selectedSession?state.selectedSession:null, sessionGeneration=state.generation,
     refreshGeneration=++state.refreshGeneration, readGeneration=++state.observationReadGeneration;
   const current=()=>generation===state.observationGeneration && id===state.observedExecution && refreshGeneration===state.refreshGeneration && readGeneration===state.observationReadGeneration;
   let info,payload;
   // An unchanged Chat cancellation snapshot already proves the terminal outcome.
   const useSnapshot=snapshot && snapshot===state.observedInfo
-    && (snapshot.status==='SUCCEEDED' || state.view==='sessions' && snapshot.status==='CANCELLED');
+    && (publishedTurn && terminal(snapshot.status) || snapshot.status==='SUCCEEDED' || state.view==='sessions' && snapshot.status==='CANCELLED');
   try {
     info=useSnapshot ? snapshot : await api(`/api/executions/${enc(id)}`);
     if(!current())return;
-    if(sessionId) {
+    if(sessionId && !publishedTurn) {
       const read=terminal(info.status)?{id}:null;
       if(read)terminalHistoryRead=read;
       try {payload=await readSession(sessionId,{executionId:id,active:!read});}
@@ -1781,7 +2476,7 @@ async function refreshObservation(id, generation, snapshot=null) {
   } else if(payload && sessionId===state.selectedSession)reconcileOlderTurn(payload,id);
   if(state.cancellationNoticeId===id && terminal(info.status)) {
     const noticeRevision=state.noticeRevision;
-    const session=info.session_id ? (payload && info.session_id===sessionId ? payload.session : (await api(sessionURL(info.session_id,'',{include_timeline:'false'}))).session) : null;
+    const session=info.session_id ? (info.session_id===sessionId && (payload || publishedTurn) ? (payload?.session || state.session) : (await api(sessionURL(info.session_id,'',{include_timeline:'false'}))).session) : null;
     if(!current())return;
     reconcileCancellation(info,session,noticeRevision);
   }
@@ -1861,7 +2556,7 @@ async function settleSessionExecution(watch, id, generation, snapshot=null) {
   const current=()=>sessionWatch===watch && watch.execution?.id===id && generation===state.observationGeneration && id===state.observedExecution;
   const revision=watch.revision,reconnect=watch.refresh.reconnect;
   try {
-    await refreshObservation(id,generation,snapshot);
+    await refreshObservation(id,generation,snapshot,watch.published?.id===id);
     if(!current())return;
     const status=state.observedInfo?.status;
     if(terminal(status)){connection('Complete');watch.execution=null;}
@@ -1932,16 +2627,65 @@ async function watchExecution(id,generation) {
   }
   } finally {if(state.stream===controller){state.stream=null;if(current())renderLive();}}
 }
+async function ordinaryAction(action) {
+  const id=state.selectedSession,turn=state.session?.active_turn_id,key=`turn:${turn}`,generation=state.generation;
+  if(!id || !turn || state.actionsPending.has(key))return;
+  if(action==='recover' && !confirm('Recover this turn only after its previous producer has stopped. Continue?'))return;
+  const blockedGeneration=state.turns.find(row=>row.turn_id===turn)?.blockedGeneration;
+  if(action==='abandon' && (!blockedGeneration || !confirm('End this turn without rerunning any tools? Earlier messages will be kept. Any already attempted effects may still be unconfirmed.')))return;
+  const current=()=>state.generation===generation && state.selectedSession===id && state.session?.active_turn_id===turn;
+  if(!current())return;
+  state.actionsPending.add(key);setDisabled();
+  try {
+    let result;
+    try {
+      result=await mutate(sessionURL(id,action),{turn_id:turn,...(action==='abandon'?{expected_generation:blockedGeneration}:{})});
+    } catch(error) {
+      const details=error.details?.safe_details, failedGeneration=details?.generation;
+      const canOfferEnd=action==='recover' && error.code==='STORAGE_RECOVERY_REQUIRED'
+        && ['native_child_reservation_missing','native_subagent_trace_incomplete'].includes(details?.reason)
+        && Number.isSafeInteger(failedGeneration) && failedGeneration>0;
+      const row=state.turns.find(item=>item.turn_id===turn);
+      if(!current() || row?.conversation_committed)return;
+      if(!canOfferEnd || !row)throw error;
+      if((row.liveGeneration || 0)>failedGeneration)return;
+      patchOrdinaryTurn({...row,blockedGeneration:failedGeneration});
+      notice('This turn cannot resume. Choose Recover again to confirm ending it without replaying tools.');
+      return;
+    }
+    if(current() && !result.accepted)
+      notice(action==='abandon'?'The turn could not be ended yet. Wait for its lease to expire, then choose Recover again.'
+        :action==='recover'?'Turn still owned or already complete.':'Stop not confirmed. Watch the turn for its final status.');
+  } finally {state.actionsPending.delete(key);setDisabled();}
+}
 async function sendMessage(event) {
   event.preventDefault(); const sessionId=state.selectedSession,generation=state.generation,executionGeneration=state.executionGeneration,promptValue=$('prompt').value;
+  const ordinary=Boolean(state.config?.turn_sessions), uploads=turnUploads;
   if(!sessionId || !state.session || state.session.status!=='OPEN' || state.config?.read_only || !promptValue.trim() || sessionSendBlocked())return;
   sessionSubmissions.add(sessionId);
-  $('send').disabled=true;notice('');
+  setThinkingPanel(false);$('send').disabled=true;notice('');
   try {
-    // Rejected admission is terminal for its key; another explicit send is a new attempt.
-    const result=await mutate(sessionURL(sessionId,"messages"),{prompt:promptValue,planning:$('planning').checked,thinking:readThinking()}, {newAttemptOn:['SESSION_BUSY','SESSION_CONFLICT']});
-    if(generation!==state.generation){const draft=state.drafts.get(sessionId);if(draft?.prompt===promptValue)draft.prompt='';if(state.selectedSession===sessionId && $('prompt').value===promptValue)$('prompt').value='';return;}
-    if($('prompt').value===promptValue)$('prompt').value='';
+    const options={prompt:promptValue,thinking:readThinking(),planning:$('planning').checked};
+    const intent=uploads.length?{...options,attachments:uploads.map(item=>item.id)}:options;
+    if(ordinary && uploads.length)options.attachments=await Promise.all(uploads.map(item=>readAttachment(item.file)));
+    const result=await mutate(sessionURL(sessionId,"messages"),options,{
+      intent,newAttemptOn:['SESSION_BUSY','SESSION_CONFLICT','REQUEST_FIELD_INVALID'],shortRequest:ordinary,
+    });
+    const draft=state.drafts.get(sessionId);
+    if(draft?.prompt===promptValue && (!ordinary || draft.uploads===uploads)){
+      draft.prompt='';draft.uploads=[];
+    }
+    if(state.selectedSession===sessionId && $('prompt').value===promptValue && (!ordinary || turnUploads===uploads)){
+      $('prompt').value='';turnUploads=[];renderAttachments();
+    }
+    if(generation!==state.generation)return;
+    if(ordinary){
+      if(!state.turns.some(turn=>turn.turn_id===result.turn_id)){
+        if(state.session && !state.session.active_turn_id)state.session.active_turn_id=result.turn_id;
+        patchOrdinaryTurn({turn_id:result.turn_id,status:'PENDING_START',user_input:ordinaryInput(promptValue,uploads.map(({file})=>({display_name:file.name,media_type:file.type,size:file.size}))),items:[],conversation_committed:false,previewHasPrefix:true});
+      }
+      return;
+    }
     reconcileAdmissionWatch(sessionId,result.execution_id);
     // Keep the current page and draft; refresh only the admitted turn's projection.
     const payload=await readSession(sessionId,{executionId:result.execution_id,active:true});
@@ -1956,24 +2700,47 @@ async function sendMessage(event) {
   } catch(error){
     if(generation!==state.generation || sessionId!==state.selectedSession)return;
     unavailableSelection(error);
-    reconcileAdmissionWatch(sessionId);
+    if(!state.config?.turn_sessions)reconcileAdmissionWatch(sessionId);
     if(['SESSION_BUSY','SESSION_CONFLICT'].includes(error.code))error.message+='; this message was not started. Check the current execution, then send again when the session is available.';
     showError(error);
   } finally {
     sessionSubmissions.delete(sessionId);
-    if(generation===state.generation && sessionId===state.selectedSession && state.session)refreshActiveTurn(sessionWatch);
+    if(generation===state.generation && sessionId===state.selectedSession && state.session && !state.config?.turn_sessions)refreshActiveTurn(sessionWatch);
     setDisabled();
   }
 }
+function openPlan() {
+  if(!state.config?.turn_sessions || state.config.read_only)return;
+  const dialog=$('plan-dialog');
+  dialog.dataset.attempt=shortAttemptId();
+  $('plan-error').hidden=true;$('start-plan').disabled=false;
+  dialog.showModal();$('plan-prompt').focus();
+}
+async function startPlan(event) {
+  event.preventDefault();
+  const dialog=$('plan-dialog'),attempt=dialog.dataset.attempt,button=$('start-plan');
+  const prompt=$('plan-prompt').value;
+  if(button.disabled || !prompt.trim())return;
+  const current=()=>dialog.open && dialog.dataset.attempt===attempt;
+  $('plan-error').hidden=true;button.disabled=true;
+  try {
+    const result=await mutate('/api/executions/plan',{prompt});
+    if(current()){ $('plan-prompt').value='';dialog.close();navigate(null,result.execution_id); }
+  } catch(error) {
+    if(current()){ $('plan-error').textContent=error.message;$('plan-error').hidden=false; }
+  } finally {if(dialog.dataset.attempt===attempt)button.disabled=false;}
+}
 function openNew() {
   if(!state.config || state.config.read_only)return;
-  $('new-dialog').dataset.sessionId=crypto.randomUUID();$('create-session').disabled=false;$('new-dialog').showModal();$('new-agent').focus();
+  $('new-dialog').dataset.sessionId=crypto.randomUUID();$('create-session').disabled=false;$('new-dialog').showModal();
+  $('create-session').focus();
 }
 async function createSession(event) {
   event.preventDefault();const button=$('create-session');button.disabled=true;
   const sessionId=$('new-dialog').dataset.sessionId,generation=state.generation,noticeRevision=state.noticeRevision;
   try {
-    const session=await mutate('/api/sessions',{session_id:sessionId,title:$('new-title').value,agent_id:$('new-agent').value,cwd:$('new-cwd').value || null});
+    const options={session_id:sessionId,title:$('new-title').value,cwd:$('new-cwd').value || null};
+    const session=await mutate('/api/sessions',options);
     if($('new-dialog').open && $('new-dialog').dataset.sessionId===sessionId && generation===state.generation){$('new-dialog').close();state.conversationMode='chat';state.focusComposerSession=session.session_id;setView('sessions',false);navigate(session.session_id,null);}
     await loadList();
   } catch(error){if($('new-dialog').open && $('new-dialog').dataset.sessionId===sessionId && generation===state.generation && noticeRevision===state.noticeRevision)showError(error);}
@@ -1981,9 +2748,9 @@ async function createSession(event) {
 }
 async function sessionAction(action) {
   const id=state.selectedSession,generation=state.generation,noticeRevision=state.noticeRevision;if(!id || !state.session)return;
-  const key=`session:${id}:${action}`;
-  if(state.actionsPending.has(key))return;
-  let payload={};
+  const key=`session:${id}:${action}`,ordinary=Boolean(state.config?.turn_sessions);
+  if(state.actionsPending.has(key) || ordinary && action!=='fork' && (state.session.status!=='OPEN' || state.session.active_turn_id || sessionSubmissions.has(id)))return;
+  let payload=ordinary?{expected_revision:state.session.revision}:{};
   if(action==='close' && !confirm('Close this session? Its history will remain available.'))return;
   if(action==='fork'){
     if(!state.pendingForks.has(id))state.pendingForks.set(id,crypto.randomUUID());
@@ -1991,17 +2758,27 @@ async function sessionAction(action) {
   }
   if(action==='update') {
     const title=prompt('Conversation title',state.session.metadata?.title || 'Conversation');if(!title?.trim())return;
-    payload={expected_revision:state.session.revision,metadata:{...state.session.metadata,title},cwd:state.session.cwd};
+    payload={expected_revision:state.session.revision,metadata:{...state.session.metadata,title}};
+    if(!ordinary)payload.cwd=state.session.cwd;
   }
   state.actionsPending.add(key);setDisabled();
   try {
-    const result=await mutate(sessionURL(id,action),payload).catch(error=>{
+    const result=await mutate(sessionURL(id,action),payload,ordinary?{newAttemptOn:['SESSION_CONFLICT']}:{}).catch(error=>{
       if(generation===state.generation && id===state.selectedSession && noticeRevision===state.noticeRevision)throw error;
       return null;
     });
     if(!result)return;
     if(action==='fork')state.pendingForks.delete(id);
     if(generation!==state.generation || id!==state.selectedSession){await loadList();return;}
+    if(ordinary && action!=='fork'){
+      if(result.revision>=state.session.revision){
+        Object.assign(state.session,result);
+        if(sessionWatch?.id===id && result.revision>=(sessionWatch.snapshot?.revision ?? -1))
+          sessionWatch.snapshot={...sessionWatch.snapshot,...result};
+        renderSessionHeader();renderList();
+      }
+      return;
+    }
     if(action==='fork')navigate(result.session_id,null);else await openSelection(id,state.selectedExecution,{preserveInspector:true});
     await loadList();
   } finally {state.actionsPending.delete(key);setDisabled();}
@@ -2146,8 +2923,7 @@ function showSettings() {
   const card=element('div','detail-card');card.append(element('h3','','Captured capabilities'));config.capabilities.forEach(item=>card.append(element('p','',`${item.kind} · ${item.id} · revision ${item.revision}`)));if(!config.capabilities.length)card.append(element('p','','Capability composition is loaded when an execution Runtime starts.'));$('settings-content').append(card);$('settings-dialog').showModal();
 }
 async function bootstrap() {
-  state.config=await api('/api/config');$('workspace-label').textContent=state.config.workspace || 'Local Runtime';
-  state.config.capabilities.filter(item=>item.kind==='agent').forEach(item=>{const option=element('option','',item.id);option.value=item.id;$('new-agent').append(option);});
+  state.config=await api('/api/config');renderComposerModel();$('workspace-label').textContent=state.config.workspace || 'Local Runtime';
   state.config.metric_names.forEach(name=>{const option=element('option','',name.replace('linktools.',''));option.value=name;$('metric-names').append(option);});
   if(state.config.read_only){connection('Read-only');notice('Read-only. Configure a model at startup to send messages.');}
   setDisabled();await loadList();await fromHash();
@@ -2157,7 +2933,10 @@ async function fromHash() {
   const params=new URLSearchParams(location.hash.slice(1));
   const view=params.get('view') || (params.has('session')?'sessions':params.has('execution')?'executions':'sessions');
   setView(['sessions','executions','metrics'].includes(view)?view:'sessions',false);
-  if(state.view==='metrics')return;
+  if(state.view==='metrics'){
+    if(state.config.turn_sessions)stopSessionWatch();
+    return;
+  }
   if(state.view==='executions') {
     if(sessionWatch){stopSessionWatch();clearObservation();}
     const id=params.get('execution') || state.browserExecution;
@@ -2168,21 +2947,272 @@ async function fromHash() {
   await openSelection(params.get('session'),params.get('execution'));
 }
 window.addEventListener('hashchange',()=>fromHash().catch(showError));window.addEventListener('beforeunload',stopStream);
+$('open-plan').onclick=openPlan;$('plan-form').onsubmit=startPlan;
 $('new-session').onclick=openNew;$('welcome-new').onclick=openNew;$('new-form').onsubmit=createSession;
 $('composer').onsubmit=sendMessage;$('prompt').onkeydown=event=>{if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();$('composer').requestSubmit();}};
 $('menu').onclick=()=>{const open=$('menu').getAttribute('aria-expanded')!=='true';$('sidebar').classList.toggle('open',open);$('menu').setAttribute('aria-expanded',String(open));};
 $('sidebar-close').onclick=()=>closeSidebar(true);
-window.addEventListener('keydown',event=>{if(event.key==='Escape' && $('menu').getAttribute('aria-expanded')==='true' && !$('new-dialog').open && !$('settings-dialog').open)closeSidebar(true);});
+window.addEventListener('keydown',event=>{if(event.key==='Escape' && $('menu').getAttribute('aria-expanded')==='true' && !$('new-dialog').open && !$('settings-dialog').open && !$('plan-dialog').open)closeSidebar(true);});
 $('new-title').oninvalid=()=>$('new-options').open=true;
-$('detail-turn').onchange=()=>selectExecution($('detail-turn').value).catch(showError);
+$('detail-turn').onchange=()=>(
+  nativeTurnInspector()?loadOrdinaryInspection($('detail-turn').value):selectExecution($('detail-turn').value)
+).catch(showError);
 async function openRecovery(active=false) {
   const id=active?state.session?.active_execution_id:state.selectedExecution;if(!id)return;
   showInspector(true,true);state.tab='recovery';await selectExecution(id);
 }
 $('open-recovery').onclick=()=>{ $('action-menu').open=false;return openRecovery(Boolean(state.session?.active_execution_id)).catch(showError); };
 $('recovery-shortcut').onclick=()=>openRecovery(true).catch(showError);
-$('thinking').oninput=renderThinking;
-$('inspector-toggle').onclick=()=>{$('action-menu').open=false;const open=$('inspector').hidden,reuseNative=state.conversationMode==='original';showInspector(open,true);if(open)return loadDetail(false,{},reuseNative).catch(showError);};
+restoreThinkingPreference();
+$('thinking').oninput=saveThinkingPreference;
+$('thinking-toggle').onclick=()=>setThinkingPanel($('thinking-panel').hidden);
+document.addEventListener('pointerdown',event=>{
+  if(!$('thinking-panel').hidden && !$('composer-model').contains(event.target))setThinkingPanel(false);
+});
+$('composer-model').addEventListener('keydown',event=>{
+  if(event.key==='Escape' && !$('thinking-panel').hidden){
+    event.preventDefault();setThinkingPanel(false);$('thinking-toggle').focus();
+  }
+});
+
+function nativeTurnInspector() {
+  return state.view==='sessions' && state.config?.turn_sessions && state.config.turn_trace;
+}
+function defaultOrdinaryTurn() {
+  return state.session?.active_turn_id || state.turns.findLast(row=>row.turn_id)?.turn_id;
+}
+let ordinaryInspection = null;
+function chooseOrdinaryInspectionTurn() {
+  const select=$('detail-turn'),options=new Map();
+  for(const row of state.turns)if(row.turn_id)options.set(
+    row.turn_id,row.turn_no?`Turn ${row.turn_no} · ${row.status}`:short(row.turn_id));
+  const active=state.session?.active_turn_id;
+  if(active && !options.has(active))options.set(active,'Current turn');
+  select.replaceChildren();
+  for(const [id,label] of options){
+    const option=element('option','',label);option.value=id;select.append(option);
+  }
+  const selected=ordinaryInspection?.session===state.selectedSession && options.has(ordinaryInspection.turnId)
+    ? ordinaryInspection.turnId:null;
+  select.value=selected || defaultOrdinaryTurn() || '';select.disabled=!options.size;
+  return select.value;
+}
+function renderOrdinaryTrace(container) {
+  const inspection=ordinaryInspection;
+  container.classList.add('turn-trace');
+  const events=state.details,turn=state.turns.find(row=>row.turn_id===inspection.turnId);
+  const groups=new Map(),toolGroups=new Map(),rows=[];
+  if(turn?.user_input?.prompt)rows.push({input:turn.user_input.prompt});
+  for(const item of events){
+    const {kind,model_request_seq:seq,scope,tool_call_id:id}=item.payload;
+    if((kind==='MODEL_REQUEST' || kind==='MODEL_RESPONSE') && seq!=null && scope==='root'){
+      let row=groups.get(seq);
+      if(!row){row={seq,events:[]};groups.set(seq,row);rows.push(row);}
+      row.events.push(item);
+    } else if(id && ['TOOL_CALL','TOOL_RESULT','TOOL_ERROR'].includes(kind)){
+      let row=toolGroups.get(id);
+      if(!row){row={events:[]};toolGroups.set(id,row);rows.push(row);}
+      row.events.push(item);
+    } else rows.push({events:[item]});
+  }
+
+  const timestamps=events.map(({payload})=>Date.parse(payload.occurred_at)).filter(Number.isFinite);
+  const origin=timestamps.reduce((earliest,time)=>Math.min(earliest,time),Infinity);
+  const end=timestamps.reduce((latest,time)=>Math.max(latest,time-origin),0);
+  let start=0;
+  const bands=[];
+  for(const [label,started,finished] of [
+    ['Model','MODEL_REQUEST',['MODEL_RESPONSE']],
+    ['Tools','TOOL_CALL',['TOOL_RESULT','TOOL_ERROR']],
+  ]){
+    const spans=[];let unmatchedStart=false;
+    for(const {events:captured=[]} of rows){
+      let first=null;
+      for(const {payload:last} of captured){
+        if(last.kind===started){first=last;continue;}
+        if(!finished.includes(last.kind))continue;
+        const to=Date.parse(last.occurred_at)-origin,observedFrom=Date.parse(first?.occurred_at)-origin;
+        const measured=Number.isFinite(last.duration_ns) && last.duration_ns>0?last.duration_ns:null;
+        const from=measured==null?observedFrom:to-measured/1e6;
+        if(Number.isFinite(from) && to>from){
+          start=Math.min(start,from);
+          spans.push({from,to,last,elapsed:measured ?? (to-from)*1e6});
+        }
+        first=null;
+      }
+      unmatchedStart ||= Boolean(first);
+    }
+    bands.push({label,spans,unmatchedStart});
+  }
+
+  const range=end-start;
+  clear('trace-stats');
+  const heading=$('trace-stats');
+  heading.append(element('span','',range>0?`◷ ${duration(range*1e6)} observed`:'◷ Timing unavailable'),
+    element('span','',`${events.length} events`),element('span','',`${groups.size} model calls`));
+  if(turn?.status)heading.append(element('span','trace-log-state',turn.status.replaceAll('_',' ').toLowerCase()));
+
+  const timings=element('div','trace-bands');timings.setAttribute('aria-label','Observed timing');
+  const running=state.session?.active_turn_id===inspection.turnId && !terminal(turn?.status);
+  for(const {label,spans,unmatchedStart} of bands){
+    const band=element('div','trace-band'),track=element('div','trace-band-track');
+    band.append(element('span','',label),track);
+    for(const {from,to,last,elapsed} of spans){
+      const span=element('span',`trace-band-span ${label.toLowerCase()}${['FAILED','EFFECT_UNKNOWN'].includes(last.status)?' failed':''}`);
+      span.style.left=`${100*(from-start)/range}%`;
+      span.style.width=`${100*(to-from)/range}%`;
+      span.title=`${last.tool_name || (last.model_request_seq!=null?'Request '+last.model_request_seq:label)} · ${duration(elapsed)}`;
+      track.append(span);
+    }
+    if(!spans.length)track.append(element('span','trace-band-empty',
+      unmatchedStart && running?'In progress · no completed timing':'No timing captured'));
+    timings.append(band);
+  }
+  container.append(timings);
+
+  const workspace=element('div','trace-workspace'),log=element('div','trace-log');
+  log.setAttribute('aria-label','Captured turn events');
+  const pane=element('section','trace-record');pane.setAttribute('aria-label','Selected trace record');
+  workspace.append(log,pane);container.append(workspace);
+  if(!events.length)log.append(element('p','trace-record-empty','No trace events were captured for this turn.'));
+
+  const controls=[];
+  for(const {seq,events:captured=[],input} of rows){
+    const first=captured[0],last=captured.at(-1)?.payload,isModel=seq!=null;
+    const key=input?'trace:input':isModel?`trace:model:${seq}`:`trace:event:${first.step_event_seq}`;
+    const isTool=Boolean(last?.tool_name || last?.kind.startsWith('TOOL_'));
+    const type=input?'Input':isModel?'Model':isTool?'Tool':last.kind.replaceAll('_',' ').toLowerCase();
+    const summary=input || (isModel?`Model request ${seq}`:last.tool_name || type);
+    const selected=state.traceSelection===key;
+    const select=button('',async()=>{
+      if(selected && !(isModel && inspection.model?.seq===seq && inspection.model.error))return;
+      state.traceSelection=key;
+      inspection.tab='Summary';
+      if(isModel && state.config.turn_model_messages && (inspection.model?.seq!==seq || !inspection.model.items)){
+        const read={seq};inspection.model=read;renderDetails();
+        const current=()=>ordinaryInspection===inspection && inspection.model===read
+          && state.traceSelection===key && nativeTurnInspector() && !$('inspector').hidden;
+        try {
+          const page=await api(sessionURL(inspection.session,'',{turn_id:inspection.turnId,models:'true',
+            include_content:'true',model_request_seq:String(seq)}));
+          if(current())read.items=page.items;
+        } catch(error){if(current())read.error=error.message;}
+        if(!current())return;
+      }
+      renderDetails();
+    },'trace-log-select');
+    select.dataset.requestFocus=key;select.setAttribute('aria-pressed',String(selected));
+    select.setAttribute('aria-label',input?'User input':summary);
+    const glyph=element('span',`trace-glyph ${input?'input':isModel?'model':isTool?'tools':'other'}`,input?'➤':isModel?'✦':isTool?'⚒':'•');
+    glyph.setAttribute('aria-hidden','true');
+    select.append(element('span','trace-log-no',first?String(first.step_event_seq):''),glyph,
+      element('span','trace-log-label',summary),
+      element('span',`trace-log-status ${['FAILED','EFFECT_UNKNOWN'].includes(last?.status)?'failed':''}`,last?.error_code || last?.status || ''));
+    select.onkeydown=event=>{
+      const direction=event.key==='ArrowDown'?1:event.key==='ArrowUp'?-1:0;
+      const target=direction && controls[controls.indexOf(select)+direction];
+      if(target){event.preventDefault();target.focus();}
+    };
+    controls.push(select);log.append(select);
+    if(!selected)continue;
+
+    const title=element('div','trace-record-heading');
+    const close=button('×',async()=>{state.traceSelection=null;renderDetails();
+      restoreRequestFocus(container,key);},'trace-record-close');
+    close.setAttribute('aria-label','Close trace record');
+    title.append(element('span',`trace-record-type ${isModel?'model':isTool?'tools':'other'}`,type),
+      element('span','trace-log-count',`Turn${turn?.turn_no?' '+turn.turn_no:''}${first?' · #'+first.step_event_seq:''}`),close);
+    pane.append(title);
+    const tabs=element('div','trace-record-tabs'),active=inspection.tab || 'Summary';
+    for(const name of ['Summary','Preview','Raw']){
+      const tab=button(name,async()=>{inspection.tab=name;renderDetails();},'trace-record-tab');
+      tab.dataset.requestFocus=`trace:tab:${name}`;tab.setAttribute('aria-pressed',String(name===active));tabs.append(tab);
+    }
+    pane.append(tabs);
+    const fields=element('div','trace-record-body');pane.append(fields);
+    if(input){
+      fields.append(element('p','muted','Source: admitted user input'));
+      fields.append(element('pre','native-literal',active==='Raw'?json({prompt:input}):input));
+      continue;
+    }
+    if(active==='Raw'){
+      fields.append(element('pre','native-literal',json(captured)));continue;
+    }
+    if(active==='Summary'){
+      fields.append(properties({Source:summary,Status:last.status,Duration:last.duration_ns==null?undefined:duration(last.duration_ns),
+        Started:first.payload.occurred_at,'Error code':last.error_code,Tokens:last.token_usage?usageLabel(last.token_usage):undefined}));
+      if(isModel || isTool)for(const {payload:event,step_event_seq:ordinal} of captured){
+        const record=element('details','trace-record-event');
+        record.append(element('summary','',`#${ordinal} · ${event.kind==='MODEL_REQUEST'?'Model input':event.kind==='MODEL_RESPONSE'?'Model response':event.kind.replaceAll('_',' ').toLowerCase()} · ${event.status}`),properties(event));
+        fields.append(record);
+      }
+    } else if(!isModel) {
+      fields.append(element('p','muted','This event has no captured content preview.'));continue;
+    }
+    if(!isModel)continue;
+    const read=inspection.model;
+    if(active==='Summary'){
+      if(read?.items?.some(item=>item.response!=null)){
+        const preview=button('Preview ›',async()=>{inspection.tab='Preview';renderDetails();},'trace-record-link');
+        fields.append(preview);
+        const excerpt=read.items.flatMap(item=>item.response?.parts || [])
+          .filter(part=>part.part_kind==='text' && typeof part.content==='string')
+          .map(part=>part.content).join('\n');
+        if(excerpt)fields.append(element('p','trace-preview-text',excerpt.length>600?excerpt.slice(0,600)+'…':excerpt));
+      }
+      continue;
+    }
+    if(!state.config.turn_model_messages)fields.append(element('p','muted','Model message capture is not available.'));
+    else if(read?.error)fields.append(element('p','source-warning',read.error));
+    else if(!read?.items)fields.append(element('p','muted','Loading captured model messages…'));
+    else if(!read.items.length)fields.append(element('p','muted','No model messages were captured for this request.'));
+    else for(const item of read.items)sdkMessages(fields,item,`${inspection.turnId}:${seq}`);
+  }
+  if(!pane.children.length){
+    const title=element('div','trace-record-heading');title.append(element('strong','','Record details'));
+    pane.append(title,element('p','trace-record-empty','Select an event to inspect its details.'));
+  }
+}
+async function loadOrdinaryInspection(turnId,more=false) {
+  if(!nativeTurnInspector() || $('inspector').hidden || !turnId || !state.selectedSession)return;
+  const session=state.selectedSession,generation=state.generation,detail=++state.detailGeneration;
+  const current=()=>detail===state.detailGeneration && generation===state.generation
+    && session===state.selectedSession && nativeTurnInspector() && !$('inspector').hidden;
+  if(!more || ordinaryInspection?.session!==session || ordinaryInspection.turnId!==turnId){
+    ordinaryInspection={session,turnId,cursor:null};
+    state.tab='trace';state.details=[];state.traceSelection=null;
+    clear('trace-stats');
+    $('conversation-view').scrollTop=0;
+    $('trace-earlier-turns').hidden=!state.turnCursor;
+    $('execution-meta').textContent='Turn '+short(turnId);
+    $('inspector-content').classList.remove('native-reader','turn-trace');clear('inspector-content');
+  }
+  $('detail-more').hidden=true;
+  if(!more)$('inspector-content').append(element('p','muted','Loading turn trace…'));
+  try {
+    const page=await api(sessionURL(session,'',{turn_id:turnId,trace:'true',limit:'50',
+      ...(ordinaryInspection.cursor?{cursor:ordinaryInspection.cursor}:{})}));
+    if(!current())return;
+    ordinaryInspection.cursor=page.next_cursor;
+    state.details.push(...page.items);renderDetails();
+    $('detail-more').hidden=!ordinaryInspection.cursor;
+  } catch(error){
+    if(!current())return;
+    if(!more){
+      clear('inspector-content');
+      $('inspector-content').append(element('p','source-warning',error.message));
+    }
+    $('detail-more').hidden=!ordinaryInspection.cursor;
+    throw error;
+  }
+}
+$('inspector-toggle').onclick=()=>{
+  $('action-menu').open=false;
+  const open=$('inspector').hidden,reuseNative=state.conversationMode==='original';
+  showInspector(open,true);
+  if(!open)return;
+  return loadDetail(false,{},reuseNative).catch(showError);
+};
 $('inspector-close').onclick=()=>showInspector(false,true);
 $('show-active').onclick=()=>{const id=state.session?.active_execution_id;if(id){showInspector(true,true);selectExecution(id).catch(showError);}};
 $('action-menu').onkeydown=event=>{if(event.key==='Escape'){$('action-menu').open=false;$('actions-toggle').focus();}};
@@ -2193,21 +3223,38 @@ $('detail-recovery').onclick=()=>openRecovery().catch(showError);
 $('open-form').onsubmit=event=>{Promise.resolve(openExact(event)).catch(showError);};
 $('filter').oninput=renderList;$('list-action').onchange=setListFilterAvailability;
 $('filter-form').onsubmit=event=>{event.preventDefault();(state.view==='executions' && $('list-action').value==='recent'?loadRecentExecutions():loadList()).catch(showError);};
-$('native-mode').onclick=()=>{state.readerExpanded.delete('reader:tools');closeRunActions();$('action-menu').open=false;state.conversationMode='original';showInspector(false);renderPage();renderConversation();$('conversation').scrollTop=0;$('native-mode').focus();return loadNativeTimeline().catch(showError);};
+$('native-mode').onclick=()=>{
+  state.readerExpanded.delete('reader:tools');closeRunActions();$('action-menu').open=false;state.conversationMode='original';showInspector(false);renderPage();renderConversation();$('conversation').scrollTop=0;$('native-mode').focus();return loadNativeTimeline().catch(showError);};
 $('chat-mode').onclick=()=>{state.readerExpanded.delete('reader:tools');$('action-menu').open=false;state.conversationMode='chat';showInspector(false);renderPage();renderConversation();($('prompt').disabled?$('chat-mode'):$('prompt')).focus();};
-$('activity-mode').onclick=()=>{state.readerExpanded.delete('reader:tools');closeRunActions();$('action-menu').open=false;showInspector(true);state.conversationMode='activity';state.tab='trace';renderPage();return loadDetail().catch(showError);};
-$('list-more').onclick=()=>loadList(true).catch(showError);$('turns-more').onclick=()=>moreTurns().catch(showError);
-$('detail-more').onclick=()=>loadDetail(true,state.detailSelectors).catch(showError);
-$('refresh').onclick=()=>{if(state.view==='sessions' && state.selectedSession && !hasExecutionStream(state.observedExecution))watchSession(state.selectedSession,{restart:true});if(!state.cancellationNoticeId)notice('');return (async()=>{if(state.view==='metrics'){await loadMetrics();return;}const generation=state.generation,executionGeneration=state.executionGeneration;await refreshSelected();if(generation===state.generation && executionGeneration===state.executionGeneration)await syncObservation({refresh:true});})().catch(showError);};
+$('activity-mode').onclick=()=>{
+  state.readerExpanded.delete('reader:tools');closeRunActions();$('action-menu').open=false;
+  showInspector(true);state.conversationMode='activity';state.tab='trace';renderPage();
+  return (nativeTurnInspector()?loadOrdinaryInspection(chooseOrdinaryInspectionTurn()):loadDetail()).catch(showError);
+};
+$('list-more').onclick=()=>loadList(true).catch(showError);
+$('trace-earlier-turns').onclick=$('turns-more').onclick=()=>moreTurns().catch(showError);
+$('detail-more').onclick=()=>(
+  nativeTurnInspector()?loadOrdinaryInspection(ordinaryInspection?.turnId,true):loadDetail(true,state.detailSelectors)
+).catch(showError);
+$('refresh').onclick=()=>{if(state.config?.turn_sessions && state.view==='sessions'){
+    if(sessionWatch?.source.readyState===EventSource.CLOSED)stopSessionWatch();
+    return openSelection(state.selectedSession,null).then(()=>loadList()).catch(showError);
+  }if(state.view==='sessions' && state.selectedSession && !hasExecutionStream(state.observedExecution))watchSession(state.selectedSession,{restart:true});if(!state.cancellationNoticeId)notice('');return (async()=>{if(state.view==='metrics'){await loadMetrics();return;}const generation=state.generation,executionGeneration=state.executionGeneration;await refreshSelected();if(generation===state.generation && executionGeneration===state.executionGeneration)await syncObservation({refresh:true});})().catch(showError);};
 let settingsRequest=null;
 $('settings').onclick=()=>{
-  if(!settingsRequest)settingsRequest=api('/api/config').then(config=>{state.config=config;showSettings();}).catch(showError).finally(()=>{settingsRequest=null;});
+  if(!settingsRequest)settingsRequest=api('/api/config').then(config=>{state.config=config;renderComposerModel();showSettings();}).catch(showError).finally(()=>{settingsRequest=null;});
   return settingsRequest;
 };
 $('export').onclick=()=>{closeRunActions();return exportResult().catch(showError);};
+$('choose-attachments').onclick=()=>$('turn-files').click();
+$('turn-files').onchange=selectAttachments;
 $('rename-session').onclick=()=>sessionAction('update').catch(showError);$('fork-session').onclick=()=>sessionAction('fork').catch(showError);$('close-session').onclick=()=>sessionAction('close').catch(showError);
 $('inspector-active-stop').onclick=()=>executionAction('cancel',{active:true}).catch(showError);
-$('cancel').onclick=()=>executionAction('cancel',{active:true}).catch(showError);$('stop-run').onclick=()=>executionAction('cancel').catch(showError);$('retry').onclick=()=>{closeRunActions();return executionAction('retry').catch(showError);};$('fork-run').onclick=()=>{closeRunActions();return executionAction('fork').catch(showError);};$('end-stopped').onclick=()=>endStoppedExecution();$('end-active').onclick=()=>endStoppedExecution({active:true});
+const activeConversationAction=()=> (state.config?.turn_sessions && state.view==='sessions'
+  ? ordinaryAction(activeTurnAction()) : executionAction('cancel',{active:true})).catch(showError);
+$('reader-stop').onclick=activeConversationAction;
+$('send').onclick=()=>{if($('send').type==='button')return activeConversationAction();};
+$('stop-run').onclick=()=>executionAction('cancel').catch(showError);$('retry').onclick=()=>{closeRunActions();return executionAction('retry').catch(showError);};$('fork-run').onclick=()=>{closeRunActions();return executionAction('fork').catch(showError);};$('end-stopped').onclick=()=>endStoppedExecution();$('end-active').onclick=()=>endStoppedExecution({active:true});
 $('metrics-form').onsubmit=event=>loadMetrics(event).catch(showError);
 document.querySelectorAll('[data-view]').forEach(node=>node.onclick=()=>navigateView(node.dataset.view));
 $('detail-view').onchange=()=>{state.tab=$('detail-view').value;return loadDetail().catch(showError);};

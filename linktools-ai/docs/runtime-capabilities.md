@@ -239,14 +239,28 @@ uses durable admission and recoverable prepared terminal handoffs rather than
 single-transaction deferred turns. Shared SQL engines, caches, and object stores
 remain borrowed resources.
 
-The workspace ACP convenience entry point accepts the same execution declaration:
-`ACPApplication.for_workspace(workspace, features=features, storage=storage,
-execution=ExecutionCapability(retain_history=True))`. Supply coordination through
-`PersistenceStorage(..., coordination=cache)` or its convenience factories. Without
-an explicit execution declaration, ACP defaults to retaining history. An explicit
-declaration controls retention and commit; workspace
-capability remains built in. A cache attached only to storage does not enable
-turn or stream coordination.
+For an embedded ACP workspace using SQL sessions and the default workspace
+tools, explicitly configure Session checkpoints and supply your host's session
+authorization policy. Keep Conversation, Step and tool receipts in the same SQL
+storage group:
+
+```python
+features.capability(SessionCapability(checkpoints=True), scope="runtime")
+application = ACPApplication.for_workspace(
+    workspace,
+    features=features,
+    storage=PersistenceStorage.sqlite(database_path),
+    authorization=host_session_authorization,
+    execution=ExecutionCapability(retain_history=True),
+)
+```
+
+Text-only sessions and supported read-only tool configurations do not require
+checkpoints. The optional Execution declaration controls independent Execution
+retention and commit behavior; by default ACP retains Execution history. To
+supply coordination, use `PersistenceStorage(..., coordination=cache)` or its
+convenience factories. A cache attached only to storage does not enable turn or
+stream coordination.
 
 Hosts can register a synchronous callback with
 `runtime.sessions.observe_turns(handler)` and unsubscribe with the returned
@@ -417,12 +431,14 @@ Explicit publication and genuine checkpoint/tool-effect boundaries can require
 earlier source work. After a terminal plan freezes a prefix, ordinary Trace
 flush/close cannot publish it independently to bypass unresolved terminal control.
 
-Trace and Checkpoint require the same transaction resource as Execution;
-incompatible routes fail during initialization. Conversation follows its existing
-same-group atomic transaction or prepared cross-store handoff. Compatible explicit
-capability prefixes join the terminal resource; unrelated physical resources
-cannot join that transaction. Neither one transaction nor fewer optional
-projections implies one SQL statement or fewer total network operations.
+Checkpoint uses the same transaction resource as Execution. The durable
+Execution Trace mode described above also requires a shared resource; a split
+Trace route cannot admit an Execution that uses that atomic policy. Ordinary
+SQL session turns can route optional Trace independently: the session neither
+uses it as recovery evidence nor waits for a write. Dropped observations do not
+change the session result. Conversation otherwise follows its existing same-group
+atomic transaction or prepared cross-store handoff. Neither one transaction nor
+fewer optional projections implies one SQL statement or fewer network operations.
 
 Buffer rejection is not a provider failure to retry. Trace, terminal-buffered
 Execution and buffered capability owners can settle a known rejection as FAILED/CANCELLED using

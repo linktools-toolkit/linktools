@@ -50,8 +50,9 @@ async def test_portable_export_identifies_native_dependency_without_runtime_feat
         async with Persistence.open("backup", storage=storage) as state:
             async with Runtime.open(persistence=state,
                 features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
-                session = await runtime.agents.get().create_session("session")
-                execution = await session.start("question", idempotency_key="input")
+                # This boundary concerns an Execution-owned external StepStore,
+                # not the canonical Session's transaction-owned transcript.
+                execution = await runtime.agents.get().start("question", idempotency_key="input")
                 await asyncio.wait_for(entered.wait(), 5)
                 if interrupted and checkpointed:
                     await asyncio.wait_for(runtime.handoff(), 5)

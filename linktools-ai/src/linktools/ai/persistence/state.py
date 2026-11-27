@@ -27,11 +27,12 @@ if TYPE_CHECKING:
 
 ValueT = TypeVar("ValueT")
 
-OPERATION_KEY_MAX_BYTES = 768
-STREAM_KEY_MAX_BYTES = 768
-STORE_KEY_MAX_BYTES = 128
+# Two length-prefixed 128-byte caller identities, a tag, 32-byte partition and revision.
+OPERATION_KEY_MAX_BYTES = 301
+STREAM_KEY_MAX_BYTES = RECORD_KEY_MAX_BYTES
+STORE_KEY_MAX_BYTES = 64
 _STORE_SOURCE_MAX_BYTES = 768
-RELATION_KEY_MAX_BYTES = 768
+RELATION_KEY_MAX_BYTES = RECORD_KEY_MAX_BYTES
 PARENT_KEY_MAX_BYTES = RECORD_KEY_MAX_BYTES
 
 
@@ -338,11 +339,14 @@ class StoredRecord:
     payload_bytes: bytes | None = None
 
     def __post_init__(self) -> None:
-        from ._record_owner import record_owner_table, record_owner_values
+        from ._record_owner import (
+            RECORD_OWNER_RELATION_WIDTHS, record_owner_table, record_owner_values,
+        )
 
-        record_owner_values(record_owner_table(self.key), {
+        owner = record_owner_table(self.key)
+        record_owner_values(owner, {
             "kind": self.kind, "subject_id": self.subject_id, "parent_key": self.parent_key, "state": self.state,
-            "lease_owner": self.lease_owner, "lease_fence": self.lease_fence,
+            "sort_key": self.sort_key, "lease_owner": self.lease_owner, "lease_fence": self.lease_fence,
             "lease_expires_at": self.lease_expires_at, "payload_bytes": self.payload_bytes,
         })
         if self.payload_bytes is not None and type(self.payload_bytes) is not bytes:
@@ -352,6 +356,13 @@ class StoredRecord:
             validate_relation_key(self.scope_key)
         if self.parent_key is not None:
             validate_parent_key(self.parent_key)
+        widths = RECORD_OWNER_RELATION_WIDTHS.get(owner)
+        if widths is not None:
+            scope_width, parent_width = widths
+            if self.scope_key is not None and len(self.scope_key) > scope_width:
+                raise ValueError(f"{owner} scope exceeds its bounded relation size")
+            if self.parent_key is not None and len(self.parent_key) > parent_width:
+                raise ValueError(f"{owner} parent exceeds its bounded relation size")
         if self.subject_id is not None:
             _require_subject_id(self.subject_id)
         if not isinstance(self.kind, str) or not 0 < len(self.kind) <= 32:
@@ -829,17 +840,6 @@ class SqlStateFactReader(Protocol):
 
 
 @runtime_checkable
-class SqlStateSequenceReader(Protocol):
-    """Optional same-snapshot counter and bounded fact-window source."""
-
-    async def read_sequence_window(
-        self, key: bytes, *, before: int | None, limit: int, include_next: bool = False,
-    ) -> tuple[int, tuple[StoredFact, ...]]:
-        """Capture a counter and bounded facts; include_next reserves one observed tail."""
-        ...
-
-
-@runtime_checkable
 class SqlStateTransaction(Protocol):
     """Execute prepared SQL inside the current writable storage callback.
 
@@ -893,13 +893,6 @@ class _ReadOnlyStateTransaction(StateTransaction):
         if not isinstance(self._transaction, SqlStateRecordReader):
             raise StateTransactionNestingError("joined record reads require SQL storage")
         return await self._transaction.read_joined_records(context, statement, keys=keys, sequence_keys=sequence_keys)
-
-    async def read_sequence_window(
-        self, key: bytes, *, before: int | None, limit: int, include_next: bool = False,
-    ) -> tuple[int, tuple[StoredFact, ...]]:
-        if not isinstance(self._transaction, SqlStateSequenceReader):
-            raise StateTransactionNestingError("sequence window reads require SQL storage")
-        return await self._transaction.read_sequence_window(key, before=before, limit=limit, include_next=include_next)
 
     async def read_joined_facts(
         self, context: "SqlStorageContext", statement: "Select",
@@ -1170,7 +1163,7 @@ class StateStorageGroup(Protocol):
     ) -> "StateStore | None":
         """Borrow an isolated logical store owned by this existing group.
 
-        Keys are opaque binary storage identities of 1..768 bytes. Open outside
+        Keys are opaque binary storage identities bounded by STORE_KEY_MAX_BYTES. Open outside
         transaction callbacks; opening never changes record keys or transaction boundaries.
         Read-only opens do not create partitions. The group owns their lifetime.
         """
@@ -1417,13 +1410,12 @@ def capability_receipt_key(
     namespace: str, tenant_id: str, capability_id: str, revision: int,
     run_id: str, write_key: str,
 ) -> bytes:
-    """Address the retained capability write identity in its operation family."""
-    return b"\x02" + _encode_key_components(
-        ("capability-write", validate_persistence_namespace(namespace),
-         validate_tenant_id(tenant_id), validate_capability_id(capability_id),
-         str(validate_capability_revision(revision)), validate_resource_id(run_id),
-         validate_capability_write_key(write_key)),
-        OPERATION_KEY_MAX_BYTES - 1,
+    """Address a capability write by its logical partition and exact run/write IDs."""
+    partition = capability_store_key(namespace, tenant_id, capability_id)
+    revision_bytes = validate_capability_revision(revision).to_bytes(8, "big")
+    return b"\x02" + partition + revision_bytes + _encode_key_components(
+        (validate_resource_id(run_id), validate_capability_write_key(write_key)),
+        OPERATION_KEY_MAX_BYTES - 1 - len(partition) - len(revision_bytes),
     )
 
 
@@ -1433,12 +1425,12 @@ def operation_key(
     runtime_domain: str,
     identity: str,
 ) -> bytes:
-    """Address an ordinary ledger ID independently of StateStore partitioning."""
-    return b"\x01" + _encode_key_components(
-        (validate_persistence_namespace(namespace), validate_tenant_id(tenant_id),
-         runtime_domain, validate_idempotency_key(identity)),
-        OPERATION_KEY_MAX_BYTES - 1,
-    )
+    """Address an ordinary ledger ID within its canonical logical partition."""
+    # SDK repositories may share one physical StateStore. The canonical
+    # partition separates them; the ledger stream retains the exact raw scope.
+    partition = state_store_key(namespace, tenant_id, runtime_domain)
+    identity_bytes = validate_idempotency_key(identity).encode("utf-8")
+    return b"\x01" + partition + len(identity_bytes).to_bytes(2, "big") + identity_bytes
 
 
 def sortable_timestamp(value: datetime, key: bytes) -> bytes:
@@ -1514,4 +1506,4 @@ STATE_GROUP_METADATA_KEY = _encode_key_components(("state-group-metadata",), STO
 STATE_GROUP_ARCHIVE_KEY = _encode_key_components(("state-group-archive",), STORE_KEY_MAX_BYTES)
 
 
-__all__ = ["StateContentDependencies", "state_content_members", 'STORE_KEY_MAX_BYTES', 'validate_store_key', 'capability_store_key', 'standalone_store_key', 'STATE_GROUP_METADATA_KEY', 'STATE_GROUP_ARCHIVE_KEY', 'STREAM_KEY_MAX_BYTES', 'validate_stream_key', 'capability_receipt_key', 'RECORD_KEY_MAX_BYTES', 'PARENT_KEY_MAX_BYTES', 'validate_record_key', 'validate_parent_key', 'RELATION_KEY_MAX_BYTES', 'validate_relation_key', 'OPERATION_KEY_MAX_BYTES', 'SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationReader', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'SqlStateSequenceReader', 'StateTransactionNestingError', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'validate_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_key', 'record_key', 'require_no_run_history_lock', 'scope_key', 'sortable_timestamp', 'state_store_key', 'stream_key', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']
+__all__ = ["StateContentDependencies", "state_content_members", 'STORE_KEY_MAX_BYTES', 'validate_store_key', 'capability_store_key', 'standalone_store_key', 'STATE_GROUP_METADATA_KEY', 'STATE_GROUP_ARCHIVE_KEY', 'STREAM_KEY_MAX_BYTES', 'validate_stream_key', 'capability_receipt_key', 'RECORD_KEY_MAX_BYTES', 'PARENT_KEY_MAX_BYTES', 'validate_record_key', 'validate_parent_key', 'RELATION_KEY_MAX_BYTES', 'validate_relation_key', 'OPERATION_KEY_MAX_BYTES', 'SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationReader', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'validate_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_key', 'record_key', 'require_no_run_history_lock', 'scope_key', 'sortable_timestamp', 'state_store_key', 'stream_key', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']

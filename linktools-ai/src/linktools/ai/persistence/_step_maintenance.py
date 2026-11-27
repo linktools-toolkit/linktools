@@ -48,21 +48,21 @@ async def inspect_native_message_tables(
     """
     from sqlalchemy import inspect
 
-    names = ("ai_step_snapshots", "ai_step_sequences", "ai_step_messages")
+    names = ("ai_step_snapshots", "ai_message_sequences", "ai_messages")
     async with context.engine.connect() as connection:
         present = await connection.run_sync(
             lambda connection: tuple(inspect(connection).has_table(name) for name in names),
         )
     actual = {name for name, exists in zip(names, present) if exists}
     required = set(names).intersection(expected.tables)
-    content = {"ai_step_sequences", "ai_step_messages"}
+    content = {"ai_message_sequences", "ai_messages"}
     if require_content:
         required.update(content)
-    if actual == {"ai_step_messages"} and required.issubset(actual):
+    if actual == {"ai_messages"} and required.issubset(actual):
         # Typed archive payloads share the message relation without owning a
         # Native sequence tree. Never skip a Native or malformed partition.
         from ._step_schema import native_message_sql_tables
-        table = native_message_sql_tables()["ai_step_messages"]
+        table = native_message_sql_tables()["ai_messages"]
         async with context.sessions() as session:
             await context.dialect.begin_consistent_read(session)
             if await native_message_partitions(context, session, table):
@@ -142,6 +142,74 @@ async def scan_native_message_roots(group: "StateStorageGroup") -> tuple[NativeM
     return tuple(roots)
 
 
+def _canonical_checkpoint_scope(metadata: "MetaData", store_key: bytes):
+    from ..steps import NATIVE_STORE_KEY_MAX_BYTES
+    from ._record_key import decode_key_components
+    from .state import state_store_key
+
+    turns = metadata.tables.get("ai_session_turns")
+    if turns is None:
+        return None, None
+    _, namespace, tenant_id = decode_key_components(store_key, NATIVE_STORE_KEY_MAX_BYTES)
+    return turns, state_store_key(namespace, tenant_id, "regenerable-session")
+
+
+def canonical_checkpoint_prune_guard(metadata: "MetaData", store_key: bytes, run_id: str):
+    """Pause freezes the bounded retained set; the exact checkpoint remains readable."""
+    from sqlalchemy import exists, true
+
+    turns, scope = _canonical_checkpoint_scope(metadata, store_key)
+    if turns is None:
+        return true()
+    return ~exists().where(
+        turns.c.scope_key == scope, turns.c.turn_id == run_id.encode("utf-8"),
+        turns.c.state.in_(("waiting", "ready")),
+    )
+
+
+async def _require_paused_checkpoints(
+    session: "AsyncSession", metadata: "MetaData", snapshots: "Table | None", store_key: bytes,
+) -> None:
+    """Fail before the offline sweep if any exact persisted pause root was lost."""
+    from sqlalchemy import false, select, tuple_
+    from ..steps import encode_native_replay_key
+    from ._session_turn_sql import CanonicalDeferredFrontier, SessionTurnKey
+
+    turns, scope = _canonical_checkpoint_scope(metadata, store_key)
+    if turns is None:
+        return
+    # Cross-database pauses are verified by their exact source pin below
+    # when sweeping the source database; the target holds no local checkpoint.
+    after = 0
+    while True:
+        rows = (await session.execute(select(
+            turns.c.id, turns.c.session_key, turns.c.turn_id, turns.c.generation, turns.c.result_json,
+        ).where(turns.c.scope_key == scope, turns.c.id > after,
+                turns.c.state.in_(("waiting", "ready")),
+                turns.c.split_source_receipt.is_(None)).order_by(turns.c.id).limit(128))).mappings().all()
+        if not rows:
+            return
+        if snapshots is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        expected = []
+        for row in rows:
+            key = SessionTurnKey(row["session_key"].decode("utf-8"), row["turn_id"].decode("utf-8"))
+            frontier = CanonicalDeferredFrontier.from_json(key, row["generation"], row["result_json"])
+            expected.append((key.turn_id, key.session_id, encode_native_replay_key(frontier.checkpoint_id)))
+        snapshot_keys = tuple_(snapshots.c.run_id, snapshots.c.conversation_id, snapshots.c.idempotency_key)
+        observed = (await session.execute(select(
+            snapshots.c.run_id, snapshots.c.conversation_id, snapshots.c.idempotency_key,
+        ).where(
+            snapshots.c.store_locator == native_store_locator(store_key), snapshots.c.store_key == store_key,
+            snapshots.c.pruned == false(), snapshot_keys.in_(expected),
+        ))).all()
+        if set(observed) != set(expected):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if len(rows) < 128:
+            return
+        after = rows[-1]["id"]
+
+
 async def purge_step_content(
     context: "SqlStorageContext", metadata: "MetaData", store_key: bytes, *,
     group: StateStorageGroup | None = None,
@@ -185,12 +253,23 @@ async def purge_step_content(
         context, metadata if group is None else group.metadata, require_content=True,
     )
     snapshots = metadata.tables["ai_step_snapshots"] if "ai_step_snapshots" in tables else None
-    sequences = metadata.tables["ai_step_sequences"]
-    messages = metadata.tables["ai_step_messages"]
+    sequences = metadata.tables["ai_message_sequences"]
+    messages = metadata.tables["ai_messages"]
 
     locator = native_store_locator(store_key)
 
+    ordinary_ranges = []
+    if group is not None:
+        from ._session_transcript import scan_ordinary_message_roots
+        async for root in scan_ordinary_message_roots(group):
+            if root.group_id != group_id:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            if root.store_key == store_key:
+                ordinary_ranges.append(root.slices)
+
     async def mutate(session: "AsyncSession") -> StepContentCleanupResult:
+        if group is not None:
+            await _require_paused_checkpoints(session, group.metadata, snapshots, store_key)
         roots = [] if snapshots is None else (await session.execute(select(
             snapshots.c.store_key, snapshots.c.sequence_root, snapshots.c.messages, snapshots.c.pruned,
         ).where(snapshots.c.store_locator == locator, snapshots.c.store_key == store_key))).mappings().all()
@@ -199,8 +278,48 @@ async def purge_step_content(
             sequences.c.left_sha256, sequences.c.right_sha256, sequences.c.next_sha256,
         ).where(sequences.c.store_locator == locator, sequences.c.store_key == store_key))).mappings().all()
         closure = NativeMessageClosure(rows)
+        for ranges in ordinary_ranges:
+            closure.mark(store_key, ranges)
         for snapshot in roots:
             closure.mark_snapshot(snapshot)
+        # Cross-store handoffs are retained by their source run, not by
+        # lease age or by scanning Conversation from this database.
+        runs = metadata.tables["ai_step_runs"]
+        has_runs = await session.run_sync(lambda sync: inspect(sync.connection()).has_table(runs.name))
+        pins = () if not has_runs else (await session.execute(select(
+            runs.c.run_id, runs.c.conversation_id, runs.c.turn_source_pin,
+        ).where(runs.c.store_locator == locator, runs.c.store_key == store_key,
+                runs.c.turn_source_phase.in_(("sealed", "published", "waiting", "ready", "resuming", "resume_hold"))))).mappings()
+        from ._message_root import NativeMessageRoot
+        from ..steps import encode_native_replay_key
+        checkpoint_keys = []
+        for pin in pins:
+            try:
+                data = pin["turn_source_pin"]
+                if data["transcript"] is not None:
+                    root = NativeMessageRoot.from_json(data["transcript"])
+                    if root.group_id != group_id or root.store_key != store_key:
+                        raise ValueError("split transcript pin belongs to another store")
+                    closure.mark(store_key, root.slices)
+                if data["checkpoint_id"] is not None:
+                    checkpoint_keys.append((pin["run_id"], pin["conversation_id"],
+                                            encode_native_replay_key(data["checkpoint_id"])))
+            except (ValueError, KeyError, TypeError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if checkpoint_keys:
+            from sqlalchemy import tuple_
+
+            if snapshots is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            identity = (snapshots.c.run_id, snapshots.c.conversation_id, snapshots.c.idempotency_key)
+            for offset in range(0, len(checkpoint_keys), 128):
+                batch = checkpoint_keys[offset:offset + 128]
+                retained = (await session.execute(select(*identity).where(
+                    snapshots.c.store_locator == locator, snapshots.c.store_key == store_key,
+                    snapshots.c.pruned.is_(False), tuple_(*identity).in_(batch),
+                ))).all()
+                if set(retained) != set(batch):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         for root in owner_roots:
             if root.store_key == store_key:
                 closure.mark(store_key, root.slices)

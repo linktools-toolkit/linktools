@@ -3,6 +3,7 @@
 """Pending turns acquire durable producer authority before effects begin."""
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -22,12 +23,12 @@ from .test_pending_turn_commit import (
     _NAMESPACE,
     _PendingTurn,
     _TurnState,
-    _pending_turn,
+    _pending_turn as _session_pending_turn,
     _snapshot,
-    _stores,
     _turn_state,
 )
 from .test_runtime_storage_contracts import _runtime_commands
+from .test_session_admission import _session
 
 pytestmark = pytest.mark.asyncio
 
@@ -36,11 +37,40 @@ def _context() -> RuntimePayloadRef:
     return RuntimePayloadRef(StoredPayload.inline_json({"prepared": True}), None)
 
 
+@asynccontextmanager
+async def _promotion_state(backend: str, path: Path):
+    if backend == "memory":
+        async with _turn_state(backend, path) as state:
+            yield state
+        return
+    async with Persistence.open(_NAMESPACE, storage=_storage(backend, path), tenant_id="tenant") as storage:
+        # Only supplies fixture timestamps; the independent SQL request never
+        # attaches to a Session record or writes old ConversationState.
+        state = _TurnState(storage, _runtime_commands(storage, _NAMESPACE), _session())
+        # Bootstrap lazy archive identity before arming promotion-only transaction probes.
+        await storage.execution.executions.prepare_content(_pending_turn(state).reservation.execution)
+        yield state
+
+
+def _pending_turn(state: _TurnState, **options) -> _PendingTurn:
+    turn = _session_pending_turn(state, **options)
+    if state.storage.conversation.sessions is not None:
+        return turn
+    execution = replace(turn.reservation.execution, session_id=None, conversation_agent_run_id=None, conversation=False)
+    return replace(turn, reservation=replace(turn.reservation, execution=execution))
+
+
+def _source_group(state: _TurnState):
+    return state.storage.execution.executions.state_store.storage_group
+
+
 async def _promote(
     state: _TurnState, turn: _PendingTurn, context: RuntimePayloadRef | None,
 ) -> ExecutionRecord:
     return await state.commands.promote_pending_turn(
-        turn.reservation, expected_session=state.session, captured_input_context=context,
+        turn.reservation,
+        expected_session=state.session if state.storage.conversation.sessions is not None else None,
+        captured_input_context=context,
     )
 
 
@@ -69,22 +99,29 @@ async def _assert_promoted(
     assert head is not None and (head.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and head.history_seal_digest is None)
     assert execution.producer_generation == (2 if prepared else 0)
     assert bool(execution.producer_claim_id) is prepared
-    assert await storage.conversation.sessions.get(state.session.session_id, tenant_id="tenant") == replace(
-        state.session, active_execution_id=initial.execution_id,
-    )
+    sessions = storage.conversation.sessions
+    if sessions is not None:
+        assert await sessions.get(state.session.session_id, tenant_id="tenant") == replace(
+            state.session, active_execution_id=initial.execution_id,
+        )
+        assert await sessions.timeline_head(state.session.session_id, tenant_id="tenant") == 1
+        timeline = await sessions.list_timeline_turns(
+            state.session.session_id, tenant_id="tenant", start_turn_seq=1, end_turn_seq=2,
+        )
+        assert [item.execution_id for item in timeline] == [initial.execution_id]
+        assert not await sessions.list_timeline_commits(
+            state.session.session_id, tenant_id="tenant", start_turn_seq=1, end_turn_seq=2,
+        )
+    else:
+        assert execution.session_id is None and execution.conversation_agent_run_id is None
     events = (await storage.execution.events.list(initial.execution_id, tenant_id="tenant", after_event_seq=0, limit=20)).items
     assert [(item.event_seq, item.event_type, item.payload) for item in events] == [(1, ExecutionEventType.EXECUTION_STARTED, {})]
-    assert await storage.conversation.sessions.timeline_head(state.session.session_id, tenant_id="tenant") == 1
-    timeline = await storage.conversation.sessions.list_timeline_turns(
-        state.session.session_id, tenant_id="tenant", start_turn_seq=1, end_turn_seq=2,
-    )
-    assert [item.execution_id for item in timeline] == [initial.execution_id]
-    assert not await storage.conversation.sessions.list_timeline_commits(
-        state.session.session_id, tenant_id="tenant", start_turn_seq=1, end_turn_seq=2,
-    )
     archive = storage.run_store.read_store(PersistenceDomain.CONVERSATION)
     assert await archive.checkpoint_count(agent_run_id=turn.run.agent_run_id) == 0
-    assert [item async for item in archive.iter_session_messages("history", tenant_id="tenant")] == []
+    if sessions is not None:
+        assert [item async for item in archive.iter_session_messages("history", tenant_id="tenant")] == []
+    else:
+        assert await storage.conversation.histories.get("history", tenant_id="tenant") is None
 
 
 @pytest.mark.parametrize("backend", ("memory", "sqlite",))
@@ -92,10 +129,10 @@ async def _assert_promoted(
 async def test_pending_turn_promotion_commits_one_boundary_and_can_prepare_after_admission(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, prepared: bool,
 ) -> None:
-    async with _turn_state(backend, tmp_path) as state:
+    async with _promotion_state(backend, tmp_path) as state:
         turn = _pending_turn(state)
         context = _context() if prepared else None
-        group = _stores(state)[0].storage_group
+        group = _source_group(state)
         original = type(group).mutate
         boundaries = []
         transactions = set()
@@ -134,12 +171,13 @@ async def test_pending_turn_promotion_commits_one_boundary_and_can_prepare_after
             await _assert_promoted(state, turn, context, activated)
 
 
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
-@pytest.mark.parametrize("conflict", ("existing_request", "stale_session"))
+@pytest.mark.parametrize(("backend", "conflict"), (
+    ("memory", "existing_request"), ("sqlite", "existing_request"), ("memory", "stale_session"),
+))
 async def test_pending_turn_promotion_rejects_existing_request_or_changed_session_without_writes(
     tmp_path: Path, backend: str, conflict: str,
 ) -> None:
-    async with _turn_state(backend, tmp_path) as state:
+    async with _promotion_state(backend, tmp_path) as state:
         turn = _pending_turn(state)
         if conflict == "existing_request":
             existing = _pending_turn(state, execution_id="preexisting")
@@ -162,10 +200,10 @@ async def test_pending_turn_promotion_rejects_existing_request_or_changed_sessio
 async def test_pending_turn_promotion_last_stage_failure_rolls_back_all_domains(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, prepared: bool,
 ) -> None:
-    async with _turn_state(backend, tmp_path) as state:
+    async with _promotion_state(backend, tmp_path) as state:
         turn = _pending_turn(state)
         context = _context() if prepared else None
-        group = _stores(state)[0].storage_group
+        group = _source_group(state)
         original = type(group).mutate
         before = await _snapshot(state)
         staged = []
@@ -197,10 +235,10 @@ async def test_pending_turn_promotion_last_stage_failure_rolls_back_all_domains(
 async def test_pending_turn_promotion_lost_ack_requires_committed_readback_for_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, prepared: bool, readback_available: bool,
 ) -> None:
-    async with _turn_state(backend, tmp_path) as state:
+    async with _promotion_state(backend, tmp_path) as state:
         turn = _pending_turn(state)
         context = _context() if prepared else None
-        group = _stores(state)[0].storage_group
+        group = _source_group(state)
         mutate, read_many = type(group).mutate, type(group).read_many
         committed = []
         authorized = []
@@ -233,7 +271,7 @@ async def test_pending_turn_promotion_lost_ack_requires_committed_readback_for_a
         before = await _snapshot(state)
         with pytest.raises(AIError) as replay:
             await _promote(state, turn, context)
-        assert replay.value.code is ErrorCode.SESSION_BUSY
+        assert replay.value.code is (ErrorCode.SESSION_BUSY if backend == "memory" else ErrorCode.STORAGE_CONFLICT)
         assert await _snapshot(state) == before
 
 
@@ -241,14 +279,14 @@ async def test_pending_turn_promotion_lost_ack_requires_committed_readback_for_a
 async def test_pending_turn_promotion_independent_connections_grant_only_one_candidate_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prepared: bool,
 ) -> None:
-    async with _turn_state("sqlite", tmp_path) as first:
+    async with _promotion_state("sqlite", tmp_path) as first:
         second_storage = Persistence(_storage("sqlite", tmp_path))
         await second_storage.initialize(namespace=_NAMESPACE, tenant_id="tenant")
         try:
             second = _TurnState(second_storage, _runtime_commands(second_storage, _NAMESPACE), first.session)
             turns = (_pending_turn(first, execution_id="first"), _pending_turn(second, execution_id="second"))
             context = _context() if prepared else None
-            groups = tuple(_stores(state)[0].storage_group for state in (first, second))
+            groups = tuple(_source_group(state) for state in (first, second))
             assert groups[0] is not groups[1] and groups[0].context.engine is not groups[1].context.engine
             original = type(groups[0]).mutate
             ready = asyncio.Event()
@@ -272,13 +310,13 @@ async def test_pending_turn_promotion_independent_connections_grant_only_one_can
             successful = [item for item in results if isinstance(item, ExecutionRecord)]
             errors = [item for item in results if isinstance(item, BaseException)]
             assert len(successful) == len(errors) == 1, results
-            assert isinstance(errors[0], AIError) and errors[0].code in {ErrorCode.SESSION_BUSY, ErrorCode.STORAGE_CONFLICT}
+            assert isinstance(errors[0], AIError) and errors[0].code is ErrorCode.STORAGE_CONFLICT
             winner = successful[0]
             winning_turn = next(turn for turn in turns if turn.reservation.execution.execution_id == winner.execution_id)
             await _assert_promoted(first, winning_turn, context, winner)
             losing_id = next(turn.reservation.execution.execution_id for turn in turns if turn is not winning_turn)
             assert await first.storage.execution.executions.get(losing_id, tenant_id="tenant") is None
-            assert await first.storage.execution.executions.get(losing_id, tenant_id="tenant") is None
+            assert await second.storage.execution.executions.get(losing_id, tenant_id="tenant") is None
             assert not (await first.storage.execution.events.list(losing_id, tenant_id="tenant", after_event_seq=0, limit=20)).items
         finally:
             await second_storage.close()

@@ -39,8 +39,9 @@ class TraceService(AbstractCapability[AgentContext[AppT]]):
     retain their batching behavior; Runtime seals the final execution tail.
     """
 
-    def __init__(self, capture: "AgentRunCapture") -> None:
+    def __init__(self, capture: "AgentRunCapture", *, canonical_lifecycle: bool = False) -> None:
         self._capture = capture
+        self._canonical_lifecycle = canonical_lifecycle
         self._tool_started_ns = {}
 
     id: str | None = "runtime.trace"
@@ -56,6 +57,8 @@ class TraceService(AbstractCapability[AgentContext[AppT]]):
         return CapabilityOrdering(position="innermost")
 
     async def before_run(self, ctx: PydanticRunContext[AgentContext[AppT]]) -> None:
+        if self._canonical_lifecycle:
+            return
         capture = self._bound_capture()
         await capture.before_run(ctx)
         registration = capture.native_registration
@@ -74,6 +77,8 @@ class TraceService(AbstractCapability[AgentContext[AppT]]):
         *,
         result: AgentRunResult[Any],
     ) -> AgentRunResult[Any]:
+        if self._canonical_lifecycle:
+            return result
         capture = self._bound_capture()
         await capture.after_run(ctx, result=result)
         await capture.context.save_checkpoint(
@@ -103,6 +108,8 @@ class TraceService(AbstractCapability[AgentContext[AppT]]):
         *,
         error: BaseException,
     ) -> AgentRunResult[Any]:
+        if self._canonical_lifecycle:
+            raise error
         capture = self._bound_capture()
         capture.capture_interrupted_node()
         capture.recorder.finish_transcript(interrupted=True)

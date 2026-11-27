@@ -166,6 +166,7 @@ class _ExecutionPayloadBuffer:
                 raise scope.failure
             if scope.sealed or scope.released:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+            # Confirmation carries the Execution ID, not the producer scope.
             entry = _Entry(uuid4().hex, hashlib.sha256(content).hexdigest())
             scope.entries.append(entry)
             scope.uncertain = (entry.id, execution_id, content)

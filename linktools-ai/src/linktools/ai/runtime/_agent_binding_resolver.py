@@ -19,6 +19,7 @@ from ..errors import AIError, ErrorCode
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
+    from ..persistence.contracts import ToolOperationRecord
 
 
 class _AgentBindingResolver:
@@ -93,6 +94,25 @@ class _AgentBindingResolver:
         compiler = await self._compiler_for_resolution()
         binding = compiler.restore(contract, model=model)
         return await self._resolve_binding(binding, compiler)
+
+    async def _restore_split_wait_binding(
+        self, contract: AgentBindingContract, original: "ToolOperationRecord",
+    ) -> AgentBinding:
+        """Restore only a catalog selection proven by the original deferred call."""
+        ref = original.capability_ref
+        if (contract.binding_digest != original.binding_digest
+                or ref is None or ref.kind != "tool"
+                or tuple(contract.agent_spec.allow_tools) != (ref.id,)):
+            # A wildcard/class/MCP selector or multiple candidates are not
+            # immutable facts in AgentBindingContract. The leaf proves only itself.
+            raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
+        binding = await self.restore(contract)
+        compiled = binding.compiled_agent
+        if (len(compiled.selected_tools) != 1 or compiled.selected_mcp or compiled.selected_skills
+                or compiled.selected_subagents or compiled.selected_capabilities
+                or (compiled.selected_tools[0].id, compiled.selected_tools[0].revision) != (ref.id, ref.revision)):
+            raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
+        return binding
 
     async def resolve_root(self, agent_id: str) -> AgentBindingContract:
         """Resolve one current Agent as a root execution target and its children."""

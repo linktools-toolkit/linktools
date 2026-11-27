@@ -15,13 +15,19 @@ from pydantic_ai_harness.step_persistence import (
 )
 
 from ._tool import RuntimeToolOperationBridge, ToolOperationBridge
+from ..core import ToolOperationStatus, deterministic_id
+from ..errors import AIError, ErrorCode
 from ..model.messages import native_checkpoint_messages
 from ..capability.steps import AtomicStepStore
 from ..persistence import MessageArchive, MessageSnapshot, SqlStepStore, StepWriteReceipt
 from ..persistence.runs import NativeCheckpoint
 
 if TYPE_CHECKING:
+    from ..persistence.contracts import ApprovalRecord, CheckpointRepositories, ToolOperationRecord
     from ..persistence.runs import RuntimeAgentRunStore
+    from ..persistence.state import StateStore
+    from ..persistence.turns import SessionTurnKey, SplitStepSourceObservation, SqlSessionTurns
+    from ._canonical_split_step import _CanonicalSplitStep
 
 
 class StepBoundaryCommitter(Protocol):
@@ -45,12 +51,209 @@ class RuntimeStepStore:
         self._tool_operations = tool_operations
         self._working_set = working_set
         self._commit_boundary = commit_boundary
+        self._canonical_turn_boundary = False
+        self._canonical_split_source: _CanonicalSplitStep | None = None
+        self._interrupted_checkpoint: str | None = None
+        self._split_resume_source: SplitStepSourceObservation | None = None
+        self._split_resume_approval: tuple[CheckpointRepositories, ApprovalRecord, ToolOperationRecord] | None = None
+        self._resume_generation: int | None = None
+        self._resume_step_base = 0
+        self._resume_run: RunRecord | None = None
         self._native_boundary = native_boundary
         self._output_retries_used = output_retries_used
         self._message_archive = MessageArchive()
         self._checkpoint_messages: tuple[MessageSnapshot, MessageSnapshot] | None = None
         if native_boundary and isinstance(tool_operations, RuntimeToolOperationBridge):
             tool_operations.bind_native_step_store(store)
+
+    @classmethod
+    def for_canonical_turn(
+        cls, native: SqlStepStore, tool_operations: RuntimeToolOperationBridge, *,
+        turn_store: "SqlSessionTurns", state_store: "StateStore",
+        key: "SessionTurnKey", generation: int, run_id: str,
+        output_retries_used: Callable[[], int] | None = None,
+        split_source: "_CanonicalSplitStep | None" = None,
+    ) -> "RuntimeStepStore":
+        """Publish checkpoints under the selected canonical turn authority."""
+        group = state_store.storage_group
+        context = getattr(group, "context", None)
+        if context is None or native.storage_context.engine is not context.engine:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY, "Step and its write authority require one SQL transaction")
+        if run_id != key.turn_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if split_source is not None and (
+            split_source._turns is not turn_store or split_source._store is not state_store
+            or split_source._context is not native.storage_context
+        ):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+        async def guard(transaction):
+            if split_source is None:
+                await turn_store.guard_step_in_transaction(transaction, key, generation=generation)
+            else:
+                await split_source.guard(transaction, key, generation=generation)
+
+        async def commit(*, run=None, events=(), snapshot=None):
+            records = (() if run is None else (run,)) + tuple(events) + (() if snapshot is None else (snapshot,))
+            if not records:
+                return None
+            if any(record.run_id != run_id for record in records):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            if store._resume_run is not None:
+                # AtomicStepPersistence emits a run_started draft for every SDK
+                # invocation. The existing native registration owns this turn.
+                run = None
+                events = tuple(store._resume_event(event) for event in events if event.kind != "run_started")
+                if snapshot is not None:
+                    snapshot = store._resume_snapshot(snapshot)
+                if not events and snapshot is None:
+                    return None
+            resume_source = store._split_resume_source
+            if resume_source is not None:
+                if (split_source is None
+                        or (resume_source.turn_id, resume_source.session_id, resume_source.generation)
+                        != (key.turn_id, key.session_id, generation)):
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                if snapshot is None or snapshot.state != "complete" or snapshot.idempotency_key is None:
+                    # Neither an event-only write nor another interrupted draft
+                    # can open the source or acknowledge events as persisted.
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            prepared = await native.prepare_step(run=run, events=events, snapshot=snapshot)
+
+            async def write(transaction):
+                return await native.write_prepared_step(transaction.transaction(state_store), prepared, turn_guard=guard)
+
+            if split_source is None:
+                receipt = await group.mutate((state_store,), write)
+                # A provisional or unknown commit must not seed native caches.
+                native.confirm_prepared_step(receipt)
+            elif resume_source is not None:
+                if store._split_resume_approval is not None:
+                    pending = store._split_resume_approval[2]
+                    observed = tool_operations._effect_receipts.get(pending.tool_call_id)
+                    settled = None if observed is None else observed.value
+                    if (settled is None or (settled.tool_operation_id, settled.owner, settled.fence,
+                                           settled.producer_generation)
+                            != (pending.tool_operation_id, tool_operations._owner, pending.fence + 1, generation)
+                            or settled.status not in (ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED)):
+                        raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+                receipt = await split_source.commit_resumed_checkpoint(prepared, source=resume_source)
+                store._split_resume_source = None
+                store._split_resume_approval = None
+                tool_operations._split_approved_operation = None
+            else:
+                # Split source owns initial adoption and cache confirmation.
+                receipt = await split_source.commit_step(prepared, key=key, generation=generation)
+            if snapshot is not None and snapshot.state == "interrupted":
+                store._interrupted_checkpoint = snapshot.idempotency_key
+            return receipt
+
+        def resuming_approval():
+            approved, source = store._split_resume_approval, store._split_resume_source
+            if approved is None:
+                return None
+            if source is None or split_source is None:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            checkpoint, approval, pending = approved
+
+            async def claim(transaction, request):
+                return await split_source._claim_resuming_approved_leaf(
+                    transaction, source, checkpoint=checkpoint, tenant_id=tool_operations._tenant_id,
+                    approval=approval, pending=pending, request=request,
+                )
+
+            return checkpoint.approvals.state_store, claim
+
+        tool_operations.prepare_canonical_boundaries(
+            native, state_store=state_store, key=key, generation=generation, guard=guard,
+            prepare_event=lambda event: store._resume_event(event),
+            resuming_approval=resuming_approval if split_source is not None else None,
+        )
+        store = cls(native, tool_operations, commit_boundary=commit, native_boundary=True,
+                    output_retries_used=output_retries_used)
+        store._canonical_turn_boundary = True
+        store._canonical_split_source = split_source
+        return store
+
+    def canonical_context_checkpoint(self) -> SqlStepStore | None:
+        return self._store if self._canonical_turn_boundary and isinstance(self._store, SqlStepStore) else None
+
+    def inherit_canonical_context(self, key: "SessionTurnKey", source_turn_id: str) -> bool:
+        """Inherit only a source already verified by the same native owner."""
+        native = self.canonical_context_checkpoint()
+        return native is not None and native.inherit_snapshot_baseline(key.turn_id, source_run_id=source_turn_id)
+
+    def require_interrupted_checkpoint(self) -> str:
+        """Return the exact confirmed checkpoint occurrence, never the latest query."""
+        if not self._canonical_turn_boundary or self._interrupted_checkpoint is None:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        return self._interrupted_checkpoint
+
+    async def bind_canonical_resume(
+        self, snapshot: ContinuableSnapshot, *, key: "SessionTurnKey", generation: int,
+        split_proof: "SplitStepSourceObservation | None" = None,
+        split_approval: "tuple[CheckpointRepositories, ApprovalRecord, ToolOperationRecord] | None" = None,
+        settled_only: bool = False,
+    ) -> None:
+        if (not self._canonical_turn_boundary or not isinstance(self._tool_operations, RuntimeToolOperationBridge)
+                or self._resume_run is not None or generation < 2
+                or snapshot.run_id != key.turn_id or snapshot.conversation_id != key.session_id):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if split_proof is not None and (
+            self._canonical_split_source is None or split_proof.phase != "resuming"
+            or split_proof.pin.waiting is None
+            or (split_proof.turn_id, split_proof.session_id, split_proof.generation)
+            != (key.turn_id, key.session_id, generation)
+            or snapshot.state != "interrupted" or snapshot.idempotency_key is None
+            or snapshot.idempotency_key != split_proof.pin.checkpoint_id
+        ):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if settled_only and (split_proof is None or split_approval is not None):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if split_approval is not None and (
+            split_proof is None or split_proof.pin.waiting is None or split_proof.pin.waiting.kind != "approval"
+            or split_approval[0].tools is not self._tool_operations._repository
+            or split_approval[2].tool_operation_id != split_proof.pin.waiting.operation_id
+        ):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        existing = await self._store.get_run(run_id=key.turn_id)
+        if existing is None or existing.conversation_id != key.session_id:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        self._resume_run = existing
+        self._resume_generation = generation
+        self._resume_step_base = snapshot.step_index
+        self._split_resume_source = split_proof
+        self._split_resume_approval = split_approval
+        self._tool_operations._settled_split_resume = settled_only
+        if split_approval is not None:
+            pending = split_approval[2]
+            if self._tool_operations._split_approval_ref != pending.capability_ref:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            self._tool_operations._split_approved_operation = pending
+            self._tool_operations._operation_ids[pending.tool_call_id] = pending.tool_operation_id
+
+            async def require_live_target() -> None:
+                if await self._canonical_split_source._turns.split_target_lease(
+                    key, generation=generation, cancelling=False, expired=False,
+                ) is None:
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+
+            self._tool_operations._require_active = require_live_target
+        self._tool_operations.confirm_native_run(existing)
+
+    def _resume_event(self, event: StepEvent) -> StepEvent:
+        if self._resume_generation is None:
+            return event
+        return replace(event, step_index=event.step_index + self._resume_step_base,
+                       idempotency_key=deterministic_id("canonical-step-event", self._resume_generation,
+                                                        event.idempotency_key)
+                       if event.idempotency_key is not None else None)
+
+    def _resume_snapshot(self, snapshot: ContinuableSnapshot) -> ContinuableSnapshot:
+        return replace(snapshot, step_index=snapshot.step_index + self._resume_step_base,
+                       idempotency_key=deterministic_id("canonical-step-snapshot", self._resume_generation,
+                                                        snapshot.idempotency_key)
+                       if snapshot.idempotency_key is not None else None)
 
     @property
     def runtime_bound(self) -> bool:
@@ -73,7 +276,9 @@ class RuntimeStepStore:
                 for run_id in {record.run_id for record in (run, snapshot, *events) if record is not None}:
                     self._working_set.invalidate_step_run(run_id)
             raise
-        source = None if run is None else (self._store.run_from_receipt(receipt)
+        source = None if run is None else self._resume_run
+        if source is None and run is not None:
+            source = (self._store.run_from_receipt(receipt)
                   if isinstance(self._store, SqlStepStore) and isinstance(receipt, StepWriteReceipt)
                   else receipt if isinstance(receipt, RunRecord) else run)
         if source is not None and source.run_id != run.run_id:
@@ -111,6 +316,9 @@ class RuntimeStepStore:
         return run
 
     async def register_run(self, record: RunRecord) -> None:
+        if self._canonical_turn_boundary:
+            await self.commit_step(run=record)
+            return
         receipt = None
         try:
             if isinstance(self._store, SqlStepStore):
@@ -135,6 +343,9 @@ class RuntimeStepStore:
         )
 
     async def append_event(self, event: StepEvent) -> None:
+        if self._canonical_turn_boundary:
+            await self.commit_step(events=(event,))
+            return
         await self._store.append_event(event)
 
     async def list_events(self, *, run_id: str) -> list[StepEvent]:
@@ -157,9 +368,11 @@ class RuntimeStepStore:
             source = self._message_archive.snapshot(snapshot.messages)
             previous = self._checkpoint_messages
             shared = 0 if previous is None else source.shared_prefix_length(previous[0])
+            suffix = native_checkpoint_messages(source[shared:])
+            if self._canonical_turn_boundary and isinstance(self._tool_operations, RuntimeToolOperationBridge):
+                suffix = self._tool_operations.checkpoint_interruptions(suffix)
             messages = self._message_archive.concatenate(
-                () if previous is None else previous[1][:shared],
-                native_checkpoint_messages(source[shared:]),
+                () if previous is None else previous[1][:shared], suffix,
             )
             self._checkpoint_messages = source, messages
         else:
@@ -174,6 +387,9 @@ class RuntimeStepStore:
         return encode(snapshot, output_retries_used=retries)
 
     async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
+        if self._canonical_turn_boundary:
+            await self.commit_step(snapshot=snapshot)
+            return
         stored_snapshot = self._encode_snapshot(snapshot)
         try:
             await self._store.save_snapshot(stored_snapshot)

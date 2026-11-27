@@ -10,11 +10,13 @@ import pytest
 
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
 from linktools.ai.persistence._snapshot_validation import validate_snapshot_references
-from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.snapshots import SnapshotLimits
+from linktools.ai.storage import InMemoryObjectStore
 
 from .test_session_timeline import _execution, _session, _commit_empty_turn
+from .test_session_timeline_window import _window_host
 
 
 @pytest.mark.asyncio
@@ -96,10 +98,9 @@ def test_timeline_projection_rejects_invalid_explicit_values(malformed: str) -> 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "sqlite"))
-async def test_snapshot_rejects_a_turn_without_its_canonical_execution(tmp_path: Path, backend: str) -> None:
-    storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "state.db")
-    async with Persistence.open("timeline-snapshot-owner", storage=storage, tenant_id="tenant") as state:
+async def test_snapshot_rejects_a_memory_turn_without_its_canonical_execution() -> None:
+    async with Persistence.open("timeline-snapshot-owner", storage=PersistenceStorage.in_memory(),
+                                tenant_id="tenant") as state:
         await state.conversation.sessions.create(_session())
         value = _execution("execution", status=ExecutionStatus.FAILED, prompt="original")
         await state.execution.executions.create(value)
@@ -114,4 +115,32 @@ async def test_snapshot_rejects_a_turn_without_its_canonical_execution(tmp_path:
         records[PersistenceDomain.EXECUTION] = ()
         with pytest.raises(AIError) as missing:
             validate_snapshot_references(records, {})
+        assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_native_snapshot_rejects_a_turn_without_its_session_owner(tmp_path: Path) -> None:
+    archive = InMemoryObjectStore("native-session-owner")
+    limits = SnapshotLimits(max_entries=1000, max_bytes=4 * 1024 * 1024)
+    async def export():
+        async with Persistence.open(
+            "window", storage=PersistenceStorage.sqlite(tmp_path / "state.db"),
+            tenant_id="tenant", read_only=True,
+        ) as reader:
+            return await reader.export_snapshot(object_store=archive, limits=limits)
+
+    async with _window_host(tmp_path) as (state, runtime, principal, _, _):
+        turn = await runtime.sessions.start(
+            "session", "original", agent="default", principal=principal, idempotency_key="capture",
+        )
+        assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        assert await export()
+
+        store = state.session_turns
+        async with store._context.engine.begin() as connection:
+            removed = await connection.execute(store._sessions.delete().filter_by(**store._session_values("session")))
+            assert removed.rowcount == 1
+
+        with pytest.raises(AIError) as missing:
+            await export()
         assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

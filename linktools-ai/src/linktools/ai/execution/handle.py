@@ -78,6 +78,7 @@ class Execution(Generic[AppT]):
     _task_cancel: Callable[
         [str | None, bool], Awaitable[CancelExecutionResult]
     ] | None = None
+    task_invocation_captured: bool = field(default=False, compare=False, repr=False, kw_only=True)
 
     @property
     def principal(self) -> Principal:

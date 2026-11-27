@@ -33,10 +33,7 @@ def build_repository_bundle(
         "operations": OperationLedgerRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id, domain=domain)
     }
     if domain is PersistenceDomain.CONVERSATION:
-        values.update(
-            sessions=SessionRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
-            histories=ConversationHistoryRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
-        )
+        values["histories"] = ConversationHistoryRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id)
     elif domain is PersistenceDomain.EXECUTION:
         values.update(
             budgets=BudgetRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),

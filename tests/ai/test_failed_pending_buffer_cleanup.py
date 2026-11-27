@@ -80,9 +80,8 @@ async def test_failed_unsubmitted_turn_preserves_error_and_releases_exact_stagin
                         cleanup_finished.set()
 
             monkeypatch.setattr(backend, "_cleanup_failed_pending_turn", cleanup)
-            session = await runtime.agents.get().create_session("session")
-            other = await runtime.agents.get().create_session("other-session")
-            failed = await session.start("first turn", idempotency_key="first")
+            agent = runtime.agents.get()
+            failed = await agent.start("first turn", idempotency_key="first")
             with pytest.raises(AIError) as caught:
                 await failed.wait(timeout_seconds=10)
             assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -101,11 +100,11 @@ async def test_failed_unsubmitted_turn_preserves_error_and_releases_exact_stagin
                 await failed.wait(timeout_seconds=10)
             assert repeated.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
-            # Failure of only the old scopes must not block either Session.
-            next_turn = await session.start("next request", idempotency_key="next")
+            # Failure of only the old scopes must not block other independent executions.
+            next_turn = await agent.start("next request", idempotency_key="next")
             next_result = await next_turn.wait(timeout_seconds=10)
             assert next_result.result.output == {"text": "independent next output"}
-            other_turn = await other.start("other request", idempotency_key="other")
+            other_turn = await agent.start("other request", idempotency_key="other")
             other_result = await other_turn.wait(timeout_seconds=10)
             assert other_result.result.output == {"text": "independent next output"}
             assert len({failed.execution_id, next_turn.execution_id, other_turn.execution_id}) == 3

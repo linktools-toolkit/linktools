@@ -13,11 +13,9 @@ from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, SessionStatus
 from linktools.ai.capability import ExecutionCapability
-from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.execution import ExecutionInputContext
 from linktools.ai.runtime._local import LocalExecutionBackend
 from pydantic_ai.messages import ModelResponse, TextPart
 
@@ -29,7 +27,7 @@ from ._session_tool_test_helpers import _split_sqlite_storage
 @pytest.mark.parametrize("change", ("cancel", "close", "metadata"))
 @pytest.mark.parametrize("restart", (False, True))
 async def test_admission_capture_is_stable_while_cancellation_stops_provider(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str, restart: bool,
+    monkeypatch: pytest.MonkeyPatch, change: str, restart: bool,
 ) -> None:
     launched, release = asyncio.Event(), asyncio.Event()
     calls = []
@@ -44,8 +42,6 @@ async def test_admission_capture_is_stable_while_cancellation_stops_provider(
         group.capability(native_checkpoint(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
-    first_state = PersistenceStorage.sqlite(tmp_path / "state.db")
-    second_state = PersistenceStorage.sqlite(tmp_path / "state.db")
     original = LocalExecutionBackend._run
 
     async def delayed(worker, *args, **kwargs):
@@ -54,7 +50,11 @@ async def test_admission_capture_is_stable_while_cancellation_stops_provider(
         return await original(worker, *args, **kwargs)
 
     monkeypatch.setattr(LocalExecutionBackend, "_run", delayed)
-    async with Persistence.open('launch-change', storage=first_state) as persistence_48, Runtime.open(persistence=persistence_48, features=model_features(models, group)) as first, Persistence.open('launch-change', storage=second_state) as persistence_48, Runtime.open(persistence=persistence_48, features=model_features(models, group)) as second:
+    async with (
+        Persistence.open("launch-change", storage=PersistenceStorage.in_memory()) as state,
+        Runtime.open(persistence=state, features=model_features(models, group)) as first,
+        Runtime.open(persistence=state, features=model_features(models, group)) as second,
+    ):
         session = await first.agents.get().create_session("session", metadata={"marker": "before"})
         execution = await session.start("question", idempotency_key="same")
         await asyncio.wait_for(launched.wait(), 5)
@@ -111,7 +111,7 @@ async def test_admission_capture_is_stable_while_cancellation_stops_provider(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("restart", (False, True))
 async def test_other_runtime_claims_before_delayed_worker_without_duplicate_provider(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restart: bool,
+    monkeypatch: pytest.MonkeyPatch, restart: bool,
 ) -> None:
     launched, release_first, provider_entered, release_provider = (asyncio.Event() for _ in range(4))
     calls, workers = [], []
@@ -128,8 +128,6 @@ async def test_other_runtime_claims_before_delayed_worker_without_duplicate_prov
         group.capability(native_checkpoint(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
-    first_state = PersistenceStorage.sqlite(tmp_path / "state.db")
-    second_state = PersistenceStorage.sqlite(tmp_path / "state.db")
     original = LocalExecutionBackend._run
 
     async def delayed(worker, *args, **kwargs):
@@ -140,7 +138,11 @@ async def test_other_runtime_claims_before_delayed_worker_without_duplicate_prov
         return await original(worker, *args, **kwargs)
 
     monkeypatch.setattr(LocalExecutionBackend, "_run", delayed)
-    async with Persistence.open('launch-winner', storage=first_state) as persistence_119, Runtime.open(persistence=persistence_119, features=model_features(models, group)) as first, Persistence.open('launch-winner', storage=second_state) as persistence_119, Runtime.open(persistence=persistence_119, features=model_features(models, group)) as second:
+    async with (
+        Persistence.open("launch-winner", storage=PersistenceStorage.in_memory()) as state,
+        Runtime.open(persistence=state, features=model_features(models, group)) as first,
+        Runtime.open(persistence=state, features=model_features(models, group)) as second,
+    ):
         await first.agents.get().create_session("session")
         one = await first.agents.get().session("session").start("question", idempotency_key="same")
         await asyncio.wait_for(launched.wait(), 5)
@@ -180,7 +182,6 @@ async def test_restartable_launch_reuses_reads_but_requires_attempt_claim(
     async with Persistence.open("initial-capture", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
     ) as runtime:
-        await runtime.agents.get().create_session("session")
         backend = runtime._execution_service.runtime_backend()
         run = backend._run
         before_claim = False
@@ -220,7 +221,7 @@ async def test_restartable_launch_reuses_reads_but_requires_attempt_claim(
                 backend._runtime_commands, method,
                 observe_claim(getattr(backend._runtime_commands, method)),
             )
-        execution = await runtime.agents.get().session("session").start("question", idempotency_key="start")
+        execution = await runtime.agents.get().start("question", idempotency_key="start")
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
         assert result.output == {"text": "answer"}
@@ -251,8 +252,7 @@ async def test_confirmed_local_durable_event_reader_keeps_source_authorization(t
                                          coordination=StateTurnResources(pending_cache=cache))
     async with Runtime.open("durable-events", storage=storage,
                             features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
-        session = await runtime.agents.get().create_session("session")
-        execution = await session.start("hello")
+        execution = await runtime.agents.get().start("hello")
         try:
             await asyncio.wait_for(entered.wait(), 5)
             backend = runtime._execution_service.runtime_backend()

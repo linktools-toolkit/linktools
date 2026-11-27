@@ -5,27 +5,50 @@ from linktools.ai.persistence import Persistence
 """Cross-owner observation and cancellation of coordinated pending turns."""
 from ._runtime_test_helpers import model_features
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability
+from linktools.ai.capability import ExecutionCapability, SessionCapability
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.core import ExecutionStatus
+from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionCancelRequestCommit, ExecutionRecord
-from pydantic_ai_harness.step_persistence import StepPersistence
-from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.execution import CancelExecutionRequest
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.core import CommitPolicy
-from linktools.ai.storage._database import SqlStorageContext
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
 from .test_runtime_turn_lifecycle import _ObservedCache
+
+
+class _HostAuthorization(TenantAuthorizationPolicy):
+    """Explicit host authorization for canonical SQL sessions."""
+
+
+class _TurnNoticeChannel:
+    """In-process carrier for the same host bridge used across owners."""
+
+    def __init__(self):
+        self.subscribers = []
+
+    @asynccontextmanager
+    async def subscribe(self, scope, *, on_notice, on_gap):
+        subscriber = (scope, on_notice)
+        self.subscribers.append(subscriber)
+        try:
+            yield
+        finally:
+            self.subscribers.remove(subscriber)
+
+    def offer(self, notice):
+        for scope, receive in tuple(self.subscribers):
+            if scope == notice.scope:
+                asyncio.get_running_loop().call_soon(receive, notice)
 
 
 def _group(terminal: bool = True):
@@ -33,13 +56,13 @@ def _group(terminal: bool = True):
     group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync()), scope='runtime')
     group.agent('default', model='default', allow_tools=())
     if not terminal:
-        # Checkpoint guarantees force source admission even with shared cache.
-        group.capability(native_checkpoint(), scope='runtime')
+        # The synchronous canonical writer also exercises durable native Step.
+        group.capability(SessionCapability(checkpoints=True), scope='runtime')
     return group
 
 
 @pytest.mark.asyncio
-async def test_shared_pending_duplicate_observe_wait_and_one_commit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_shared_pending_duplicate_wait_publishes_one_turn(tmp_path: Path) -> None:
     cache = InMemoryCacheBackend(max_bytes=2**20)
     entered, finish = asyncio.Event(), asyncio.Event()
     calls = []
@@ -50,46 +73,49 @@ async def test_shared_pending_duplicate_observe_wait_and_one_commit(tmp_path: Pa
         return ModelResponse(parts=[TextPart('answer')])
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / 'state.db'
-    async with Persistence.open('shared-pending', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_48, Runtime.open(persistence=persistence_48, features=model_features(models, _group())) as owner, Persistence.open('shared-pending', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_48, Runtime.open(persistence=persistence_48, features=model_features(models, _group())) as reader:
-        session = await owner.agents.get().create_session('session')
-        original = SqlStorageContext.run_mutation
-        commits = []
-        cleanups = []
-        async def count(context, callback, **kwargs):
-            result = await original(context, callback, **kwargs)
-            domain = kwargs.get("domain")
-            (cleanups if domain == "native.content_cleanup" else commits).append(domain)
-            return result
-        monkeypatch.setattr(SqlStorageContext, 'run_mutation', count)
-        execution = await session.start('question', idempotency_key='request')
+    storage = PersistenceStorage.sqlite(database, cache=cache, coordination=cache)
+    channel = _TurnNoticeChannel()
+    async with (
+        Persistence.open("shared-pending", storage=storage) as owner_store,
+        Runtime.open(persistence=owner_store, features=model_features(models, _group()),
+                     authorization=_HostAuthorization()) as owner,
+        Persistence.open("shared-pending", storage=storage) as reader_store,
+        Runtime.open(persistence=reader_store, features=model_features(models, _group()),
+                     authorization=_HostAuthorization()) as reader,
+        owner.sessions.bridge_turn_notices(channel),
+        reader.sessions.bridge_turn_notices(channel),
+    ):
+        session = await owner.agents.get().create_session("session")
+        principal = owner.default_principal
+
+        async def start(runtime, prompt="question", key="request"):
+            return await runtime.sessions.start(session.session_id, prompt, agent="default",
+                                                principal=principal, idempotency_key=key)
+
+        turn = await start(owner)
         await asyncio.wait_for(entered.wait(), 5)
-        remote = reader.agents.get().session('session')
         try:
-            same = await remote.start('question', idempotency_key='request')
-            assert same.execution_id == execution.execution_id
-            assert len(calls) == 1 and commits == cleanups == []
-            view = await reader.executions.inspect(execution.execution_id, principal=reader.default_principal)
-            assert view.status is ExecutionStatus.STARTED
-            with pytest.raises(AIError) as not_ready:
-                await reader.executions.result(execution.execution_id, principal=reader.default_principal)
-            assert not_ready.value.code is ErrorCode.EXECUTION_NOT_READY
+            same = await start(reader)
+            assert same.key.turn_id == turn.key.turn_id and len(calls) == 1
+            view = await reader.history.turn_result(session.session_id, turn.key.turn_id, principal=principal)
+            assert view["status"] == ExecutionStatus.PENDING_START.value
+            assert view["conversation_committed"] is False
+            assert (await reader.history.turn_session(session.session_id, principal=principal))["timeline"]["items"] == []
             with pytest.raises(AIError) as conflict:
-                await remote.start('different', idempotency_key='request')
+                await start(reader, prompt="different")
             assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
             with pytest.raises(AIError) as busy:
-                await remote.start('next', idempotency_key='next')
+                await start(reader, prompt="next", key="next")
             assert busy.value.code is ErrorCode.SESSION_BUSY
         finally:
             finish.set()
-        assert (await same.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
-        assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
-        assert len(commits) == 1
-        assert len(cleanups) <= 1
-        total = (len(commits), len(cleanups))
-        again = await remote.start('question', idempotency_key='request')
-        assert again.execution_id == execution.execution_id and len(calls) == 1
-        assert (await again.wait()).result.output == {'text': 'answer'}
-        assert (len(commits), len(cleanups)) == total
+        assert (await same.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        again = await start(reader)
+        assert again.key.turn_id == turn.key.turn_id and len(calls) == 1
+        assert (await again.wait_final(timeout_seconds=5)).view["output"] == {"text": "answer"}
+        (published,) = (await reader.history.turn_session(session.session_id, principal=principal))["timeline"]["items"]
+        assert published["turn_id"] == turn.key.turn_id and published["conversation_committed"] is True
 
 
 @pytest.mark.asyncio
@@ -135,8 +161,7 @@ async def test_remote_cancel_signals_owner_then_confirms_source(
     database = tmp_path / 'state.db'
     reader_storage = PersistenceStorage.sqlite(database, cache=cache, coordination=cache)
     async with Persistence.open('shared-cancel', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_130, Runtime.open(persistence=persistence_130, features=model_features(models, _group())) as owner, Persistence.open('shared-cancel', storage=reader_storage) as persistence_130, Runtime.open(persistence=persistence_130, features=model_features(models, _group())) as reader:
-        session = await owner.agents.get().create_session('session')
-        execution = await session.start('question', idempotency_key='request')
+        execution = await owner.agents.get().start('question', idempotency_key='request')
         await asyncio.wait_for(entered.wait(), 5)
         request = CancelExecutionRequest(reader.default_principal, 'remote-cancel')
         try:
@@ -346,22 +371,36 @@ async def test_mixed_writers_share_live_session_admission(tmp_path: Path, first_
         return ModelResponse(parts=[TextPart('answer')])
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / 'state.db'
-    async with Persistence.open('mixed-admission', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_315, Runtime.open(persistence=persistence_315, features=model_features(models, _group(first_terminal))) as first, Persistence.open('mixed-admission', storage=PersistenceStorage.sqlite(database, cache=cache, coordination=cache)) as persistence_315, Runtime.open(persistence=persistence_315, features=model_features(models, _group(not first_terminal))) as second:
+    storage = PersistenceStorage.sqlite(database, cache=cache, coordination=cache)
+    channel = _TurnNoticeChannel()
+    async with (
+        Persistence.open("mixed-admission", storage=storage) as first_store,
+        Runtime.open(persistence=first_store, features=model_features(models, _group(first_terminal)),
+                     authorization=_HostAuthorization()) as first,
+        Persistence.open("mixed-admission", storage=storage) as second_store,
+        Runtime.open(persistence=second_store, features=model_features(models, _group(not first_terminal)),
+                     authorization=_HostAuthorization()) as second,
+        first.sessions.bridge_turn_notices(channel),
+        second.sessions.bridge_turn_notices(channel),
+    ):
         session = await first.agents.get().create_session('session')
-        execution = await session.start('question', idempotency_key='request')
+        principal = first.default_principal
+        turn = await first.sessions.start(session.session_id, "question", agent="default",
+                                          principal=principal, idempotency_key="request")
         await asyncio.wait_for(entered.wait(), 5)
-        remote = second.agents.get().session('session')
         try:
-            duplicate = await remote.start('question', idempotency_key='request')
-            assert duplicate.execution_id == execution.execution_id
+            duplicate = await second.sessions.start(session.session_id, "question", agent="default",
+                                                    principal=principal, idempotency_key="request")
+            assert duplicate.key.turn_id == turn.key.turn_id
             with pytest.raises(AIError) as busy:
-                await remote.start('another', idempotency_key='other')
+                await second.sessions.start(session.session_id, "another", agent="default",
+                                            principal=principal, idempotency_key="other")
             assert busy.value.code is ErrorCode.SESSION_BUSY
             assert len(calls) == 1
         finally:
             finish.set()
-        assert (await duplicate.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
-        assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
+        assert (await duplicate.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
         assert len(calls) == 1
 
 

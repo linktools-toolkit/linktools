@@ -14,7 +14,7 @@ from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence.state import active_state_scope, record_key
 
 from .test_incremental_projection_boundaries import _storage
-from .test_session_history_projection import _materialize, _session
+from .test_transcript_read_io import _create_history, _materialize
 
 pytestmark = pytest.mark.asyncio
 
@@ -26,11 +26,9 @@ async def test_empty_context_batches_projection_and_head(
     state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="context-metadata", tenant_id="tenant")
     try:
-        session = await state.conversation.sessions.create(_session())
+        owner = await _create_history(state)
         archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
         repository = archive.transcript_repository
-        owner = session.history_id
-        assert owner is not None
         engine = archive.state_store.storage_group.context.engine.sync_engine
         statements: list[str] = []
 
@@ -61,7 +59,7 @@ async def test_empty_context_batches_projection_and_head(
         assert sum(scope_key in parameters or scope_locator in parameters for _, parameters in cold_selects) == 0
         assert len(cold_selects) == 1
         assert not any(name in sql for sql, _ in cold_selects
-                       for name in ("ai_step_messages", "ai_step_sequences", "ai_objects"))
+                       for name in ("ai_messages", "ai_message_sequences", "ai_objects"))
         assert not any(sql.split()[0].upper() in {"INSERT", "UPDATE", "DELETE"} for sql, _ in cold_queries)
         # Both alternatives now use the same established archive scope.
         assert await archive.state_store.storage_group.open_archive() is not None
@@ -95,12 +93,10 @@ async def test_context_metadata_keeps_projection_precedence_and_releases_scope(
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="context-metadata", tenant_id="tenant")
     try:
-        session = await state.conversation.sessions.create(_session())
+        owner = await _create_history(state)
         archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
         repository = archive.transcript_repository
-        owner = session.history_id
-        assert owner is not None
-        await _materialize(state, "run", ("one",))
+        await _materialize(state, owner, "run", ("one",))
         load = repository._load_model_context_from_projection
 
         async def outside_scope(*args):

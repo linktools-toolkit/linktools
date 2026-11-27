@@ -11,17 +11,22 @@ from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import ExecutionCapability, TraceCapability
-from linktools.ai.core import ExecutionStatus
+from linktools.ai.capability import ExecutionCapability, SessionCapability
+from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 
 from .test_decision_model_binding import _Binding
 
 
+class _SessionAuthorization(TenantAuthorizationPolicy):
+    """The test fixture owns every session in its isolated namespace."""
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("checkpoints", (False, True))
 @pytest.mark.parametrize("selection", ("primary", "secondary", "alias", "producer", "replaced", "compaction_replaced"))
-async def test_successful_model_identity_survives_sqlite_reopen(tmp_path, selection):
+async def test_successful_model_identity_survives_sqlite_reopen(tmp_path, selection, checkpoints):
     def model(name, fail=False):
         async def respond(messages, info):
             if fail:
@@ -72,37 +77,29 @@ async def test_successful_model_identity_survives_sqlite_reopen(tmp_path, select
         result.model("default", _Binding(first))
         for index, capability in enumerate(capabilities):
             result.capability(capability, id=f"identity-{index}")
+        result.capability(SessionCapability(checkpoints=checkpoints))
         result.capability(ExecutionCapability(retain_history=True))
-        result.capability(TraceCapability())
         return result
 
-    async def assert_persisted(runtime, execution_id, principal):
-        interactions = (await runtime.executions.model_interactions(
-            execution_id, principal=principal, include_content=True,
-        )).items
-        assert len(interactions) == 1
-        response = interactions[0].response
-        assert response is not None
-        assert (response["model_name"], response["model_id"]) == (expected_name, expected_id)
-        page = await runtime.history.messages("session", principal=principal)
-        responses = [message for message in page.items if isinstance(message, ModelResponse)]
+    async def assert_persisted(persistence):
+        turns = await persistence.session_turn_reader.read_context_range("session", after=0, through=1)
+        responses = [message for turn in turns for message in turn.messages if isinstance(message, ModelResponse)]
         assert [(message.model_name, message.model_id) for message in responses] == [(expected_name, expected_id)]
 
     storage = PersistenceStorage.sqlite(tmp_path / "state.sqlite")
     async with Persistence.open("fallback-identity", storage=storage) as persistence, Runtime.open(
-        persistence=persistence, features=features(),
+        persistence=persistence, features=features(), authorization=_SessionAuthorization(),
     ) as runtime:
-        session = await runtime.agents.get().create_session("session")
-        execution = await session.start("hello")
-        result = (await execution.wait(timeout_seconds=10)).result
-        assert result.status is ExecutionStatus.SUCCEEDED
-        execution_id, principal = execution.execution_id, runtime.default_principal
-        await assert_persisted(runtime, execution_id, principal)
+        principal = runtime.default_principal
+        await runtime.sessions.create_turn_session("session", principal=principal)
+        turn = await runtime.sessions.start(
+            "session", "hello", agent="default", principal=principal, idempotency_key="start",
+        )
+        assert (await turn.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
+        await assert_persisted(persistence)
 
-    async with Persistence.open("fallback-identity", storage=storage) as persistence, Runtime.open(
-        persistence=persistence, features=features(),
-    ) as runtime:
-        await assert_persisted(runtime, execution_id, principal)
+    async with Persistence.open("fallback-identity", storage=storage) as persistence:
+        await assert_persisted(persistence)
 
 
 @pytest.mark.asyncio
@@ -125,23 +122,20 @@ async def test_parallel_fallback_and_primary_keep_distinct_response_identities(t
         features.model(agent, _Binding(model(selected)))
     features.capability(ModelFallback(model("fallback")), id="fallback")
     features.capability(ExecutionCapability(retain_history=True))
-    features.capability(TraceCapability())
     storage = PersistenceStorage.sqlite(tmp_path / "parallel.sqlite")
     async with Persistence.open("parallel-identities", storage=storage) as persistence, Runtime.open(
-        persistence=persistence, features=features,
+        persistence=persistence, features=features, authorization=_SessionAuthorization(),
     ) as runtime:
+        principal = runtime.default_principal
+
         async def run(agent, expected):
-            session = await runtime.agents.get(agent).create_session(agent)
-            execution = await session.start("hello")
-            result = (await execution.wait(timeout_seconds=10)).result
-            assert result.status is ExecutionStatus.SUCCEEDED
-            interactions = (await execution.model_interactions(include_content=True)).items
-            assert len(interactions) == 1
-            response = interactions[0].response
-            assert response["model_name"] == expected
-            assert response["model_id"] == f"function:{expected}"
-            page = await runtime.history.messages(agent, principal=runtime.default_principal)
-            responses = [message for message in page.items if isinstance(message, ModelResponse)]
+            await runtime.sessions.create_turn_session(agent, principal=principal)
+            turn = await runtime.sessions.start(
+                agent, "hello", agent=agent, principal=principal, idempotency_key="start",
+            )
+            assert (await turn.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
+            turns = await persistence.session_turn_reader.read_context_range(agent, after=0, through=1)
+            responses = [message for entry in turns for message in entry.messages if isinstance(message, ModelResponse)]
             assert [(message.model_name, message.model_id) for message in responses] == [
                 (expected, f"function:{expected}"),
             ]

@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Capture retries retain the projection chosen by their immutable object owner."""
+"""Capture retries retain the original canonical input."""
 
 from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import BinaryContent, StructuredContent, TextContent
 
-from linktools.ai.core import ExecutionContext, canonical_sha256, service_principal
+from linktools.ai.core import ExecutionContext, service_principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.inputs import task_prompt_draft
-from linktools.ai.model import MaterializedUserContent
 from linktools.ai.model.messages import binary_attachment_text
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.task.engine import TaskEngine
@@ -19,7 +17,7 @@ from linktools.ai.task.engine import TaskEngine
 @pytest.mark.asyncio
 @pytest.mark.parametrize('with_binary,matching_label', [(False, False), (True, False), (True, True)],
                          ids=['text', 'binary', 'structured-descriptor'])
-async def test_legacy_agent_capture_retry_keeps_original_bytes(
+async def test_agent_capture_retry_preserves_input_identity(
     tmp_path: Path, with_binary: bool, matching_label: bool,
 ) -> None:
     principal = service_principal('capture-identity', 'owner')
@@ -29,34 +27,18 @@ async def test_legacy_agent_capture_retry_keeps_original_bytes(
             inputs = engine.inputs
             suffix = (BinaryContent(b'body', media_type='text/plain'),) if with_binary else ()
             label = binary_attachment_text(suffix[0]) if matching_label else TextContent('fixed')
-            old_prompt = (label, *suffix)
-            accepted = await inputs.materialize_input(old_prompt)
-            payload = {
-                'prompt': task_prompt_draft(accepted),
-                'input_view': dict(accepted.view) if isinstance(accepted, MaterializedUserContent) else None,
-                'binding': None, 'original_input': {}, 'source_execution_id': None,
-                'source_invocation_id': None, 'repository_instructions': None,
-                'task_input': None, 'source_principal': None, 'input_context': None,
-            }
-            identity, envelope = inputs._publication('agent', principal, 'legacy-capture', payload)
-            envelope.pop('request_identity_version')
-            key = inputs._key(principal.tenant_id, 'agent', identity)
-            old_digest = await inputs._put(key, envelope)
-            new_prompt = (StructuredContent({'value': 1}, content=label.content, tag='state', metadata=label.metadata), *suffix)
-            replay = await inputs.create_agent_input(new_prompt, principal=principal, idempotency_key='legacy-capture')
-            assert replay.digest == old_digest
-            assert await inputs._get(key) == envelope
-            assert canonical_sha256(envelope) == old_digest
-            restored = await inputs.read_agent(replay, principal=principal)
-            assert isinstance(restored.prompt[0], TextContent)
-            assert not isinstance(restored.prompt[0], StructuredContent)
+            prompt = (label, *suffix)
+            ref = await inputs.create_agent_input(prompt, principal=principal, idempotency_key='capture')
+            assert await inputs.create_agent_input(prompt, principal=principal, idempotency_key='capture') == ref
             with pytest.raises(AIError) as raised:
                 await inputs.create_agent_input(
-                    (StructuredContent({'value': 1}, content='changed', tag='state'), *suffix),
-                    principal=principal, idempotency_key='legacy-capture',
+                    (StructuredContent({'value': 1}, content=label.content, tag='state', metadata=label.metadata), *suffix),
+                    principal=principal, idempotency_key='capture',
                 )
             assert raised.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
-
+            restored = await inputs.read_agent(ref, principal=principal)
+            assert isinstance(restored.prompt[0], TextContent)
+            assert not isinstance(restored.prompt[0], StructuredContent)
 
 @pytest.mark.asyncio
 async def test_new_capture_keeps_full_structured_identity() -> None:

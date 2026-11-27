@@ -232,9 +232,13 @@ async def test_dispatch_identity_cannot_be_readmitted_and_settlement_is_idempote
     await budgets.ensure("scope", RunBudget())
     await budgets.admit_model("scope", "model")
     await budgets.admit_tool("scope", "tool")
-    for admission, identity in ((budgets.admit_model, "model"), (budgets.admit_tool, "tool")):
+    for admission, identity, expected in (
+        (budgets.admit_model, "model", ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED),
+        (budgets.admit_tool, "tool", ErrorCode.TOOL_OPERATION_CONFLICT),
+    ):
         with pytest.raises(AIError) as duplicate:
             await admission("scope", identity)
+        assert duplicate.value.code is expected
         assert duplicate.value.safe_details["reason"] == "duplicate_dispatch"
     usage = await budgets.settle_model("scope", "model", 7)
     assert await budgets.settle_model("scope", "model", 7) == usage
@@ -410,6 +414,7 @@ async def test_budget_reopen_retains_counts_unknown_and_dispatch_identities(back
         assert unknown.value.safe_details["reason"] == "unresolved_in_flight"
         with pytest.raises(AIError) as duplicate:
             await budgets.admit_tool("counts", "tool")
+        assert duplicate.value.code is ErrorCode.TOOL_OPERATION_CONFLICT
         assert duplicate.value.safe_details["reason"] == "duplicate_dispatch"
         await budgets.settle_model("counts", "done", 7)
         await budgets.admit_model("counts", "next")

@@ -19,6 +19,57 @@ from linktools.ai.storage import _database
 
 
 @pytest.mark.asyncio
+async def test_best_effort_sqlite_write_drops_on_contention_without_changing_pool_timeout(tmp_path: Path) -> None:
+    url = f"sqlite+aiosqlite:///{tmp_path / 'best-effort.db'}"
+    engine = create_async_engine(url, pool_size=1)
+    other = create_async_engine(url)
+    context = create_sql_storage_context(engine)
+    attempts = 0
+
+    async def increment(session: AsyncSession) -> None:
+        nonlocal attempts
+        attempts += 1
+        await context.run_statement(session.execute(text("UPDATE ai_values SET value = value + 1")))
+
+    try:
+        await context.initialize()
+        async with engine.begin() as connection:
+            await connection.exec_driver_sql("CREATE TABLE ai_values (value INTEGER)")
+            await connection.exec_driver_sql("INSERT INTO ai_values VALUES (0)")
+            busy_timeout = (await connection.exec_driver_sql("PRAGMA busy_timeout")).scalar_one()
+
+        async with other.begin() as writer:
+            await writer.exec_driver_sql("UPDATE ai_values SET value = 10")
+            async with asyncio.timeout(1):
+                with pytest.raises(OperationalError):
+                    await context.run_mutation(increment, sqlite_nowait=True)
+            assert attempts == 1
+
+        await context.run_mutation(increment, sqlite_nowait=True)
+        entered = asyncio.Event()
+
+        async def interrupted(session: AsyncSession) -> None:
+            await increment(session)
+            entered.set()
+            await asyncio.Future()
+
+        pending = asyncio.create_task(context.run_mutation(interrupted, sqlite_nowait=True))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+        finally:
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+        async with engine.connect() as connection:
+            assert (await connection.exec_driver_sql("PRAGMA busy_timeout")).scalar_one() == busy_timeout
+            assert (await connection.exec_driver_sql("SELECT value FROM ai_values")).scalar_one() == 11
+    finally:
+        await context.close()
+        await engine.dispose()
+        await other.dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("limit, error_type", (
     (0, ValueError), (-1, ValueError), (1.5, TypeError),
     (float("inf"), TypeError), (float("nan"), TypeError), ("3", TypeError),

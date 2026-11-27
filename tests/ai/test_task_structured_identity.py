@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Task retries use the durable submission's versioned prompt projection."""
+"""Task retries use the one durable canonical prompt identity."""
 
 import asyncio
-import json
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
@@ -26,9 +25,6 @@ from linktools.ai.task import (
 from .test_task_submission_fence import _Authorization, _Launcher
 
 
-_FIXTURE = Path(__file__).parent / "fixtures/persistence/task_structured_request_v1.json"
-
-
 def _request(*, answer: int = 1, tag: str = "answer", text: str = "rendered",
              binary: bool = False, generic: bool = False) -> TaskGraphRequest:
     content = StructuredContent({"answer": answer}, content=text, tag=tag, metadata={"source": "native"})
@@ -39,50 +35,27 @@ def _request(*, answer: int = 1, tag: str = "answer", text: str = "rendered",
     return TaskGraphRequest(TaskGraph("structured", (node,)), Principal("submitter", "tenant"), "submit")
 
 
-def _legacy() -> TaskGraphSubmission:
-    return decode_domain(json.loads(_FIXTURE.read_text())["submission"], TaskGraphSubmission)
-
-
-async def _seed_legacy(state: Persistence) -> TaskGraphSubmission:
-    fixture = json.loads(_FIXTURE.read_text())
-    submission = _legacy()
-    repository = state.task.admissions
-    records = (
-        replace(repository._stored("task_submission", (submission.graph.graph_id,), submission.ref, state="prepared"),
-                data=fixture["ref_record"]),
-        replace(repository._stored("task_submission_payload", (submission.graph.graph_id,), submission),
-                data=fixture["prepared_record"]),
-    )
-    await repository.state_store.mutate(lambda transaction: transaction.insert_records(records))
-    return submission
-
-
 def _service(state: Persistence, *, preflight: object = None) -> DefaultTaskGraphService:
     return DefaultTaskGraphService(state.task, _Authorization(), _Launcher(), preflight=preflight)
 
 
 @pytest.mark.parametrize("binary", (False, True))
-def test_agent_prompt_identity_keeps_current_structure_and_matches_old_text_projection(binary: bool) -> None:
+def test_agent_prompt_identity_distinguishes_structured_content_from_text(binary: bool) -> None:
     current = _request(binary=binary)
     node = current.graph.nodes[0]
     text = TextContent("rendered", metadata={"source": "native"})
     prompt = (text, BinaryContent(b"bytes", media_type="text/plain")) if binary else (text,)
     body = AgentTaskInput(prompt, planning=False, thinking=False)
     legacy_node = AgentTaskNode.from_resolved("worker", task=node.task, input=body, original_input=body)
-    assert node.request_identity_payload(request_identity_version=1) == legacy_node.to_mapping()
     assert node.to_mapping() != legacy_node.to_mapping()
-    if not binary:
-        admission = TaskGraphAdmission.from_request(current, request_identity_version=1)
-        assert admission == _legacy().admission
-    assert TaskGraphAdmission.from_request(current).request_identity_version == 2
+    assert node.prompt_intent_digest() != legacy_node.prompt_intent_digest()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version", (1, 2))
 @pytest.mark.parametrize("phase", ("prepared", "admitted", "cancelled"))
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
 async def test_submission_owner_survives_state_transitions_and_reopen(
-    version: int, phase: str, backend: str, tmp_path: Path,
+    phase: str, backend: str, tmp_path: Path,
 ) -> None:
     def storage() -> PersistenceStorage:
         return PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "state.db")
@@ -91,7 +64,7 @@ async def test_submission_owner_survives_state_transitions_and_reopen(
     await state.initialize(namespace="structured-identity", tenant_id="tenant")
     try:
         service = _service(state)
-        prepared = await _seed_legacy(state) if version == 1 else await service.prepare_submission(_request())
+        prepared = await service.prepare_submission(_request())
         if phase == "admitted":
             await state.task.admissions.admit_prepared(prepared)
         elif phase == "cancelled":
@@ -103,7 +76,6 @@ async def test_submission_owner_survives_state_transitions_and_reopen(
             service = _service(state)
         owner = await state.task.admissions.get_submission_ref("structured", tenant_id="tenant")
         assert owner == prepared.ref
-        assert owner.request_identity_version == version
         assert await state.task.admissions.get_submission_ref("structured", tenant_id="other") is None
         described = await service.describe_submission(_request())
 
@@ -115,12 +87,9 @@ async def test_submission_owner_survives_state_transitions_and_reopen(
         assert replay.ref == prepared.ref and not created
         assert await state.task.admissions.submission_status(owner) == phase
         for changed in (_request(answer=2), _request(tag="other")):
-            if version == 1:
-                assert (await service.prepare_submission(changed)).ref == prepared.ref
-            else:
-                with pytest.raises(AIError) as caught:
-                    await service.prepare_submission(changed)
-                assert caught.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+            with pytest.raises(AIError) as caught:
+                await service.prepare_submission(changed)
+            assert caught.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
         with pytest.raises(AIError) as caught:
             await service.prepare_submission(_request(text="changed rendering"))
         assert caught.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
@@ -136,11 +105,10 @@ async def test_submission_owner_survives_state_transitions_and_reopen(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version", (1, 2))
-async def test_generic_business_json_is_not_rewritten_by_request_version(version: int) -> None:
+async def test_generic_business_json_is_not_rewritten_by_identity() -> None:
     async with Persistence.open("structured-identity", storage=PersistenceStorage.in_memory(), tenant_id="tenant") as state:
         request = _request(generic=True)
-        admission = TaskGraphAdmission.from_request(request, request_identity_version=version)
+        admission = TaskGraphAdmission.from_request(request)
         submission = TaskGraphSubmission(state.namespace, admission, request.graph)
         repository = state.task.admissions
         await repository.state_store.mutate(lambda transaction: transaction.insert_records((
@@ -157,7 +125,7 @@ async def test_generic_business_json_is_not_rewritten_by_request_version(version
 @pytest.mark.parametrize("phase", ("prepared", "admitted", "cancelled"))
 async def test_direct_admission_uses_the_existing_submission_owner(phase: str) -> None:
     async with Persistence.open("structured-identity", storage=PersistenceStorage.in_memory(), tenant_id="tenant") as state:
-        prepared = await _seed_legacy(state)
+        prepared = await _service(state).prepare_submission(_request())
         if phase == "admitted":
             await state.task.admissions.admit_prepared(prepared)
         elif phase == "cancelled":
@@ -171,7 +139,7 @@ async def test_direct_admission_uses_the_existing_submission_owner(phase: str) -
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ("prepared", "cancelled"))
 @pytest.mark.parametrize("boundary", ("lookup", "capture"))
-async def test_concurrent_legacy_winner_selects_one_version_without_recapturing(
+async def test_concurrent_winner_preserves_one_identity_without_recapturing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str, boundary: str,
 ) -> None:
     def storage() -> PersistenceStorage:
@@ -180,22 +148,22 @@ async def test_concurrent_legacy_winner_selects_one_version_without_recapturing(
         Persistence.open("structured-identity", storage=storage(), tenant_id="tenant") as first,
         Persistence.open("structured-identity", storage=storage(), tenant_id="tenant") as second,
     ):
-        captures: list[int] = []
+        captures: list[str] = []
 
         async def win() -> None:
-            winner = await _seed_legacy(second)
+            winner = await _service(second).prepare_submission(_request())
             if phase == "cancelled":
                 await _service(second).cancel_submission(winner.ref, principal=winner.ref.principal, idempotency_key="cancel")
 
         class Preflight:
             async def capture_admission(self, admission: TaskGraphAdmission, graph: TaskGraph) -> TaskGraph:
-                captures.append(admission.request_identity_version)
+                captures.append(admission.initial_request_digest)
                 await win()
                 node = graph.nodes[0]
                 body = dict(node.input)
                 body["prompt"] = {
                     "kind": "stored-user-content-v1", "intent": "task-admission",
-                    "source_intent_digest": node.prompt_intent_digest(request_identity_version=admission.request_identity_version),
+                    "source_intent_digest": node.prompt_intent_digest(),
                     "value": encode_domain(StoredUserInput("text", StoredPayload.inline_text("captured"))),
                 }
                 return TaskGraph(graph.graph_id, (AgentTaskNode.from_resolved(
@@ -205,29 +173,29 @@ async def test_concurrent_legacy_winner_selects_one_version_without_recapturing(
         request = _request()
         candidate = TaskGraphSubmission(first.namespace, TaskGraphAdmission.from_request(request), request.graph)
         if boundary == "lookup":
-            lookup = first.task.admissions.get_submission_ref
+            lookup = first.task.admissions.submission_status
             fired = False
 
-            async def racing_lookup(graph_id: str, *, tenant_id: str) -> TaskSubmissionRef | None:
+            async def racing_lookup(reference: TaskSubmissionRef) -> str | None:
                 nonlocal fired
-                result = await lookup(graph_id, tenant_id=tenant_id)
+                result = await lookup(reference)
                 if not fired:
                     fired = True
                     assert result is None
                     await win()
                 return result
 
-            monkeypatch.setattr(first.task.admissions, "get_submission_ref", racing_lookup)
+            monkeypatch.setattr(first.task.admissions, "submission_status", racing_lookup)
         prepared, created = await service.prepare_described_with_disposition(candidate)
-        assert not created and prepared.ref == _legacy().ref
-        assert captures == ([2] if boundary == "capture" else [])
+        assert not created and prepared.ref == candidate.ref
+        assert captures == ([candidate.ref.request_digest] if boundary == "capture" else [])
         assert await first.task.admissions.submission_status(prepared.ref) == phase
         assert (await service.prepare_described(candidate)).ref == prepared.ref
-        assert captures == ([2] if boundary == "capture" else [])
+        assert captures == ([candidate.ref.request_digest] if boundary == "capture" else [])
 
 
 @pytest.mark.asyncio
-async def test_current_contenders_and_uncertain_commit_preserve_owner_version(
+async def test_concurrent_preparation_and_uncertain_commit_preserve_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def storage() -> PersistenceStorage:
@@ -241,7 +209,6 @@ async def test_current_contenders_and_uncertain_commit_preserve_owner_version(
         results = await asyncio.gather(*(service.prepare_described_with_disposition(candidate) for service in services))
         assert sorted(created for _, created in results) == [False, True]
         assert all(prepared.ref == candidate.ref for prepared, _ in results)
-        assert candidate.ref.request_identity_version == 2
         store = first.task.admissions.state_store
         mutate = store.mutate
 
@@ -252,44 +219,6 @@ async def test_current_contenders_and_uncertain_commit_preserve_owner_version(
         monkeypatch.setattr(store, "mutate", lose_response)
         assert await services[0].prepare_described_with_disposition(candidate) == (candidate, False)
         assert await first.task.admissions.get_submission_ref("structured", tenant_id="tenant") == candidate.ref
-
-
-@pytest.mark.parametrize("target", (TaskGraphAdmission, TaskSubmissionRef))
-@pytest.mark.parametrize("version", (None, True, "2", 0, 3))
-def test_request_identity_version_defaults_only_when_absent(target: type, version: object) -> None:
-    original = _legacy().admission if target is TaskGraphAdmission else _legacy().ref
-    wire = encode_domain(original)
-    wire["fields"].pop("request_identity_version")
-    assert decode_domain(wire, target).request_identity_version == 1
-    wire["fields"]["request_identity_version"] = version
-    with pytest.raises(AIError) as caught:
-        decode_domain(wire, target)
-    assert caught.value.code is (ErrorCode.STORAGE_VERSION_UNSUPPORTED if type(version) is int
-                                 else ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("entry", ("service", "prepare", "admit"))
-async def test_new_submission_cannot_publish_legacy_identity(entry: str) -> None:
-    async with Persistence.open("structured-identity", storage=PersistenceStorage.in_memory(), tenant_id="tenant") as state:
-        request = _request()
-        admission = TaskGraphAdmission.from_request(request, request_identity_version=1)
-        submission = TaskGraphSubmission(state.namespace, admission, request.graph)
-        if entry == "service":
-            result = await _service(state).prepare_described(submission)
-        elif entry == "prepare":
-            result = await state.task.admissions.prepare(submission)
-        else:
-            await state.task.admissions.admit(admission, request.graph)
-            result = None
-        owner = await state.task.admissions.get_submission_ref("structured", tenant_id="tenant")
-        assert owner.request_identity_version == 2
-        assert owner.request_digest == TaskGraphAdmission.from_request(request).initial_request_digest
-        if result is not None:
-            assert result.ref == owner
-        with pytest.raises(AIError) as caught:
-            await _service(state).prepare_submission(_request(answer=2))
-        assert caught.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
 
 
 @pytest.mark.asyncio
@@ -308,13 +237,11 @@ async def test_concurrent_changed_structure_conflicts_against_current_winner(tmp
         rejected = [item for item in results if isinstance(item, AIError)]
         assert len(successful) == len(rejected) == 1
         assert rejected[0].code is ErrorCode.IDEMPOTENCY_CONFLICT
-        assert successful[0].ref.request_identity_version == 2
         assert await first.task.admissions.get_submission_ref("structured", tenant_id="tenant") == successful[0].ref
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version", (1, 2))
-async def test_agent_materialization_retains_selected_prompt_identity(version: int) -> None:
+async def test_agent_materialization_retains_prompt_identity() -> None:
     from .test_agent_task_admission_input_owner import _setup
 
     executor, _, tasks, _ = _setup()
@@ -323,8 +250,8 @@ async def test_agent_materialization_retains_selected_prompt_identity(version: i
     node = AgentTaskNode.from_resolved(original.node_id, task=TaskRef("agent", 1),
                                        input=original.input, original_input=original.original_input)
     request = replace(request, graph=TaskGraph(request.graph.graph_id, (node,)))
-    admission = TaskGraphAdmission.from_request(request, request_identity_version=version)
-    captured = await executor._materialize_node_input(node, "tenant", tasks, request_identity_version=version)
+    admission = TaskGraphAdmission.from_request(request)
+    captured = await executor._materialize_node_input(node, "tenant", tasks)
     assert captured.input != node.input
     admission.validate_graph(TaskGraph(request.graph.graph_id, (captured,)))
     restored = decode_domain(encode_domain(captured), TaskNode)
@@ -345,23 +272,22 @@ def test_materialized_agent_input_projects_only_owned_prompt_provenance() -> Non
         return AgentTaskNode.from_resolved("worker", task=TaskRef("identity.agent", 1), input=body, original_input=body)
 
     current, old = node(True), node(False)
-    assert current.request_identity_payload(request_identity_version=1) == old.to_mapping()
     assert current.to_mapping() != old.to_mapping()
-    assert current.request_identity_payload(request_identity_version=1)["input"]["parameters"] == current.input["parameters"]
+    assert current.to_mapping()["input"]["parameters"] == current.input["parameters"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ("prepared", "admitted"))
-async def test_submission_lookup_rejects_version_disagreement_with_admission(phase: str) -> None:
+async def test_submission_lookup_rejects_digest_disagreement_with_admission(phase: str) -> None:
     async with Persistence.open("structured-identity", storage=PersistenceStorage.in_memory(), tenant_id="tenant") as state:
-        prepared = await _seed_legacy(state)
+        prepared = await _service(state).prepare_submission(_request())
         repository = state.task.admissions
         if phase == "admitted":
             await repository.admit_prepared(prepared)
 
         async def corrupt(transaction: StateTransaction) -> None:
             record = await transaction.get_record(repository._submission_key("structured"))
-            changed = repository._stored("task_submission", ("structured",), replace(prepared.ref, request_identity_version=2))
+            changed = repository._stored("task_submission", ("structured",), replace(prepared.ref, request_digest="f" * 64))
             assert await transaction.replace_record(
                 replace(record, data=changed.data, storage_revision=record.storage_revision + 1),
                 expected_storage_revision=record.storage_revision,
@@ -377,23 +303,16 @@ async def test_submission_lookup_rejects_version_disagreement_with_admission(pha
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version", (1, 2))
-async def test_cancel_before_prepare_requires_current_identity(version: int) -> None:
+async def test_cancel_before_prepare_retains_canonical_identity() -> None:
     async with Persistence.open("structured-identity", storage=PersistenceStorage.in_memory(), tenant_id="tenant") as state:
         request = _request()
-        admission = TaskGraphAdmission.from_request(request, request_identity_version=version)
+        admission = TaskGraphAdmission.from_request(request)
         reference = TaskSubmissionRef.from_admission(state.namespace, admission)
         service = _service(state)
-        if version == 1:
-            with pytest.raises(AIError) as caught:
-                await service.cancel_submission(reference, principal=reference.principal, idempotency_key="cancel")
-            assert caught.value.code is ErrorCode.REQUEST_FIELD_INVALID
-            assert await state.task.admissions.get_submission_ref("structured", tenant_id="tenant") is None
-        else:
-            cancelled = await service.cancel_submission(reference, principal=reference.principal, idempotency_key="cancel")
-            assert not cancelled.admitted and cancelled.status is TaskStatus.CANCELLED
-            assert (await service.prepare_submission(request)).ref == reference
-            assert await state.task.admissions.submission_status(reference) == "cancelled"
+        cancelled = await service.cancel_submission(reference, principal=reference.principal, idempotency_key="cancel")
+        assert not cancelled.admitted and cancelled.status is TaskStatus.CANCELLED
+        assert (await service.prepare_submission(request)).ref == reference
+        assert await state.task.admissions.submission_status(reference) == "cancelled"
 
 
 @pytest.mark.asyncio
@@ -402,7 +321,7 @@ async def test_start_prepared_returns_the_durable_winners_reference(phase: str) 
     async with Persistence.open("structured-identity", storage=PersistenceStorage.in_memory(), tenant_id="tenant") as state:
         request = _request()
         stale = TaskGraphSubmission(state.namespace, TaskGraphAdmission.from_request(request), request.graph)
-        winner = await _seed_legacy(state)
+        winner = await _service(state).prepare_submission(_request())
         if phase == "admitted":
             await state.task.admissions.admit_prepared(winner)
         else:

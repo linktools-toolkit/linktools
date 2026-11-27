@@ -12,10 +12,11 @@ from linktools.ai.asset import (
     DirectoryAssetBackend,
     PrefixAssetPathAdapter,
 )
+from linktools.ai.core import PersistenceDomain
 from linktools.ai.errors import AIError
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.state import StoredRecord
-from linktools.ai.storage import StorageEntryRevision
+from linktools.ai.storage import InMemoryCacheBackend, StorageEntryRevision
 
 
 def _record(value: str) -> StoredRecord:
@@ -39,9 +40,10 @@ def _record(value: str) -> StoredRecord:
 async def test_sql_deleted_record_does_not_resurface_from_cache(
     tmp_path: Path,
 ) -> None:
-    owner = Persistence(PersistenceStorage.sqlite(tmp_path / "state.db"))
+    cache = InMemoryCacheBackend(max_bytes=2**20)
+    owner = Persistence(PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache))
     await owner.initialize(namespace="test", tenant_id="tenant")
-    store = owner.conversation.sessions.state_store
+    store = owner.snapshot_resources().stores[PersistenceDomain.CONVERSATION]
     record = _record("record")
     try:
         await store.mutate(lambda transaction: transaction.insert_record(record))

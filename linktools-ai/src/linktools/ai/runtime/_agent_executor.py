@@ -24,7 +24,7 @@ from linktools.core import environ
 from pydantic import ValidationError
 from pydantic_ai.workspaces import WorkspaceBackend
 from pydantic_ai import Agent as PydanticAgent
-from pydantic_ai import TextOutput
+from pydantic_ai import TextOutput, ToolOutput
 from pydantic_ai.capabilities import (
     AbstractCapability,
     WrapperCapability,
@@ -44,6 +44,7 @@ from pydantic_ai.messages import (
     FunctionToolCallEvent,
     FunctionToolResultEvent,
     ModelMessage,
+    ModelRequest,
     PartDeltaEvent,
     PartEndEvent,
     PartStartEvent,
@@ -75,6 +76,7 @@ from ..capability import (
     RunCallbackScope,
     bind_run_callbacks,
     PydanticToolControlCapability,
+    ProviderMessagesCapability,
     ReferencedInputsCapability,
     SkillCapability,
     SkillDefinition,
@@ -87,8 +89,13 @@ from ..capability import (
     tool_context_dedupe_from_metadata,
     tool_plan_safe_from_metadata,
     validate_tool_metadata,
+    ExecutionCapability,
     FileSystemCapability,
+    TraceCapability,
+    MemoryCapability,
     ShellCapability,
+    StepPersistenceCapability,
+    tool_effect_policy_from_metadata,
 )
 from ..core import (
     ExecutionDeltaType,
@@ -104,9 +111,9 @@ from ..core import (
     normalize_json_value,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..model import FallbackBinding, ModelBinding, model_binding_error, validate_model_inputs
+from ..model import FallbackBinding, ModelBinding, UserPromptInput, model_binding_error, validate_model_inputs
 from ..observe import MetricMeasurement, MetricRecorder, Observation
-from ..spec import CapabilityRef, MCPServerSpecCodec, RepositoryInstructions, SkillSpec
+from ..spec import CapabilityRef, RepositoryInstructions, SkillSpec
 from ..workspace import (
     WorkspaceResource,
     SupportsClose,
@@ -115,17 +122,19 @@ from ..workspace import (
 )
 
 from ._budget import RunBudgetContext, RunBudgetCapability
-from ._current_toolsets import create_current_toolset
+from ._current_toolsets import create_business_toolset, create_current_toolset
 from ._tool_metrics import ToolMetricContext
 from ._capabilities import compose_platform_capabilities, runtime_feature_leaves
 from ._feature_policy import _runtime_feature_policy
 from ._agent_run_recorder import AgentRunRecorder
-from ..persistence.runs import RuntimeAgentRunStore
+from ..persistence import PersistenceDomain
+from ..persistence.runs import InMemoryStepArchive, RuntimeAgentRunStore, StagingAgentRunStore
 from ..execution import PendingDeferredCall
 from ._compaction import CompactionPolicy
 from ..inputs import CanonicalUserInput
 from ..observe.journal import ModelRequestJournal
 from pydantic_ai_harness.memory import MemoryStore
+from pydantic_ai_harness.step_persistence import StepPersistence
 from ._metric_capability import ModelObservationCapability
 from ..capability.planning import PlanningStore
 from ._harness import (
@@ -133,15 +142,17 @@ from ._harness import (
     FallbackProviderModel,
 )
 from ..capability.steps import AtomicStepPersistence, StepBoundaryCapabilities
-from ..model.messages import without_history_system_prompts
+from ..persistence.capabilities import CapabilityPersistence
+from ..model.messages import session_compaction_summaries, without_history_system_prompts
 from ._repository_instructions import _RepositoryInstructionCapability
-from ._tool import ToolOperationBridge
+from ._tool import RuntimeToolOperationBridge, ToolOperationBridge
 from ..capability import ToolResponseFixture
 from ._tool_response_fixture import _ToolResponseManifest, _load_tool_response_fixture
 from ._tool_boundary import (
     ManagedToolDescriptor,
     RepositoryInstructionBoundary,
     BoundaryToolset,
+    _ClaimedLeaf,
     managed_tool_descriptor_from_metadata,
     tool_capability_ref,
 )
@@ -149,12 +160,14 @@ from ._output_preview import OutputPreview
 from ._tool_metrics import (
     ToolMetricsCapability,
 )
-from ..model.messages import rehydrate_deferred_tool_results, tool_error_message, tool_return_content_digest
-from ..persistence.contracts import LoadedModelContext
+from ..model.messages import CANONICAL_OUTPUT_TOOL_NAME, rehydrate_deferred_tool_results, tool_error_message, tool_return_content_digest
+from ..persistence.contracts import LoadedContextMessage, LoadedModelContext
 from ..persistence.runs import AgentRunCheckpoint, AgentRunStore
 
 _logger = environ.get_logger("ai.runtime.agent_executor")
 _SECONDARY_ERROR_CODE_KEY = "secondary_error_code"
+_ORDINARY_WORKSPACE_TOOLS = frozenset({"list_files", "read_file"})
+_ORDINARY_TOOL_TURN_LIMIT = 8
 _PLAN_SAFE_FRAMEWORK_TOOL_KINDS = frozenset({"capability-load", "tool-search"})
 
 
@@ -186,9 +199,17 @@ class AgentExecutionResult:
     output: JsonValue
     messages: list[ModelMessage]
     usage: UsageMetrics
+    compacted_context: tuple[ModelMessage, ...] | None = None
 
 
 AgentExecutionOutcome = AgentExecutionResult | DeferredToolRequests
+
+
+_NativeSubagentLeaf = Callable[[SubagentCapability], _ClaimedLeaf]
+
+
+async def _require_claimed_subagent(*_args, **_kwargs):
+    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +232,7 @@ class _AgentRunScope:
     history_id: str | None = None
     memory_store: MemoryStore | None = None
     memory_tool_names: tuple[str, ...] = ()
+    stage_session_trace: bool = False
     plan_store_resolver: (
         Callable[[PydanticRunContext[object]], PlanningStore] | None
     ) = None
@@ -220,14 +242,22 @@ class _AgentRunScope:
     skill_resource_paths: Mapping[str, "str | None"] = field(default_factory=dict)
     initial_skills: tuple[SkillDefinition, ...] | None = None
     preload_skills: tuple[SkillDefinition, ...] = ()
+    preload_skill_inputs: tuple[Mapping[str, JsonValue], ...] | None = None
     mode: ExecutionMode = "run"
     planning: bool = False
+    regenerable: bool = False
+    previous_turn_interrupted: bool = False
+    before_first_model_dispatch: Callable[[], Awaitable[None]] | None = None
+    canonical_step: AtomicStepPersistence | None = None
+    split_step: bool = False
     thinking: ThinkingValue = None
     parent_agent_run_id: str | None = None
     subagent_available: bool = False
     subagent_descriptions: Mapping[str, str | None] = field(default_factory=dict)
     subagent_delegate: SubagentDelegate | None = None
+    native_subagent_leaf: _NativeSubagentLeaf | None = None
     event_sink: EventSink | None = None
+    streamed_output_bytes: int | None = None
     usage_sink: UsageSink | None = None
     tool_operations: ToolOperationBridge | None = None
     tool_response_ref: AssetVersionRef | None = None
@@ -241,6 +271,7 @@ class _AgentRunScope:
     deferred_tool_results: DeferredToolResults | None = None
     deferred_approvals: tuple[PendingDeferredCall, ...] = ()
     deferred_capability_refs: dict[str, CapabilityRef] = field(default_factory=dict)
+    capture_compacted_context: bool = False
 
     def __post_init__(self) -> None:
         if self.mode not in {"run", "plan"} or not isinstance(self.planning, bool):
@@ -269,6 +300,7 @@ class AgentExecutor:
         metrics: MetricRecorder | None = None,
         workspace_factory: Callable[..., WorkspaceBackend] | None = None,
         tool_responses: ToolResponseFixture | None = None,
+        canonical_memory_store: Callable[[str, str, str], MemoryStore] | None = None,
     ) -> None:
         if not isinstance(skill_sources, SkillSourceRegistry):
             raise TypeError("skill_sources must be SkillSourceRegistry")
@@ -280,6 +312,7 @@ class AgentExecutor:
         self._metrics = metrics
         self._workspace_factory = workspace_factory
         self._tool_responses = tool_responses
+        self._canonical_memory_store = canonical_memory_store
 
     async def capture_preload_skills(self, binding: AgentBinding) -> tuple[Mapping[str, JsonValue], ...]:
         """Capture preload roots inside the admitted Agent's configured scope.
@@ -322,7 +355,9 @@ class AgentExecutor:
 
     async def _load_preload_skills(self, scope: _AgentRunScope) -> tuple[SkillDefinition, ...]:
         context = scope.context.input_context
-        raw = () if context is None else context.preload_skills
+        raw = scope.preload_skill_inputs
+        if raw is None:
+            raw = () if context is None else context.preload_skills
         inputs = tuple(SkillInput.from_payload(value) for value in raw)
         if tuple(item.skill.id for item in inputs) != scope.binding.compiled_agent.spec.preload_skills:
             raise AIError(ErrorCode.BINDING_CONFLICT,
@@ -377,19 +412,189 @@ class AgentExecutor:
             )
         return None
 
+    def require_regenerable(
+        self, binding: AgentBinding, *, canonical_step: bool = False,
+        split_step: bool = False, native_subagents: bool = False,
+    ) -> None:
+        compiled = binding.compiled_agent
+        policy = _runtime_feature_policy(compiled.runtime_contributions)
+        if policy.memory_scope is not None and (not canonical_step or self._canonical_memory_store is None):
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY, "Canonical memory requires a coowned Step store")
+        unsupported = [name for name, selected in (
+            ("agent_capabilities", any(
+                not canonical_step or split_step
+                or (item.tool_members is None
+                    and type(item.value) not in (ReferencedInputsCapability, ProviderMessagesCapability))
+                for item in compiled.selected_capabilities
+            )),
+            ("skills", compiled.skill_definitions and (not canonical_step or split_step)),
+            ("mcp", compiled.mcp_servers and (not canonical_step or split_step)),
+            ("subagents", compiled.selected_subagents and (
+                not native_subagents or not canonical_step or split_step
+            )),
+            ("checkpoints", (policy.session.checkpoints or policy.restart_checkpoints) != canonical_step),
+            ("tool_response_fixture", policy.tool_responses is not None),
+        ) if selected]
+        if unsupported:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={
+                "field": "agent", "reason": "turn_agent_features_unsupported", "features": unsupported,
+            })
+        if compiled.selected_tools and not canonical_step:
+            filesystems = tuple(item for item in policy.capabilities if type(item) is FileSystemCapability)
+            if len(filesystems) != 1:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={
+                    "field": "agent", "reason": "turn_tools_require_checkpoint_or_filesystem",
+                })
+            permissions = filesystems[0].workspace.policy.tool_permissions
+            for tool in compiled.selected_tools:
+                metadata = _bound_tool_metadata(tool)
+                if (
+                    tool.id not in _ORDINARY_WORKSPACE_TOOLS
+                    or tool_class_from_metadata(metadata) != "filesystem.read"
+                    or tool_effect_policy_from_metadata(metadata, require=True) != "none"
+                    or tool.contract.get("kind", "function") != "function"
+                    or tool.contract.get("defer_loading", False)
+                    or permissions.decide(tool_name=tool.id, tool_class="filesystem.read") != "allow"
+                ):
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={
+                        "field": "agent", "reason": "turn_tools_require_checkpoint_or_read_only",
+                    })
+
+    async def execute_regenerable(
+        self,
+        *,
+        binding: AgentBinding,
+        context: AgentContext[object],
+        prompt: UserPromptInput,
+        history: list[ModelMessage],
+        limits: PromptLimits,
+        event_sink: EventSink,
+        workspace: Workspace | None = None,
+        repository_instructions: RepositoryInstructions | None = None,
+        repository_instruction_boundary: RepositoryInstructionBoundary | None = None,
+        thinking: ThinkingValue = None,
+        streamed_output_bytes: int = 64 * 1024,
+        canonical_step: AtomicStepPersistence | None = None,
+        tool_operations: ToolOperationBridge | None = None,
+        generation: int = 1,
+        continuation: Sequence[ModelMessage] | None = None,
+        deferred_tool_results: DeferredToolResults | None = None,
+        deferred_approvals: tuple[PendingDeferredCall, ...] = (),
+        output_retries_used: int = 0,
+        budget: RunBudgetContext | None = None,
+        capture_trace: Callable[[StagingAgentRunStore], None] | None = None,
+        mode: ExecutionMode = "run",
+        planning: bool = False,
+        plan_store: PlanningStore | None = None,
+        preload_skill_inputs: tuple[Mapping[str, JsonValue], ...] = (),
+        split_step: bool = False,
+        native_subagent_leaf: _NativeSubagentLeaf | None = None,
+        settled_native_subagents: bool = False,
+        previous_turn_interrupted: bool = False,
+        capture_compacted_context: bool = False,
+        before_first_model_dispatch: Callable[[], Awaitable[None]] | None = None,
+    ) -> AgentExecutionOutcome:
+        """Run a plain turn with no durable recorder or execution handoff."""
+        if context.session_id is None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "A regenerable turn requires a session")
+        if streamed_output_bytes < 1:
+            raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE, "No output capacity remains for this turn")
+        if (canonical_step is None) != (tool_operations is None):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if settled_native_subagents and (
+            native_subagent_leaf is not None or generation < 2 or continuation is None or deferred_tool_results is None
+        ):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        self.require_regenerable(
+            binding, canonical_step=canonical_step is not None,
+            split_step=split_step, native_subagents=(
+                (native_subagent_leaf is not None or settled_native_subagents)
+                and mode == "run" and not planning and budget is None
+            ),
+        )
+        if planning and plan_store is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        from ._lossy_session_trace import BoundedTraceStaging
+
+        staging = StagingAgentRunStore() if capture_trace is None else BoundedTraceStaging()
+        store = RuntimeAgentRunStore(
+            staging,
+            conversation_archive=(InMemoryStepArchive(PersistenceDomain.CONVERSATION)
+                                  if canonical_step is None else None),
+            execution_archive=None,
+        )
+        if canonical_step is not None:
+            store.bind_execution_persistence(
+                context.execution_id, conversation=False, restart_checkpoints=True, durable_trace=False,
+            )
+        if continuation is not None and canonical_step is None:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        model_history = history if continuation is None else list(continuation)
+        memory_store = None
+        memory_names = MemoryCapability.select_tools(tuple(
+            tool.id for tool in binding.compiled_agent.selected_tools
+            if tool_class_from_metadata(_bound_tool_metadata(tool)) == "memory"
+        ))
+        memory_scope = _runtime_feature_policy(binding.compiled_agent.runtime_contributions).memory_scope
+        if memory_scope is not None and memory_names:
+            if self._canonical_memory_store is None:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            memory_store = self._canonical_memory_store(context.principal.tenant_id, context.execution_id, memory_scope)
+            context = replace(context, memory_scope=memory_scope)
+        await store.initialize()
+        try:
+            outcome = await self.execute(_AgentRunScope(
+                binding=binding, context=context, workspace=workspace, limits=limits,
+                execution_cwd=None, user_prompt=prompt if continuation is None else None, history=model_history,
+                initial_context=LoadedModelContext(tuple(LoadedContextMessage(message, None) for message in model_history)),
+                agent_conversation_id=context.session_id, run_store=store,
+                agent_run_id=context.execution_id, agent_run_seq=generation,
+                event_sink=event_sink, thinking=thinking, streamed_output_bytes=streamed_output_bytes,
+                repository_instructions=repository_instructions, regenerable=canonical_step is None,
+                repository_instruction_boundary=repository_instruction_boundary,
+                canonical_step=canonical_step, split_step=split_step, tool_operations=tool_operations,
+                deferred_tool_results=deferred_tool_results,
+                previous_turn_interrupted=previous_turn_interrupted,
+                capture_compacted_context=capture_compacted_context,
+                before_first_model_dispatch=before_first_model_dispatch,
+                output_retries_used=output_retries_used, deferred_approvals=deferred_approvals, budget=budget,
+                stage_session_trace=capture_trace is not None,
+                tool_effects="read_only" if canonical_step is None else "live",
+                mode=mode, planning=planning, preload_skill_inputs=preload_skill_inputs,
+                plan_store_resolver=None if plan_store is None else lambda _ctx: plan_store,
+                memory_store=memory_store, memory_tool_names=memory_names if memory_store is not None else (),
+                subagent_available=native_subagent_leaf is not None,
+                native_subagent_leaf=native_subagent_leaf,
+            ))
+            if isinstance(outcome, DeferredToolRequests) and canonical_step is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "A regenerable turn cannot defer tool calls")
+            return outcome
+        finally:
+            try:
+                if capture_trace is not None and isinstance(staging, BoundedTraceStaging) and not staging.trace_discarded:
+                    capture_trace(staging)
+            finally:
+                await store.preflight_close()
+                await store.close()
+
     async def execute(self, scope: _AgentRunScope) -> AgentExecutionOutcome:
         binding = scope.binding
+        selected = binding.binding_contract.selected
+        if scope.context.selected_capabilities != selected:
+            scope = replace(scope, context=replace(scope.context, selected_capabilities=selected))
         compiled_agent = binding.compiled_agent
         run_usage = RunUsage()
         configured_limits = compiled_agent.spec.usage_limits
+        requests = None if configured_limits is None else configured_limits.model_requests
+        tool_calls = None if configured_limits is None else configured_limits.tool_calls
+        if scope.regenerable and compiled_agent.selected_tools:
+            # The SDK checks the entire projected tool batch before executing it.
+            requests = _ORDINARY_TOOL_TURN_LIMIT if requests is None else min(requests, _ORDINARY_TOOL_TURN_LIMIT)
+            tool_calls = _ORDINARY_TOOL_TURN_LIMIT if tool_calls is None else min(tool_calls, _ORDINARY_TOOL_TURN_LIMIT)
         usage_limits = UsageLimits(
             cost_limit=None,
-            request_limit=None
-            if configured_limits is None
-            else configured_limits.model_requests,
-            tool_calls_limit=None
-            if configured_limits is None
-            else configured_limits.tool_calls,
+            request_limit=requests,
+            tool_calls_limit=tool_calls,
             input_tokens_limit=None
             if configured_limits is None
             else configured_limits.input_tokens,
@@ -720,16 +925,51 @@ class AgentExecutor:
                         agent_run_id=scope.agent_run_id,
                         next_model_request_seq=interaction_high_water + 1,
                     )
+                    if scope.regenerable or scope.canonical_step is not None:
+                        def select_session_capability(
+                            capability: AbstractCapability[AgentContext[object]],
+                        ) -> AbstractCapability[AgentContext[object]] | None:
+                            if isinstance(capability, (StepPersistence, StepPersistenceCapability, CapabilityPersistence)):
+                                # A native Session uses its own checkpoint and cannot lend an
+                                # independent Execution's durable capability-write authority.
+                                return None
+                            if isinstance(capability, TraceCapability) and not scope.stage_session_trace:
+                                return None
+                            if isinstance(capability, WrapperCapability):
+                                wrapped = capability.wrapped.visit_and_replace(select_session_capability)
+                                if wrapped is None:
+                                    return None
+                                if wrapped is not capability.wrapped:
+                                    rebound = copy(capability)
+                                    rebound.wrapped = wrapped
+                                    return rebound
+                            return capability
+
+                        runtime_capabilities = tuple(
+                            selected for template in _runtime_feature_policy(compiled_agent.runtime_contributions).capabilities
+                            if (selected := template.visit_and_replace(select_session_capability)) is not None
+                        )
+                        if scope.canonical_step is not None:
+                            runtime_capabilities = (*runtime_capabilities, scope.canonical_step)
+                    else:
+                        runtime_capabilities = (self._runtime_capabilities if self._prepare_runtime_capabilities is None
+                                                else await self._prepare_runtime_capabilities(compiled_agent))
+                    recorder = None
+
+                    def register_compaction_recorder(value: AgentRunRecorder) -> None:
+                        nonlocal recorder
+                        recorder = value
+
                     agent, capabilities = await _materialize_agent(
                         scope,
+                        collect_compaction=register_compaction_recorder if scope.capture_compacted_context else None,
                         model=model,
                         skill_sources=skill_sources,
-                        current_agent=self._current_agent,
-                        asset_sources=self._asset_sources,
+                        current_agent=None if scope.regenerable else self._current_agent,
+                        asset_sources=None if scope.regenerable else self._asset_sources,
                         deferred_pause_sink=record_deferred_step,
                         metrics=self._metrics,
-                        runtime_capabilities=(self._runtime_capabilities if self._prepare_runtime_capabilities is None
-                                              else await self._prepare_runtime_capabilities(compiled_agent)),
+                        runtime_capabilities=runtime_capabilities,
                         callbacks=callbacks,
                         model_journal=model_journal,
                     )
@@ -762,12 +1002,15 @@ class AgentExecutor:
                         final_result = await agent.run(
                             user_prompt,
                             deps=scope.context,
+                            instructions=("The previous turn was interrupted. Its results were not confirmed."
+                                          if scope.previous_turn_interrupted else None),
                             message_history=(
                                 without_history_system_prompts(scope.history)
                                 if scope.replace_history_system_prompt else scope.history
                             ) or None,
                             conversation_id=scope.agent_conversation_id,
-                            run_id=scope.agent_run_id,
+                            run_id=(None if scope.canonical_step is not None and user_prompt is None
+                                    else scope.agent_run_id),
                             usage_limits=usage_limits,
                             usage=run_usage,
                             capabilities=capabilities,
@@ -781,7 +1024,14 @@ class AgentExecutor:
                             _validate_deferred_requests(output)
                             return output
                         run = await scope.run_store.get_agent_run(agent_run_id=scope.agent_run_id)
-                        checkpoint = (await scope.run_store.checkpoint_persistence.reader.latest_snapshot(run_id=scope.agent_run_id)
+                        if scope.regenerable:
+                            # Trace is optional for Step-off Session turns and
+                            # does not own their authoritative conversation.
+                            checkpoint = None
+                        elif scope.canonical_step is not None:
+                            checkpoint = await scope.canonical_step.store.latest_snapshot(run_id=scope.agent_run_id)
+                        else:
+                            checkpoint = (await scope.run_store.checkpoint_persistence.reader.latest_snapshot(run_id=scope.agent_run_id)
                                       if isinstance(scope.run_store, RuntimeAgentRunStore)
                                       and scope.run_store.execution_persistence(scope.agent_run_id)[1]
                                       else await scope.run_store.latest_checkpoint(agent_run_id=scope.agent_run_id))
@@ -795,8 +1045,11 @@ class AgentExecutor:
                             for operation in operations
                             if operation.status
                             not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}
+                            and not (scope.canonical_step is not None
+                                     and isinstance(scope.tool_operations, RuntimeToolOperationBridge)
+                                     and scope.tool_operations.reported_interruption(operation))
                         )
-                        requires_checkpoint = (
+                        requires_checkpoint = not scope.regenerable and (
                             not isinstance(scope.run_store, RuntimeAgentRunStore)
                             or any(scope.run_store.execution_persistence(scope.agent_run_id))
                         )
@@ -823,9 +1076,22 @@ class AgentExecutor:
                             ) from error
                         binding.output_binding.validate_payload(payload)
                         usage = _usage_metrics(run_usage)
-                        return AgentExecutionResult(
-                            scope.agent_run_id, payload, final_result.all_messages(), usage
-                        )
+                        messages = final_result.all_messages()
+                        compacted = None
+                        if recorder is not None and recorder.projected_context_messages:
+                            summaries = session_compaction_summaries(recorder.projected_context_messages)
+                            prior = session_compaction_summaries(scope.history) if summaries else ()
+                            if any(part not in prior for part in summaries):
+                                projected, _ = recorder.checkpoint_context(messages)
+                                # Harness emits the summary as an adjacent request; the
+                                # model runner already normalizes it into the next request.
+                                # Store that same canonical boundary for exact-prefix checks.
+                                if (len(projected) >= 2 and isinstance(first := projected[0], ModelRequest)
+                                        and isinstance(second := projected[1], ModelRequest)
+                                        and tuple(first.parts) == session_compaction_summaries((first,))):
+                                    projected = [replace(second, parts=[*first.parts, *second.parts]), *projected[2:]]
+                                compacted = tuple(projected)
+                        return AgentExecutionResult(scope.agent_run_id, payload, messages, usage, compacted)
                     except BaseException as error:
                         primary_error = error
                         raise
@@ -978,6 +1244,14 @@ class _RunCapabilities(StepBoundaryCapabilities[AgentContext[object]]):
         return rebound
 
 
+@dataclass
+class _RegisteredCapability(WrapperCapability[AgentContext[object]]):
+    toolset: AbstractToolset[AgentContext[object]] | None
+
+    def get_toolset(self) -> AbstractToolset[AgentContext[object]] | None:
+        return self.toolset
+
+
 async def _materialize_agent(
     scope: _AgentRunScope,
     *,
@@ -990,6 +1264,7 @@ async def _materialize_agent(
     model_journal: ModelRequestJournal,
     current_agent: Callable[[CompiledAgent], Awaitable[CompiledAgent]] | None = None,
     asset_sources: Mapping[str, AssetStoreReader] | None = None,
+    collect_compaction: Callable[[AgentRunRecorder], None] | None = None,
 ) -> tuple[
     PydanticAgent[AgentContext[object], object],
     tuple[AbstractCapability[AgentContext[object]], ...],
@@ -1035,27 +1310,63 @@ async def _materialize_agent(
         else:
             scope.deferred_capability_refs.pop(call.tool_call_id, None)
 
+    split_approval = scope.tool_operations
     capabilities: list[AbstractCapability[AgentContext[object]]] = [
-        PydanticToolControlCapability(before_validate=observe_tool_validation), RunCallbackScope(callbacks),
+        PydanticToolControlCapability(
+            before_validate=observe_tool_validation,
+            _after_validate=(split_approval._capture_split_approval
+                             if isinstance(split_approval, RuntimeToolOperationBridge)
+                             and split_approval._split_approval_ref is not None
+                             and split_approval._producer_generation == 1 else None),
+        ), RunCallbackScope(callbacks),
         BindReferencedInputOrigins(),
     ]
+    tool_metrics = (
+        None if metrics is None else ToolMetricContext(
+            metrics, source_namespace=scope.context.namespace,
+            tenant_id=scope.context.principal.tenant_id, execution_id=scope.context.execution_id,
+            session_id=scope.context.session_id, agent_run_id=scope.agent_run_id,
+            agent_id=compiled_agent.spec.id,
+        )
+    )
+    selected_tools = {candidate.id: candidate for candidate in compiled_agent.selected_tools}
+    owned_tools: set[str] = set()
     for candidate in compiled_agent.selected_capabilities:
         if not isinstance(candidate.value, AbstractCapability):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        capabilities.append(bind_run_callbacks(
-            candidate.value, CapabilityRef("capability", candidate.id, candidate.revision), callbacks,
-        ))
+        if candidate.tool_members is None:
+            capabilities.append(bind_run_callbacks(
+                candidate.value, CapabilityRef("capability", candidate.id, candidate.revision), callbacks,
+            ))
+        else:
+            if scope.canonical_step is None:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={
+                    "field": "agent", "reason": "registered_capability_requires_session_checkpoint",
+                })
+            owned_tools.update(ref.id for ref in candidate.tool_members)
+            toolset = create_business_toolset(
+                tuple(selected_tools[ref.id] for ref in candidate.tool_members),
+                id=candidate.id, tool_operations=scope.tool_operations, tool_metrics=tool_metrics,
+                budget=scope.budget, tool_effects=scope.tool_effects, result_callbacks=callbacks,
+                reserved_tool_names=scope.memory_tool_names, manage_approval=True,
+            )
+            capabilities.append(_RegisteredCapability(
+                candidate.value, toolset, id=candidate.id,
+                defer_loading=bool(candidate.contract["defer_loading"]),
+            ))
+
     async def current_skills() -> tuple[SkillDefinition, ...]:
         current = compiled_agent if current_agent is None else await current_agent(compiled_agent)
         return current.skill_definitions
 
-    if scope.preload_skills or compiled_agent.spec.allow_skills and (compiled_agent.skill_definitions or asset_sources):
+    if not scope.regenerable and (scope.preload_skills or compiled_agent.spec.allow_skills and
+                                  (compiled_agent.skill_definitions or asset_sources)):
         initial_skills = compiled_agent.skill_definitions if scope.initial_skills is None else scope.initial_skills
         skill_capability = SkillCapability(
             initial_skills,
             skill_sources,
             resource_paths=scope.skill_resource_paths,
-            discover=current_skills,
+            discover=None if current_agent is None else current_skills,
             preload_skills=scope.preload_skills,
             mounted_resources={
                 skill.id: skill.source_ref
@@ -1076,15 +1387,6 @@ async def _materialize_agent(
             )
         )
 
-    if scope.subagent_available and scope.binding.binding_contract.subagents:
-        if scope.subagent_delegate is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        subagent_capability = SubagentCapability(
-            scope.binding.binding_contract.subagents,
-            scope.subagent_delegate,
-            scope.subagent_descriptions,
-        )
-        capabilities.append(subagent_capability)
     prepare_tools = _plan_mode_prepare(
         plan_mode=scope.mode == "plan",
         compaction_policy=compaction_policy,
@@ -1100,18 +1402,6 @@ async def _materialize_agent(
         )
     )
 
-    tool_metrics = (
-        None
-        if metrics is None
-        else ToolMetricContext(metrics,
-            source_namespace=scope.context.namespace,
-            tenant_id=scope.context.principal.tenant_id,
-            execution_id=scope.context.execution_id,
-            session_id=scope.context.session_id,
-            agent_run_id=scope.agent_run_id,
-            agent_id=compiled_agent.spec.id,
-        )
-    )
     async def commit_history_boundary() -> None:
         if isinstance(scope.run_store, RuntimeAgentRunStore):
             await scope.run_store.flush_execution_projection(
@@ -1149,6 +1439,29 @@ async def _materialize_agent(
     if scope.budget is not None:
         capabilities.append(RunBudgetCapability(scope.budget))
 
+    if scope.subagent_available and scope.binding.binding_contract.subagents:
+        native_leaf = scope.native_subagent_leaf
+        delegate = scope.subagent_delegate
+        wrap = None
+        if native_leaf is not None:
+            delegate = _require_claimed_subagent
+
+            def wrap(capability, toolset):
+                return BoundaryToolset(
+                    (toolset,), {
+                        "list_subagents": ManagedToolDescriptor("none", "none", "business"),
+                        "delegate_task": ManagedToolDescriptor("tool_operation", "non_replay_safe", "business"),
+                    }, id=capability.id, tool_operations=scope.tool_operations, tool_metrics=tool_metrics,
+                    tool_effects=scope.tool_effects, budget=scope.budget, result_callbacks=callbacks,
+                    claimed_leaves={"delegate_task": native_leaf(capability)},
+                )
+
+        if delegate is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        capabilities.append(SubagentCapability(
+            scope.binding.binding_contract.subagents, delegate, scope.subagent_descriptions, _wrap_toolset=wrap,
+        ))
+
     raw_toolsets: list[AbstractToolset[AgentContext[object]]] = []
     def wrap_workspace_toolset(
         toolset: AbstractToolset[AgentContext[object]],
@@ -1184,7 +1497,8 @@ async def _materialize_agent(
             return capability.bind(
                 [name for name in workspace_names if name in {tool.name for tool in capability.tool_definitions()}],
                 backend=scope.workspace_backend, limits=scope.limits,
-                model_binding=compiled_agent.model, wrap_toolset=wrap_workspace_toolset,
+                model_binding=compiled_agent.model, bounded_previews=scope.regenerable,
+                wrap_toolset=wrap_workspace_toolset,
             )
         return capability
 
@@ -1193,16 +1507,21 @@ async def _materialize_agent(
         if (bound := template.visit_and_replace(bind_workspace)) is not None
     )
     async def current_tools() -> CompiledAgent:
-        return compiled_agent if current_agent is None else await current_agent(compiled_agent)
+        # Native Step keeps the admitted tool registry; only skills can rediscover.
+        if scope.canonical_step is not None or current_agent is None:
+            return compiled_agent
+        return await current_agent(compiled_agent)
 
-    raw_toolsets.insert(0, create_current_toolset(
-        current_tools, asset_readers={} if asset_sources is None else asset_sources,
-        workspace_backend=scope.workspace_backend, workspace_provider=scope.workspace_provider,
-        register_cleanup=scope.register_tool_cleanup, tool_operations=scope.tool_operations,
-        tool_metrics=tool_metrics, budget=scope.budget, tool_effects=scope.tool_effects, input_limits=scope.limits,
-        response_fixture=scope.response_fixture, result_callbacks=callbacks,
-        reserved_tool_names=scope.memory_tool_names,
-    ))
+    if not scope.regenerable:
+        raw_toolsets.append(create_current_toolset(
+            current_tools, asset_readers={} if asset_sources is None else asset_sources,
+            workspace_backend=scope.workspace_backend, workspace_provider=scope.workspace_provider,
+            register_cleanup=scope.register_tool_cleanup, tool_operations=scope.tool_operations,
+            tool_metrics=tool_metrics, budget=scope.budget, tool_effects=scope.tool_effects, input_limits=scope.limits,
+            response_fixture=scope.response_fixture, result_callbacks=callbacks,
+            reserved_tool_names=scope.memory_tool_names, owned_tool_names=frozenset(owned_tools),
+            manage_approval=scope.canonical_step is not None and not scope.split_step,
+        ))
     async def publish_model_request_event(
         event_type: ExecutionEventType,
         payload: JsonValue,
@@ -1231,6 +1550,7 @@ async def _materialize_agent(
         interaction_recorder=run_recorder,
         event_sink=publish_model_request_event,
         model_boundary=commit_model_boundary,
+        before_first_model_dispatch=scope.before_first_model_dispatch,
         budget=scope.budget,
     )
     model_observation = (
@@ -1271,6 +1591,7 @@ async def _materialize_agent(
         model_journal=model_journal,
         model_request_recorder=model_observation.record_external_model_request,
         recorder=run_recorder,
+        stage_session_trace=scope.stage_session_trace,
         budget=scope.budget,
     )
     existing_ids: set[str] = set()
@@ -1288,6 +1609,8 @@ async def _materialize_agent(
     business_output_type: object
     if scope.binding.output_binding.mode == "text":
         business_output_type = TextOutput(_assistant_text_output)
+    elif scope.regenerable or scope.canonical_step is not None:
+        business_output_type = ToolOutput(scope.binding.output_type, name=CANONICAL_OUTPUT_TOOL_NAME)
     else:
         business_output_type = scope.binding.output_type
     output_type: object = [business_output_type, DeferredToolRequests]
@@ -1311,12 +1634,15 @@ async def _materialize_agent(
     capabilities.append(
         _event_stream_capability(
             scope.event_sink, run_recorder, scope.agent_run_seq, scope.tool_operations,
+            streamed_output_bytes=scope.streamed_output_bytes,
             output_preview=None if scope.parent_agent_run_id is not None or scope.context.parent_execution_id is not None else OutputPreview.from_binding(
                 scope.binding.output_binding,
                 runtime_policy.execution,
             ),
         )
     )
+    if collect_compaction is not None:
+        collect_compaction(run_recorder)
     return agent, (_RunCapabilities(capabilities),)
 
 
@@ -1382,11 +1708,15 @@ def _event_stream_capability(
     agent_run_seq: int,
     tool_operations: ToolOperationBridge | None = None,
     *, output_preview: OutputPreview | None = None,
+    streamed_output_bytes: int | None = None,
 ) -> ProcessEventStream[AgentContext[object]]:
+    remaining = streamed_output_bytes
+
     async def forward(
         _ctx: PydanticRunContext[AgentContext[object]],
         events: AsyncIterable[AgentStreamEvent],
     ) -> None:
+        nonlocal remaining
         preview = None if output_preview is None else output_preview.new_stream()
         preview_attempt: tuple[JsonValue, JsonValue] | None = None
         tool_started: dict[str, int] = {}
@@ -1398,6 +1728,10 @@ def _event_stream_capability(
                 started = tool_started.pop(event.part.tool_call_id, None)
                 tool_elapsed_ms = None if started is None else (monotonic_ns() - started) // 1_000_000
             emission = _map_event(event)
+            if remaining is not None and isinstance(emission, LiveDelta):
+                content = emission.content
+                if len(content) > remaining or (remaining := remaining - len(content.encode("utf-8"))) < 0:
+                    raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE, "Generated content exceeds the turn output budget")
             if isinstance(event, (PartStartEvent, PartDeltaEvent, PartEndEvent)):
                 position["part_index"] = event.index
             if isinstance(event, (PartStartEvent, PartEndEvent)) and isinstance(event.part, ThinkingPart):
@@ -1406,8 +1740,13 @@ def _event_stream_capability(
                 )
                 if elapsed_ms is not None:
                     position["thinking_elapsed_ms"] = elapsed_ms
-            if preview is not None:
-                attempt = (position.get("model_request_seq"), position.get("stream_attempt_seq"))
+            if preview is not None and "message_seq" not in position:
+                request_seq = position.get("model_request_seq")
+                if type(request_seq) is int:
+                    direct_attempt_seq = recorder.direct_stream_attempt_seq(request_seq)
+                    if direct_attempt_seq is not None:
+                        position["stream_attempt_seq"] = direct_attempt_seq
+                attempt = (request_seq, position.get("stream_attempt_seq"))
                 if preview_attempt is not None and preview_attempt != attempt:
                     preview = preview.new_stream()
                 preview_attempt = attempt

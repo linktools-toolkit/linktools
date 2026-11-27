@@ -20,8 +20,8 @@ from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("conversation", (False, True))
-async def test_cold_runtime_continues_sticky_snapshot_with_source_owned_history(tmp_path, conversation) -> None:
+@pytest.mark.parametrize("retain_history", (False, True))
+async def test_cold_runtime_continues_sticky_snapshot_with_source_owned_history(tmp_path, retain_history) -> None:
     blocked = asyncio.Event()
     calls = []
 
@@ -36,7 +36,7 @@ async def test_cold_runtime_continues_sticky_snapshot_with_source_owned_history(
     def features(model):
         result = RuntimeFeatures("sticky-native")
         result.agent("default", allow_tools=())
-        result.capability(ExecutionCapability(retain_history=conversation), scope="runtime")
+        result.capability(ExecutionCapability(retain_history=retain_history), scope="runtime")
         result.capability(ProcessHistory(lambda _messages: [ModelRequest(parts=[UserPromptPart("sticky context")])]),
                           id="sticky", scope="runtime")
         result.capability(StepPersistence(store=SqliteStepStore(database=tmp_path / "steps.db"), capture_frontier=True),
@@ -45,9 +45,7 @@ async def test_cold_runtime_continues_sticky_snapshot_with_source_owned_history(
 
     async with Persistence.open("sticky-native", storage=PersistenceStorage.from_root(tmp_path / "runtime", exclusive_writer=True)) as persistence:
         async with Runtime.open(persistence=persistence, features=features(stopped), auto_recover=False) as runtime:
-            agent = runtime.agents.get()
-            runner = await agent.create_session("session") if conversation else agent
-            execution = await runner.start("question", idempotency_key="start")
+            execution = await runtime.agents.get().start("question", idempotency_key="start")
             await asyncio.wait_for(blocked.wait(), 5)
             await runtime.handoff()
             checkpoint = await persistence.execution.executions.get(execution.execution_id, tenant_id="default")
@@ -71,12 +69,19 @@ async def test_cold_runtime_continues_sticky_snapshot_with_source_owned_history(
                                                          idempotency_key="recover")
             outcome = await runtime.executions.wait(execution.execution_id, principal=runtime.default_principal, timeout_seconds=5)
             assert outcome.result.status is ExecutionStatus.SUCCEEDED, outcome.result
-            assert calls and "sticky context" in str(calls[-1])
-            if conversation:
-                page = await runtime.history.messages("session", principal=runtime.default_principal, limit=100)
-                parts = [part for message in page.items for part in message.parts]
-                assert [part.content for part in parts if isinstance(part, UserPromptPart)] == ["sticky context"]
-                assert [part.content for part in parts if isinstance(part, TextPart)] == ["continued"]
+            assert outcome.result.output == {"text": "continued"}
+            assert len(calls) == 1
+            assert [part.content for message in calls[0] for part in message.parts
+                    if isinstance(part, UserPromptPart)] == ["sticky context"]
+            successor = await persistence.execution.executions.get(execution.execution_id, tenant_id="default")
+            assert successor is not None and successor.recovery is not None
+            assert successor.recovery.agent_run_id != source
+            assert await reader.latest_snapshot(run_id=source, include_interrupted=True) == snapshot
+            continuation = await reader.latest_snapshot(run_id=successor.recovery.agent_run_id)
+            assert continuation is not None
+            parts = [part for message in continuation.messages for part in message.parts]
+            assert [part.content for part in parts if isinstance(part, UserPromptPart)] == ["sticky context"]
+            assert [part.content for part in parts if isinstance(part, TextPart)] == ["continued"]
 
 
 @pytest.mark.asyncio

@@ -6,15 +6,15 @@ from __future__ import annotations
 import secrets
 from collections.abc import Mapping, Sequence, Callable, Awaitable
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, Literal, TypeVar
 from pydantic import BaseModel
 from linktools.core import environ
 from ..agent import AgentBinding, AgentBindingContract, AgentCompiler, CompiledAgent, OutputBinding, bind_output
 from ..session import SessionContext, normalize_session_context
 from ..capability import MemoryCapability
 from ._capabilities import runtime_feature_leaves
-from ..core import (BudgetUsage, OperationLedgerInput, ExecutionMode, RunBudget, Principal, ThinkingValue, ToolEffects, normalize_execution_mode,
-                    normalize_thinking, overlay_correlation, validate_idempotency_key)
+from ..core import (BudgetUsage, OperationLedgerInput, OperationLedgerRecord, ExecutionMode, JsonValue, RunBudget, Principal, ThinkingValue, ToolEffects, normalize_execution_mode,
+                    normalize_thinking, overlay_correlation, validate_execution_request_key)
 from ..errors import AIError, ErrorCode
 from ..execution import (ExecutionHandle, Execution, ExecutionInputContext, ExecutionRequest,
     ExecutionView, ExecutionResult, CancelExecutionRequest, CancelExecutionResult, ExecutionHistoryService,
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from ._execution import DefaultExecutionService
     from ..execution import ExecutionRecord
     from ..session import SessionService
-    from ..task import TaskNodeInvocation
+    from ..task import TaskGraphAdmission, TaskNodeInvocation
     from ..inputs import InputCaptures
     from ..persistence import Persistence
 
@@ -40,7 +40,7 @@ class AgentExecutionPort(Generic[AppT]):
     _binding_contract: AgentBindingContract | None
     _compiler: AgentCompiler
     _service: DefaultExecutionService
-    _sessions: SessionService
+    _sessions: SessionService | None
     _operations: ExecutionBinding
     watch_tree: ExecutionTreeWatcher
     resolve_binding: Callable[[AgentBinding], Awaitable[AgentBinding]]
@@ -125,6 +125,37 @@ class AgentExecutionPort(Generic[AppT]):
 
     def owns_execution(self, execution_id: str, *, tenant_id: str) -> bool:
         return self._service.runtime_backend().owns_execution(execution_id, tenant_id=tenant_id)
+
+    async def settle_bound_graph_cancel(
+        self, execution_id: str, *, node_id: str, operation: OperationLedgerRecord, principal: Principal,
+    ) -> bool:
+        self._operations.ensure_open()
+        return await self._service.settle_bound_graph_cancel(
+            execution_id, node_id=node_id, operation=operation, principal=principal,
+        )
+
+    async def is_linked_graph_turn(self, execution_id: str, *, principal: Principal) -> bool:
+        self._operations.ensure_open()
+        return await self._service.is_linked_graph_turn(execution_id, principal=principal)
+
+    async def recover_bound_graph_turn(
+        self, execution_id: str, *, task_invocation: TaskNodeInvocation,
+        recovery_operation: OperationLedgerRecord, principal: Principal,
+    ) -> bool:
+        self._operations.ensure_open()
+        return await self._service.recover_bound_graph_turn(
+            execution_id, task_invocation=task_invocation, recovery_operation=recovery_operation, principal=principal,
+        )
+
+    async def reconcile_bound_graph_handoff(self, execution_id: str, *, principal: Principal) -> None:
+        self._operations.ensure_open()
+        await self._service.reconcile_bound_graph_handoff(execution_id, principal=principal)
+
+    async def resume_bound_graph_turn(
+        self, execution_id: str, *, task_invocation: TaskNodeInvocation,
+    ) -> Literal["resumed", "waiting"] | None:
+        self._operations.ensure_open()
+        return await self._service.resume_bound_graph_turn(execution_id, task_invocation=task_invocation)
 
     async def recover_bound_execution(
         self, execution: ExecutionRecord, *, recovery_operation: OperationLedgerInput,
@@ -225,40 +256,9 @@ class AgentExecutionPort(Generic[AppT]):
     ) -> ModelInteractionSubscription | None:
         return await self._history_reader().subscribe_model_interactions(execution_id, principal=principal)
 
-    async def start(
-        self,
-        user_prompt: CanonicalUserInput,
-        *,
-        files: Sequence[str],
-        output: "type[BaseModel] | OutputBinding | None",
-        principal: "Principal | None",
-        session_id: "str | None",
-        idempotency_key: "str | None",
-        mode: ExecutionMode,
-        planning: "bool | None",
-        thinking: "ThinkingValue | None",
-        correlation: "Mapping[str, object] | None" = None,
-        dependency_hold_id: "str | None" = None,
-        requires_task_invocation_capture: bool = False,
-        input_context: ExecutionInputContext | None = None,
-        budget: RunBudget | None = None,
-        budget_scope_id: str | None = None,
-        tool_effects: ToolEffects = "live",
-        session_context: SessionContext = "all",
-        _resume: Callable[..., Awaitable[ExecutionHandle]] | None = None,
-    ) -> "Execution[AppT]":
-        self._operations.ensure_open()
-        normalize_session_context(session_context)
-        if session_context != "all" and session_id is None:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "session_context_requires_session"})
-        key = secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key
-        validate_idempotency_key(key)
-        if input_context is not None and session_id is not None:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "imported_context_requires_new_execution"})
-        resolved_principal = self.default_principal if principal is None else principal
-        effective_correlation = overlay_correlation(self.correlation, correlation)
-        resolved_files = normalize_input_files(files)
-        captured = self.captured or requires_task_invocation_capture
+    async def _resolve_start_binding(
+        self, output: "type[BaseModel] | OutputBinding | None", *, captured: bool,
+    ) -> AgentBinding:
         if not captured and self.resolve_current is not None:
             agent_id = self.agent_id if self.compiled is None else self.compiled.spec.id
             if agent_id is None:
@@ -290,12 +290,49 @@ class AgentExecutionPort(Generic[AppT]):
                     )
             if not captured or self.restore_binding is None:
                 binding = await self.resolve_binding(binding)
+        return binding
+
+    async def start(
+        self,
+        user_prompt: CanonicalUserInput,
+        *,
+        files: Sequence[str],
+        output: "type[BaseModel] | OutputBinding | None",
+        principal: "Principal | None",
+        session_id: "str | None",
+        idempotency_key: "str | None",
+        mode: ExecutionMode,
+        planning: "bool | None",
+        thinking: "ThinkingValue | None",
+        correlation: "Mapping[str, object] | None" = None,
+        dependency_hold_id: "str | None" = None,
+        requires_task_invocation_capture: bool = False,
+        input_context: ExecutionInputContext | None = None,
+        budget: RunBudget | None = None,
+        budget_scope_id: str | None = None,
+        tool_effects: ToolEffects = "live",
+        session_context: SessionContext = "all",
+        _resume: Callable[..., Awaitable[ExecutionHandle]] | None = None,
+        task_invocation: TaskNodeInvocation | None = None,
+        task_admission: TaskGraphAdmission | None = None,
+    ) -> "Execution[AppT]":
+        self._operations.ensure_open()
+        normalize_session_context(session_context)
+        if session_context != "all" and session_id is None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "session_context_requires_session"})
+        key = secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key
+        validate_execution_request_key(key)
+        if input_context is not None and session_id is not None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "imported_context_requires_new_execution"})
+        resolved_principal = self.default_principal if principal is None else principal
+        effective_correlation = overlay_correlation(self.correlation, correlation)
+        resolved_files = normalize_input_files(files)
+        captured = self.captured or requires_task_invocation_capture
+        binding = await self._resolve_start_binding(output, captured=captured)
         compiled_agent = binding.compiled_agent
-        resolved_mode, resolved_planning, resolved_thinking = _execution_policy(
-            compiled_agent,
-            mode=mode,
-            planning=planning,
-            thinking=thinking,
+        resolved_mode, resolved_planning, resolved_thinking = resolve_execution_policy(
+            mode=mode, planning=planning, thinking=thinking,
+            default_planning=compiled_agent.spec.planning, default_thinking=compiled_agent.spec.thinking,
         )
         request = ExecutionRequest(
             user_prompt=user_prompt,
@@ -325,31 +362,49 @@ class AgentExecutionPort(Generic[AppT]):
                 resolved_binding=binding,
             )
         else:
-            resume_request = ResumeSessionRequest(
-                principal=resolved_principal,
-                user_prompt=request.user_prompt,
-                idempotency_key=request.idempotency_key,
-                memory_scope=request.memory_scope,
-                mode=request.mode,
-                planning=request.planning,
-                thinking=request.thinking,
-                correlation=effective_correlation,
-                files=request.files,
-                budget=request.budget,
-                tool_effects=request.tool_effects,
-                session_context=request.session_context,
-            )
-            handle = await (_resume or self._sessions.resume)(
-                compiled_agent.spec.id,
-                binding.binding_digest,
-                session_id,
-                resume_request,
-                binding_contract=binding.binding_contract,
-                resolved_binding=binding,
-                dependency_hold_id=dependency_hold_id,
-                budget_scope_id=budget_scope_id,
-                requires_task_invocation_capture=requires_task_invocation_capture,
-            )
+            handle = None
+            if task_invocation is not None and task_admission is not None:
+                handle = await self._service.start_task_session(
+                    binding.binding_digest,
+                    request,
+                    session_id=session_id,
+                    task_invocation=task_invocation,
+                    task_admission=task_admission,
+                    dependency_hold_id=dependency_hold_id,
+                    binding_contract=binding.binding_contract,
+                    resolved_binding=binding,
+                    budget_scope_id=budget_scope_id,
+                )
+            if handle is None:
+                if self._sessions is None:
+                    raise AIError(
+                        ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "Use the native session API on this host",
+                    )
+                resume_request = ResumeSessionRequest(
+                    principal=resolved_principal,
+                    user_prompt=request.user_prompt,
+                    idempotency_key=request.idempotency_key,
+                    memory_scope=request.memory_scope,
+                    mode=request.mode,
+                    planning=request.planning,
+                    thinking=request.thinking,
+                    correlation=effective_correlation,
+                    files=request.files,
+                    budget=request.budget,
+                    tool_effects=request.tool_effects,
+                    session_context=request.session_context,
+                )
+                handle = await (_resume or self._sessions.resume)(
+                    compiled_agent.spec.id,
+                    binding.binding_digest,
+                    session_id,
+                    resume_request,
+                    binding_contract=binding.binding_contract,
+                    resolved_binding=binding,
+                    dependency_hold_id=dependency_hold_id,
+                    budget_scope_id=budget_scope_id,
+                    requires_task_invocation_capture=requires_task_invocation_capture,
+                )
         _logger.info(
             "runtime execution admitted: execution=%s agent=%s session=%s "
             "mode=%s planning=%s thinking=%s",
@@ -364,6 +419,7 @@ class AgentExecutionPort(Generic[AppT]):
             handle.execution_id,
             resolved_principal,
             self.watch_tree,
+            task_invocation_captured=handle.task_invocation_captured,
         )
 
 
@@ -381,27 +437,16 @@ def _memory_scope(compiled_agent: CompiledAgent) -> str | None:
     return scopes[0] if scopes else None
 
 
-def _execution_policy(
-    compiled_agent: CompiledAgent,
-    *,
-    mode: ExecutionMode,
-    planning: "bool | None",
-    thinking: "ThinkingValue | None",
-) -> "tuple[ExecutionMode, bool, ThinkingValue]":
+def resolve_execution_policy(
+    *, mode: ExecutionMode, planning: bool | None, thinking: JsonValue,
+    default_planning: bool, default_thinking: ThinkingValue,
+) -> tuple[ExecutionMode, bool, ThinkingValue]:
     resolved_mode = normalize_execution_mode(mode)
     if planning is not None and not isinstance(planning, bool):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    resolved_planning = (
-        compiled_agent.spec.planning
-        if planning is None
-        else planning
-    )
-    if resolved_mode == "plan":
-        resolved_planning = True
-    resolved_thinking = (
-        compiled_agent.spec.thinking if thinking is None else normalize_thinking(thinking)
-    )
-    return resolved_mode, resolved_planning, resolved_thinking
+    resolved_planning = default_planning if planning is None else planning
+    return (resolved_mode, resolved_mode == "plan" or resolved_planning,
+            default_thinking if thinking is None else normalize_thinking(thinking))
 
 
-__all__ = ["AgentExecutionPort"]
+__all__ = ["AgentExecutionPort", "resolve_execution_policy"]

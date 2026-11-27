@@ -60,6 +60,7 @@ from ...task import (
     TaskResultRecord,
     TaskResultRef,
     TaskNodeResultRef,
+    TaskInvocationInputContract,
     TaskInvocationInputRef,
     TaskRef,
 )
@@ -667,7 +668,6 @@ class TaskNodeExecutor(Generic[AppT]):
                         node,
                         admission.principal.tenant_id,
                         tasks,
-                        request_identity_version=admission.request_identity_version,
                     )
                     for node in graph.nodes
                 ]
@@ -699,8 +699,6 @@ class TaskNodeExecutor(Generic[AppT]):
         node: TaskNode,
         tenant_id: str,
         tasks: Mapping[tuple[str, int], Task[AppT]],
-        *,
-        request_identity_version: int = 2,
     ) -> TaskNode:
         reference = node.task
         if reference is None or node.input_capture is not None:
@@ -716,7 +714,6 @@ class TaskNodeExecutor(Generic[AppT]):
             tenant_id=tenant_id,
             contract=task.contract,
             materializer=self._input_materializer,
-            request_identity_version=request_identity_version,
         )
 
     async def restore_prepared_agent_prompt(
@@ -745,15 +742,11 @@ class TaskNodeExecutor(Generic[AppT]):
     async def get_prepared_agent_input(
         self,
         invocation: TaskNodeInvocation,
+        *,
+        admission: TaskGraphAdmission,
     ) -> TaskPreparedInputRecord | None:
         task_ref = invocation.node.task
         if task_ref is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        admission = await self._task_admissions.get(
-            invocation.graph_id,
-            tenant_id=invocation.principal.tenant_id,
-        )
-        if admission is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         record = await self._task_state.get_prepared_input(
             invocation.graph_id,
@@ -777,6 +770,7 @@ class TaskNodeExecutor(Generic[AppT]):
         self,
         invocation: TaskNodeInvocation,
         *,
+        admission: TaskGraphAdmission,
         input_identity: str,
         source_refs: tuple[tuple[str, TaskResultRef], ...],
         stored_user_input: StoredUserInput,
@@ -787,12 +781,6 @@ class TaskNodeExecutor(Generic[AppT]):
         task_ref = invocation.node.task
         if lease is None or task_ref is None:
             raise AIError(ErrorCode.TASK_FENCE_STALE)
-        admission = await self._task_admissions.get(
-            invocation.graph_id,
-            tenant_id=invocation.principal.tenant_id,
-        )
-        if admission is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         candidate = TaskPreparedInputRecord(
             invocation.graph_id,
             invocation.node.node_id,
@@ -1314,7 +1302,7 @@ class TaskNodeExecutor(Generic[AppT]):
         self,
         graph_id: str,
         request: RecoverGraphRequest,
-    ) -> None:
+    ) -> frozenset[str]:
         tenant_id = request.principal.tenant_id
         header = await self._task_state.get_header(graph_id, tenant_id=tenant_id)
         if header is None:
@@ -1400,9 +1388,22 @@ class TaskNodeExecutor(Generic[AppT]):
                 continue
             candidates.append((node, node_state, execution, agent_runner))
 
+        linked = set()
         for node, node_state, execution, agent_runner in candidates:
             node_state = await self._validate_recovery_node_binding(graph_id, node, node_state, tenant_id)
             await agent_runner.bind_existing_execution(execution.execution_id, admission.principal)
+            if node.input.get("session_id") is not None and await agent_runner.execution_port.is_linked_graph_turn(
+                execution.execution_id, principal=request.principal,
+            ):
+                deadline = agent_runner.deadline_policy(node, execution.started_at, self._budget_scopes.get(graph_id))
+                if (node_state.status is not TaskStatus.RECOVERY_REQUIRED
+                        or deadline is not None and deadline[0] <= datetime.now(timezone.utc)
+                        or execution.status is not ExecutionStatus.STARTED
+                        or execution.producer_generation != 0 or execution.agent_run_seq != 0
+                        or execution.producer_claim_id is not None):
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                linked.add(execution.execution_id)
+                continue
             if not await agent_runner.recover_bound_execution(
                 execution, graph_id=graph_id, node=node, node_state=node_state,
                 request=request,
@@ -1416,6 +1417,7 @@ class TaskNodeExecutor(Generic[AppT]):
             if latest.status is ExecutionStatus.RECOVERY_REQUIRED:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             await self._validate_recovery_node_binding(graph_id, node, node_state, tenant_id)
+        return frozenset(linked)
 
     async def _validate_recovery_node_binding(
         self,
@@ -1588,7 +1590,10 @@ class TaskNodeExecutor(Generic[AppT]):
                     },
                 )
 
-    async def _restore_invocation(self, invocation: TaskNodeInvocation) -> TaskNodeInvocation:
+    async def _restore_invocation(
+        self, invocation: TaskNodeInvocation,
+    ) -> tuple[TaskNodeInvocation, TaskInvocationInputContract | None]:
+        contract = None
         if invocation.node.input_capture is not None:
             if self._input_captures is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -1621,7 +1626,7 @@ class TaskNodeExecutor(Generic[AppT]):
                 effect_policy=node.effect_policy, reconcile=node.reconcile,
                 dependency_policy=node.dependency_policy, failure_policy=node.failure_policy)
             invocation = replace(invocation, node=restored, input_capture=node.input_capture)
-        return invocation
+        return invocation, contract
 
     @contextmanager
     def confirm_execution_result(self, execution_id: str) -> Iterator[None]:
@@ -1647,7 +1652,7 @@ class TaskNodeExecutor(Generic[AppT]):
         control: TaskNodeRunControl,
     ) -> TaskNodeRunResult:
         original_invocation = invocation
-        invocation = await self._restore_invocation(invocation)
+        invocation, captured_input = await self._restore_invocation(invocation)
         node = invocation.node
         graph_id = invocation.graph_id
         principal = invocation.principal
@@ -1662,10 +1667,16 @@ class TaskNodeExecutor(Generic[AppT]):
             node_id=node.node_id,
             request=False,
         )
+        if captured_input is None and invocation.input_capture is not None:
+            if self._input_captures is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            captured_input = await self._input_captures.read_task(invocation.input_capture, principal=principal)
         if isinstance(handler, _TaskRunnerAdapter):
-            if invocation.input_capture is not None:
-                contract = await self._input_captures.read_task(invocation.input_capture, principal=principal)
-                invocation = replace(invocation, dependency_states={**invocation.dependency_states, **{item.name: item.state for item in contract.dependencies}})
+            if captured_input is not None:
+                invocation = replace(invocation, dependency_states={
+                    **invocation.dependency_states,
+                    **{item.name: item.state for item in captured_input.dependencies},
+                })
             if isinstance(handler.runner, AgentTaskRunner):
                 runner_result = await handler.runner.run(
                     invocation, control=control, budget_scope=self._budget_scopes.get(graph_id),
@@ -1686,10 +1697,9 @@ class TaskNodeExecutor(Generic[AppT]):
             for name, reference in node.input_refs.items()
             if isinstance(reference, TaskNodeResultRef)
         }}
-        if invocation.input_capture is not None:
-            contract = await self._input_captures.read_task(invocation.input_capture, principal=principal)
-            dependency_states = {**dependency_states, **{item.name: item.state for item in contract.dependencies}}
-            for item in contract.dependencies:
+        if captured_input is not None:
+            dependency_states = {**dependency_states, **{item.name: item.state for item in captured_input.dependencies}}
+            for item in captured_input.dependencies:
                 if item.state.status is TaskStatus.SUCCEEDED:
                     dependencies[item.name] = TaskDependency(item.source_ref.node_id, item.body_digest, item.execution_id, invocation.input_capture, item.name)
         binding = _task_binding(node, handler, task_id, task_revision)
@@ -2563,8 +2573,24 @@ class TaskNodeExecutor(Generic[AppT]):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
+    async def settle_linked_graph_cancel(self, invocation: TaskNodeInvocation) -> None:
+        """Reconcile only a linked Agent cancellation, without retrying task effects."""
+        task_id, task_revision, _ = _parse_node(invocation.node, request=False)
+        handler = self._handler(
+            task_id, task_revision, graph_id=invocation.graph_id,
+            node_id=invocation.node.node_id, request=False,
+        )
+        if not isinstance(handler, _TaskRunnerAdapter) or not isinstance(handler.runner, AgentTaskRunner):
+            return
+        invocation, _ = await self._restore_invocation(invocation)
+        _, _, body = _parse_node(invocation.node, request=False)
+        if body.get("session_id") is not None and invocation.execution_id is not None and invocation.cancel_authority is not None:
+            await handler.runner.settle_bound_graph_cancel(
+                invocation, invocation.execution_id, invocation.cancel_authority,
+            )
+
     async def cancel(self, invocation: TaskNodeInvocation) -> None:
-        invocation = await self._restore_invocation(invocation)
+        invocation, captured_input = await self._restore_invocation(invocation)
         graph_id = invocation.graph_id
         node = invocation.node
         principal = invocation.principal
@@ -2603,12 +2629,6 @@ class TaskNodeExecutor(Generic[AppT]):
         }:
             return
         execution_cancelled = execution_view.status is ExecutionStatus.CANCELLED
-        if execution_view.status is ExecutionStatus.RECOVERY_REQUIRED:
-            raise TaskNodeRunError(
-                ErrorCode.TASK_EFFECT_UNKNOWN,
-                execution_id,
-            )
-
         task_id, task_revision, body = _parse_node(node, request=False)
         handler = self._handler(
             task_id,
@@ -2617,6 +2637,15 @@ class TaskNodeExecutor(Generic[AppT]):
             node_id=node.node_id,
             request=False,
         )
+        if (body.get("session_id") is not None and isinstance(handler, _TaskRunnerAdapter)
+                and isinstance(handler.runner, AgentTaskRunner) and invocation.cancel_authority is not None):
+            if await handler.runner.settle_bound_graph_cancel(
+                invocation, execution_id, invocation.cancel_authority,
+            ):
+                return
+        if execution_view.status is ExecutionStatus.RECOVERY_REQUIRED:
+            raise TaskNodeRunError(ErrorCode.TASK_EFFECT_UNKNOWN, execution_id)
+
         if isinstance(handler, _TaskRunnerAdapter):
             if execution_cancelled and isinstance(
                 handler.runner,
@@ -2643,10 +2672,13 @@ class TaskNodeExecutor(Generic[AppT]):
             for name, reference in node.input_refs.items()
             if isinstance(reference, TaskNodeResultRef)
         }}
-        if invocation.input_capture is not None:
-            contract = await self._input_captures.read_task(invocation.input_capture, principal=principal)
-            dependency_states = {**dependency_states, **{item.name: item.state for item in contract.dependencies}}
-            for item in contract.dependencies:
+        if captured_input is None and invocation.input_capture is not None:
+            if self._input_captures is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            captured_input = await self._input_captures.read_task(invocation.input_capture, principal=principal)
+        if captured_input is not None:
+            dependency_states = {**dependency_states, **{item.name: item.state for item in captured_input.dependencies}}
+            for item in captured_input.dependencies:
                 if item.state.status is TaskStatus.SUCCEEDED:
                     dependencies[item.name] = TaskDependency(item.source_ref.node_id, item.body_digest, item.execution_id, invocation.input_capture, item.name)
         context = TaskNodeContext(

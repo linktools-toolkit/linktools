@@ -7,7 +7,7 @@ import json
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import cast
 
@@ -17,10 +17,10 @@ from pydantic_ai import RequestUsage
 from pydantic_ai.settings import ThinkingEffort
 from typing import get_args
 from pydantic_ai.messages import (
-    BinaryContent, FilePart, InstructionBaselinePart, InstructionDeltaPart, InstructionDigest,
+    BinaryContent, CompactionPart, FilePart, InstructionBaselinePart, InstructionDeltaPart, InstructionDigest,
     InstructionId, InstructionPart, SerializedInstructionId, ModelMessage, ModelMessagesTypeAdapter, ModelRequest,
     ModelRequestAttempt, ModelResponse, NativeToolReturnPart,
-    SpeechPart, SystemPromptPart, TextContent, ToolReturn, ToolReturnPart, UserContent, UserPromptPart,
+    SpeechPart, SystemPromptPart, TextContent, TextPart, ToolCallPart, ToolReturn, ToolReturnPart, UserContent, UserPromptPart,
 )
 
 try:
@@ -33,7 +33,7 @@ try:
 except ImportError:
     ModelSettingsDeltaPart = None
 
-from ..core import JsonValue, canonical_json_bytes
+from ..core import JsonValue, canonical_json_bytes, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ._input import model_input_content as _model_input_content
 from ._referenced_content import ReferencedContent, ReferencedInputOrigin
@@ -46,6 +46,49 @@ from ._tool_return_codec import decode_tool_return_content, encode_tool_return_c
 THINKING_ELAPSED_MS_METADATA_KEY = "linktools.ai.thinking_elapsed_ms"
 TOOL_ARGUMENT_PREVIEWS_METADATA_KEY = "linktools.ai.tool_argument_previews"
 TOOL_ELAPSED_MS_METADATA_KEY = "linktools.ai.tool_elapsed_ms"
+
+CANONICAL_OUTPUT_TOOL_NAME = "linktools_final_output"
+
+
+def canonical_structured_output_reference(messages: Sequence[ModelMessage]) -> tuple[int, int]:
+    """Locate the dedicated output call in the last model response."""
+    response_index = next((position for position in range(len(messages) - 1, -1, -1)
+                           if isinstance(messages[position], ModelResponse)), -1)
+    if response_index < 0:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    parts = [position for position, part in enumerate(messages[response_index].parts)
+             if isinstance(part, ToolCallPart) and part.tool_name == CANONICAL_OUTPUT_TOOL_NAME]
+    if len(parts) != 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return response_index, parts[0]
+
+
+def canonical_structured_output(
+    messages: Sequence[ModelMessage], ref: Sequence[int],
+) -> dict[str, JsonValue]:
+    """Restore validated JSON from its immutable SDK output occurrence, not business tool args."""
+    if (not isinstance(ref, (tuple, list)) or len(ref) != 2
+            or any(type(value) is not int or value < 0 for value in ref)
+            or tuple(ref) != canonical_structured_output_reference(messages)):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    index, part_index = ref
+    part = messages[index].parts[part_index]
+    acknowledged = sum(
+        isinstance(returned, ToolReturnPart)
+        and returned.tool_name == CANONICAL_OUTPUT_TOOL_NAME and returned.tool_call_id == part.tool_call_id
+        for request in messages[index + 1:] if isinstance(request, ModelRequest)
+        for returned in request.parts
+    )
+    if acknowledged != 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        parsed = normalize_json_value(part.args_as_dict())
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if not isinstance(parsed, dict):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return parsed
+
 
 _MESSAGE_VERSION = 1
 _HOST_CONTENT = "linktools-content"
@@ -63,6 +106,17 @@ _CORRELATED_PARTS = frozenset({
 @dataclass
 class SummaryPromptPart(SystemPromptPart):
     """Runtime-owned compaction provenance, serialized outside the SDK union."""
+
+
+def session_compaction_summaries(messages: Sequence[ModelMessage]) -> tuple[SummaryPromptPart | CompactionPart, ...]:
+    """Identify trusted Runtime and Harness summaries in the retained context."""
+    return tuple(
+        part for message in messages if isinstance(message, ModelRequest) for part in message.parts
+        if isinstance(part, SummaryPromptPart)
+        or (isinstance(part, CompactionPart) and isinstance(part.content, str)
+            and (part.metadata or {}).get("pydantic-ai-harness.compaction.summary.v1") is True
+            and part.provider_name is None and part.id is None and part.provider_details is None)
+    )
 
 
 def without_history_system_prompts(
@@ -551,27 +605,6 @@ def _validate_message_facts(message: ModelMessage) -> None:
                 raise ValueError("instruction digest is invalid")
 
 
-def _require_preserved_fields(supplied: object, restored: object) -> None:
-    """Allow declared missing defaults, not ignored or coerced explicit facts."""
-    if supplied is restored:
-        return
-    if isinstance(supplied, dict):
-        if not isinstance(restored, dict) or supplied.keys() - restored.keys():
-            raise ValueError("native message decoder discarded fields")
-        for key, value in supplied.items():
-            _require_preserved_fields(value, restored[key])
-    elif isinstance(supplied, list):
-        if not isinstance(restored, list) or len(supplied) != len(restored):
-            raise ValueError("native message decoder changed a sequence")
-        for left, right in zip(supplied, restored):
-            _require_preserved_fields(left, right)
-    elif isinstance(supplied, str) and isinstance(restored, str) and supplied.endswith("+00:00") and restored == supplied[:-6] + "Z":
-        # Native datetime JSON uses Z for UTC; source archive bytes remain untouched.
-        return
-    elif type(supplied) is not type(restored) or supplied != restored:
-        raise ValueError("native message decoder changed an explicit value")
-
-
 def _encode_messages(messages: Sequence[ModelMessage]) -> list[JsonValue]:
     lowered = []
     patches = []
@@ -703,6 +736,13 @@ def _legacy_message_wire(value: dict[str, object]) -> dict[str, object]:
     return wire
 
 
+def _validate_wire_usage_counts(usage: object) -> None:
+    if isinstance(usage, dict) and any(
+        key in usage and type(usage[key]) is not int for key in _USAGE_TOKEN_FIELDS
+    ):
+        raise ValueError("usage token count must be an integer")
+
+
 def _decode_message(value: object) -> ModelMessage:
     if not isinstance(value, dict):
         raise ValueError("message must be an object")
@@ -719,20 +759,31 @@ def _decode_message(value: object) -> ModelMessage:
     wire["parts"] = [dict(part) if isinstance(part, dict) else part for part in wire["parts"]]
     patches = []
     attempt_usages = []
+    _validate_wire_usage_counts(wire.get("usage"))
     if isinstance(wire.get("failed_attempts"), list):
         wire["failed_attempts"] = [dict(attempt) if isinstance(attempt, dict) else attempt
                                    for attempt in wire["failed_attempts"]]
         for index, attempt in enumerate(wire["failed_attempts"]):
-            if isinstance(attempt, dict) and attempt.get("usage") is not None:
+            if not isinstance(attempt, dict):
+                continue
+            if not isinstance(attempt.get("duration"), str):
+                raise ValueError("model request attempt duration must be an ISO duration string")
+            if attempt.get("usage") is not None:
+                _validate_wire_usage_counts(attempt["usage"])
                 usage = _USAGE_ADAPTER.validate_python(attempt["usage"])
-                usage_wire = _USAGE_ADAPTER.dump_python(usage, mode="json", warnings="error")
-                _require_preserved_fields(attempt["usage"], usage_wire)
                 attempt_usages.append((index, usage))
                 attempt["usage"] = None
     for pi, part in enumerate(wire["parts"]):
         if not isinstance(part, dict) or "part_kind" not in part:
             raise ValueError("durable part discriminator is required")
         kind = part["part_kind"]
+        if "retry" in part and kind == "builtin-tool-return":
+            raise ValueError("native tool returns cannot carry retry information")
+        retry = part.get("retry")
+        if isinstance(retry, dict) and any(
+            retry.get(key) is not None and type(retry[key]) is not int for key in ("attempt", "max_retries")
+        ):
+            raise ValueError("retry budget must be an integer or null")
         content = (part.get("content") if kind == "user-prompt" else
                    [part.get("content")] if kind == "file" else
                    [part.get("audio")] if kind == "speech" else ())
@@ -748,12 +799,16 @@ def _decode_message(value: object) -> ModelMessage:
                     continue
                 if instruction.get("part_kind") not in {"instruction", "instruction-digest", "instruction-delta"}:
                     raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+                if "dynamic" in instruction and type(instruction["dynamic"]) is not bool:
+                    raise ValueError("instruction dynamic flag must be a boolean")
                 identity = instruction.get("id")
                 if isinstance(identity, str) and _INSTRUCTION_ID_ADAPTER.validate_python(identity) is None:
                     raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         if kind in _CORRELATED_PARTS and "tool_call_id" not in part:
             raise ValueError("durable tool correlation is required")
         if kind == "model-settings-delta":
+            if "top_level" in part and type(part["top_level"]) is not bool:
+                raise ValueError("recorded model settings window flag must be a boolean")
             patches.append((pi, "settings", _recorded_settings(part["settings"])))
             part["settings"] = {}
         elif kind == _SUMMARY_KIND:
@@ -782,8 +837,10 @@ def _decode_message(value: object) -> ModelMessage:
                 if all(item["type"] == "union_tag_invalid" for item in error.errors(include_input=False, include_context=False))
                 else ErrorCode.STORAGE_INTEGRITY_ERROR)
         raise AIError(code) from None
-    # Global extra=forbid would reject supported provider usage extensions.
-    _require_preserved_fields(wire, ModelMessagesTypeAdapter.dump_python([message], mode="json", warnings="error")[0])
+    for supplied, part in zip(wire["parts"], message.parts):
+        visibility = supplied.get("ui_visibility")
+        if visibility is not None and getattr(part, "ui_visibility", None) != visibility:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     for pi, target, restored in patches:
         part = message.parts[pi]
         if target == "summary":
@@ -860,13 +917,64 @@ def _encode_datetime(value: datetime | None) -> JsonValue:
 
 
 def tool_error_message(part: ToolReturnPart) -> str | None:
-    """Read the SDK's plain-text feedback for a failed call, not diagnostics or result data."""
+    """Project model-visible tool feedback, without echoing structured validation inputs."""
     if part.outcome in {"failed", "denied", "retried"} and isinstance(part.content, str) and part.content:
         return part.content
+    retry = getattr(part, "retry", None)
+    if part.outcome == "retried" and retry is not None and retry.cause == "validation_error" and isinstance(part.content, list):
+        lines = []
+        for error in part.content[:5]:
+            if not isinstance(error, Mapping) or not isinstance(message := error.get("msg"), str) or not message:
+                continue
+            loc = error.get("loc")
+            field = ".".join(str(item) for item in loc if isinstance(item, (str, int))) if isinstance(loc, (list, tuple)) else ""
+            lines.append(f"{field}: {message}" if field else message)
+        return "\n".join(lines)[:2048] or None
     return None
 
 
-__all__ = ['THINKING_ELAPSED_MS_METADATA_KEY', 'TOOL_ARGUMENT_PREVIEWS_METADATA_KEY', 'TOOL_ELAPSED_MS_METADATA_KEY', 'bind_referenced_input_origin', 'RetiredReferencedContent', 'SummaryPromptPart', 'UnsupportedUserContentKind', 'binary_attachment_text', 'binary_content_usage', 'bind_tool_return_attachments', 'combine_model_message_payloads', 'decode_model_message_payloads', 'decode_model_messages', 'decode_tool_return_content', 'decode_user_content_item', 'encode_model_messages', 'encode_tool_return_content', 'encode_user_content_item', 'file_tool_result_metadata', 'freeze_model_messages', 'has_binary_attachment_metadata', 'input_attachment_views', 'is_binary_attachment_text', 'model_attempts_details', 'model_attempts_usage', 'native_checkpoint_messages', 'model_response_usage', 'project_user_content_identity', 'project_provider_messages', 'project_transient_binary_content', 'rehydrate_deferred_tool_results', 'request_attachment_facts', 'stable_json_snapshot', 'tool_error_message', 'tool_return_content_digest', 'tool_return_content_matches', 'without_history_system_prompts']
+def restore_turn_context(
+    prompt: str | Sequence[UserContent], messages: Sequence[ModelMessage], *, interrupted: bool,
+) -> tuple[ModelMessage, ...]:
+    if interrupted:
+        # Keep an explicit historical boundary: the SDK can merge adjacent
+        # requests when reloading an already completed exchange.
+        content = prompt if isinstance(prompt, str) else list(prompt)
+        timestamp = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        return (
+            ModelRequest(parts=[UserPromptPart(content, timestamp=timestamp)]),
+            ModelResponse(parts=[TextPart("[Runtime: This turn was interrupted before a final answer.]")],
+                          timestamp=timestamp),
+        )
+    if not messages:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable turn messages are missing")
+    restored = prompt if isinstance(prompt, str) else list(prompt)
+    return (substitute_turn_input(messages[0], "", restored), *messages[1:])
+
+
+def substitute_turn_input(
+    message: ModelMessage, expected: str | Sequence[UserContent], value: str | Sequence[UserContent],
+) -> ModelRequest:
+    if not isinstance(message, ModelRequest):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable turn has no matching admitted input")
+    prompts = [part for part in message.parts if isinstance(part, UserPromptPart)]
+    if len(prompts) != 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable turn has no matching admitted input")
+    [prompt] = prompts
+    content = prompt.content
+    same_input = (
+        content == expected
+        if isinstance(content, str) or isinstance(expected, str)
+        else tuple(content) == tuple(expected)
+    )
+    if not same_input:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable turn has no matching admitted input")
+    return replace(message, parts=[
+        replace(part, content=value) if part is prompt else part for part in message.parts
+    ])
+
+
+__all__ = ['restore_turn_context', 'substitute_turn_input', 'CANONICAL_OUTPUT_TOOL_NAME', 'canonical_structured_output', 'canonical_structured_output_reference', 'THINKING_ELAPSED_MS_METADATA_KEY', 'TOOL_ARGUMENT_PREVIEWS_METADATA_KEY', 'TOOL_ELAPSED_MS_METADATA_KEY', 'bind_referenced_input_origin', 'RetiredReferencedContent', 'SummaryPromptPart', 'session_compaction_summaries', 'UnsupportedUserContentKind', 'binary_attachment_text', 'binary_content_usage', 'bind_tool_return_attachments', 'combine_model_message_payloads', 'decode_model_message_payloads', 'decode_model_messages', 'decode_tool_return_content', 'decode_user_content_item', 'encode_model_messages', 'encode_tool_return_content', 'encode_user_content_item', 'file_tool_result_metadata', 'freeze_model_messages', 'has_binary_attachment_metadata', 'input_attachment_views', 'is_binary_attachment_text', 'model_attempts_details', 'model_attempts_usage', 'native_checkpoint_messages', 'model_response_usage', 'project_user_content_identity', 'project_provider_messages', 'project_transient_binary_content', 'rehydrate_deferred_tool_results', 'request_attachment_facts', 'stable_json_snapshot', 'tool_error_message', 'tool_return_content_digest', 'tool_return_content_matches', 'without_history_system_prompts']
 
 from ._attachment import (binary_attachment_text, bind_tool_return_attachments, file_tool_result_metadata, has_binary_attachment_metadata, input_attachment_views, is_binary_attachment_text, request_attachment_facts)
 

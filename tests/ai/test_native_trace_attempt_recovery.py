@@ -19,7 +19,9 @@ from tests.ai._runtime_test_helpers import _Models, model_features, native_check
 @pytest.mark.asyncio
 async def test_hard_killed_native_attempt_marks_its_original_request_interrupted(tmp_path: Path) -> None:
     database = tmp_path / "trace-attempt.db"
-    owner = await asyncio.to_thread(_RuntimeProcess, database, auto_recover=False)
+    # Hard-crash Trace evidence is required for retained Execution, not for
+    # optional lossy canonical Session Trace.
+    owner = await asyncio.to_thread(_RuntimeProcess, database, mode="standalone", auto_recover=False)
     successor = None
     try:
         execution_id = owner.initial["execution_id"]
@@ -52,7 +54,7 @@ async def test_hard_killed_native_attempt_marks_its_original_request_interrupted
             _NAMESPACE, storage=PersistenceStorage.sqlite(database),
         ) as state, Runtime.open(
             persistence=state,
-            features=model_features(_Models(FunctionModel(stream_function=unused_model)), _capabilities(conversation=True)),
+            features=model_features(_Models(FunctionModel(stream_function=unused_model)), _capabilities(conversation=False)),
             auto_recover=False,
         ) as admitted:
             current = await state.execution.executions.get(execution_id, tenant_id="default")
@@ -64,7 +66,7 @@ async def test_hard_killed_native_attempt_marks_its_original_request_interrupted
             assert await native.latest_snapshot(run_id=pending.recovery.agent_run_id, include_interrupted=True) is None
 
         successor = await asyncio.to_thread(
-            _RuntimeProcess, database, execution_id=execution_id, auto_recover=False,
+            _RuntimeProcess, database, mode="standalone", execution_id=execution_id, auto_recover=False,
         )
         await asyncio.to_thread(successor.request, "recover_keyed")
         assert (await asyncio.to_thread(successor.request, "await_model"))["model_calls"] == 1

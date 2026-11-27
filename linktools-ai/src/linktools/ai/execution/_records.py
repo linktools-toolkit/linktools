@@ -12,7 +12,8 @@ from ..agent import AgentBindingContract
 from ..asset import AssetVersionRef
 from ..core import (PersistenceDomain, RunBudget, ExecutionEventType, ExecutionLineageKind,
     ExecutionMode, ExecutionStatus, IdempotencyStatus, JsonValue, OperationStatus,
-    ResourceKind, StopReason, ThinkingValue, UsageMetrics, canonical_sha256, validate_idempotency_key, validate_resource_id,
+    ResourceKind, StopReason, ThinkingValue, UsageMetrics, validate_idempotency_key, validate_resource_id,
+    validate_execution_id, validate_execution_request_key,
     normalize_correlation, normalize_execution_mode, normalize_thinking, normalize_tool_effects, ToolEffects)
 from ..session import SessionContext, normalize_session_context
 from ..errors import AIError, ErrorDiagnostics
@@ -95,6 +96,13 @@ class ExecutionRecord:
     completed_at: datetime | None = None
 
     def __post_init__(self) -> None:
+        validate_execution_id(self.execution_id)
+        validate_execution_id(self.root_execution_id)
+        if self.session_id is not None:
+            validate_resource_id(self.session_id)
+        for related in (self.parent_execution_id, self.previous_execution_id, self.fork_base_execution_id):
+            if related is not None:
+                validate_execution_id(related)
         if self.completed_at is not None and (not isinstance(self.completed_at, datetime)
                 or self.completed_at.tzinfo is None or self.completed_at.utcoffset() is None):
             raise ValueError("execution completed_at must be timezone-aware")
@@ -436,12 +444,11 @@ class ExecutionStartClaim:
     idempotency_key: str = field(repr=False)
     request_digest: str
     started_at: datetime
-    request_identity_version: int = 1
 
     def __post_init__(self) -> None:
         try:
             validate_resource_id(self.scope)
-            validate_idempotency_key(self.idempotency_key)
+            validate_execution_request_key(self.idempotency_key)
         except AIError as error:
             raise ValueError("idempotency identity is invalid") from error
 
@@ -459,7 +466,7 @@ class ExecutionStartUnknownCommit:
     def __post_init__(self) -> None:
         try:
             validate_resource_id(self.scope)
-            validate_idempotency_key(self.idempotency_key)
+            validate_execution_request_key(self.idempotency_key)
         except AIError as error:
             raise ValueError("idempotency identity is invalid") from error
 
@@ -510,16 +517,17 @@ class IdempotencyRecord:
     error_code: str | None
     created_at: datetime
     updated_at: datetime
-    request_identity_version: int = 1
 
     def __post_init__(self) -> None:
         try:
             validate_resource_id(self.scope)
-            validate_idempotency_key(self.idempotency_key)
+            if self.resource_kind is ResourceKind.EXECUTION:
+                validate_execution_id(self.resource_id)
+                validate_execution_request_key(self.idempotency_key)
+            else:
+                validate_idempotency_key(self.idempotency_key)
         except AIError as error:
             raise ValueError("idempotency identity is invalid") from error
-        if type(self.request_identity_version) is not int or self.request_identity_version not in (1, 2):
-            raise ValueError("request identity version is unsupported")
         if self.created_at.tzinfo is None or self.updated_at.tzinfo is None:
             raise ValueError("idempotency timestamps require timezone awareness")
 
@@ -606,7 +614,7 @@ class IdempotencyTerminalUpdate:
     def __post_init__(self) -> None:
         try:
             validate_resource_id(self.scope)
-            validate_idempotency_key(self.idempotency_key)
+            validate_execution_request_key(self.idempotency_key)
         except AIError as error:
             raise ValueError("idempotency identity is invalid") from error
 
@@ -663,24 +671,6 @@ class PendingToolContinuation:
         ids = tuple(item.tool_call_id for item in values)
         if not values or len(ids) != len(set(ids)):
             raise ValueError("deferred continuation calls must be unique")
-
-
-@dataclass(frozen=True, slots=True)
-class RepositoryInstructionBarrier:
-    agent_run_id: str
-    tool_call_id: str
-    arguments_digest: str
-
-    def __post_init__(self) -> None:
-        if not all(
-            isinstance(value, str) and value
-            for value in (
-                self.agent_run_id,
-                self.tool_call_id,
-                self.arguments_digest,
-            )
-        ) or not (len(self.arguments_digest) == 64 and all(value in "0123456789abcdef" for value in self.arguments_digest)):
-            raise ValueError("repository instruction barrier is invalid")
 
 
 class ExecutionRecoveryState(str, Enum):
@@ -787,7 +777,6 @@ class ExecutionRecoveryDetail:
     source_agent_run_id: str | None = None
     pending_tools: PendingToolContinuation | None = None
     repository_instruction_overlay: RuntimePayloadRef | None = None
-    repository_instruction_barriers: tuple[RepositoryInstructionBarrier, ...] = ()
     handoff_phase: RecoveryHandoffPhase = RecoveryHandoffPhase.NONE
     terminal_handoff: RecoveryTerminalHandoff | None = None
 
@@ -797,11 +786,6 @@ class ExecutionRecoveryDetail:
                 raise ValueError("recovery attempt identity cannot be empty")
         if self.agent_run_id is None and (self.source_agent_run_id is not None or self.pending_tools is not None):
             raise ValueError("recovery source requires an admitted attempt")
-        barriers = tuple(self.repository_instruction_barriers)
-        identities = tuple((item.agent_run_id, item.tool_call_id) for item in barriers)
-        if len(identities) != len(set(identities)):
-            raise ValueError("repository instruction barriers must be unique")
-        object.__setattr__(self, "repository_instruction_barriers", barriers)
         if self.handoff_phase is RecoveryHandoffPhase.NONE and self.terminal_handoff is not None:
             raise ValueError("unprepared recovery cannot contain a terminal handoff")
         if self.handoff_phase is RecoveryHandoffPhase.PREPARED and self.terminal_handoff is None:
@@ -810,4 +794,4 @@ class ExecutionRecoveryDetail:
             raise ValueError("terminal recovery cannot retain deferred continuation")
 
 
-__all__ = ["ExecutionMetadataRecord", 'ExecutionControlRecord', 'ExecutionResultRecord', 'ExecutionRetentionRecord', 'ExecutionTimelineRecord', 'PendingDeferredCall', 'PendingToolContinuation', 'RepositoryInstructionBarrier', 'ExecutionRecoveryState', 'RecoveryHandoffPhase', 'RecoveryTerminalOutcome', 'RecoveryConversationIntent', 'RecoveryTerminalHandoff', 'ExecutionRecoveryDetail', 'RuntimePayloadRef', 'StoredUserInput', 'ExecutionRecord', 'ExecutionStartClaim', 'ExecutionStartUnknownCommit', 'ExecutionCancelRequestCommit', 'ExecutionStartReservation', 'ExecutionStartReservationResult', 'IdempotencyRecord', 'ResultRecord', 'ExecutionTerminalCommit', 'IdempotencyTerminalUpdate', 'OperationTerminalUpdate', 'ExecutionTerminalCommitResult']
+__all__ = ["ExecutionMetadataRecord", 'ExecutionControlRecord', 'ExecutionResultRecord', 'ExecutionRetentionRecord', 'ExecutionTimelineRecord', 'PendingDeferredCall', 'PendingToolContinuation', 'ExecutionRecoveryState', 'RecoveryHandoffPhase', 'RecoveryTerminalOutcome', 'RecoveryConversationIntent', 'RecoveryTerminalHandoff', 'ExecutionRecoveryDetail', 'RuntimePayloadRef', 'StoredUserInput', 'ExecutionRecord', 'ExecutionStartClaim', 'ExecutionStartUnknownCommit', 'ExecutionCancelRequestCommit', 'ExecutionStartReservation', 'ExecutionStartReservationResult', 'IdempotencyRecord', 'ResultRecord', 'ExecutionTerminalCommit', 'IdempotencyTerminalUpdate', 'OperationTerminalUpdate', 'ExecutionTerminalCommitResult']

@@ -18,7 +18,7 @@ from linktools.ai.asset import (
 )
 from linktools.ai.capability import AssetCapability
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.core import ExecutionStatus
+from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.runtime import Runtime
@@ -209,17 +209,24 @@ async def test_existing_workspace_cwd_requires_workspace_for_new_turn(
     workspace = Workspace.load(project)
     storage_root = tmp_path / "runtime"
 
+    class HostAuthorization(TenantAuthorizationPolicy):
+        """Explicitly authorize the native session in both Runtime instances."""
+
+    storage = PersistenceStorage.from_root(storage_root)
     features = workspace_features("workspace", workspace=workspace)
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('workspace', storage=PersistenceStorage.from_root(storage_root)) as persistence_238, Runtime.open(persistence=persistence_238, features=model_features(RuntimeUsageModels(), features)) as runtime:
-        await runtime.agents.get("default").create_session(
-            "cwd-session",
-            cwd=".",
-        )
+    async with Runtime.open(
+        "workspace", storage=storage, authorization=HostAuthorization(),
+        features=model_features(RuntimeUsageModels(), features),
+    ) as runtime:
+        await runtime.agents.get("default").create_session("cwd-session", cwd=".")
 
     features = RuntimeFeatures("conversation")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('workspace', storage=PersistenceStorage.from_root(storage_root)) as persistence_250, Runtime.open(persistence=persistence_250, features=model_features(RuntimeUsageModels(), features)) as runtime:
+    async with Runtime.open(
+        "workspace", storage=storage, authorization=HostAuthorization(),
+        features=model_features(RuntimeUsageModels(), features),
+    ) as runtime:
         with pytest.raises(AIError) as error:
             await runtime.agents.get("default").run(
                 "continue",

@@ -215,12 +215,24 @@ def test_retry_budget_boolean_is_not_converted_to_an_integer() -> None:
 
 
 @pytest.mark.parametrize("location", ["message", "part"])
-def test_unknown_native_fields_are_not_silently_discarded(location: str) -> None:
+def test_additive_native_message_fields_do_not_block_readback(location: str) -> None:
     wire = json.loads(encode_model_messages((_response(),)))
     target = wire[0] if location == "message" else wire[0]["parts"][0]
-    target["future_semantic_field"] = {"value": "preserve or reject"}
-    with pytest.raises(AIError):
-        decode_model_messages(canonical_json_bytes(wire))
+    target["future_display_hint"] = {"value": "optional"}
+    assert decode_model_messages(canonical_json_bytes(wire)) == (_response(),)
+
+
+def test_message_readback_does_not_erase_private_tool_visibility() -> None:
+    response = replace(_response(), parts=[sdk.ToolCallPart("tool", tool_call_id="call-fixed")])
+    wire = json.loads(encode_model_messages((response,)))
+    wire[0]["parts"][0]["ui_visibility"] = "private"
+    if "ui_visibility" not in {field.name for field in fields(sdk.ToolCallPart)}:
+        with pytest.raises(AIError) as caught:
+            decode_model_messages(canonical_json_bytes(wire))
+        assert caught.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+    else:
+        restored, = decode_model_messages(canonical_json_bytes(wire))
+        assert restored.parts[0].ui_visibility == "private"
 
 
 def test_native_authoring_default_does_not_replace_missing_durable_tool_identity() -> None:

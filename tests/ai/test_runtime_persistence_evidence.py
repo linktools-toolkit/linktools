@@ -22,14 +22,15 @@ from linktools.ai.core import (
     ResourceKind,
     RunBudget,
     StopReason,
+    TenantAuthorizationPolicy,
     UsageMetrics,
 )
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.history import History
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.runtime._agent_executor import AgentExecutor
 from linktools.ai.persistence.codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
@@ -257,58 +258,71 @@ async def test_terminal_stream_allows_immediate_runtime_close(
 
 
 @pytest.mark.asyncio
-async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(tmp_path: Path) -> None:
+    from linktools.ai.core import TenantAuthorizationPolicy
+    from ._runtime_test_helpers import _Models, _UsageFunctionModel
+
+    class Policy(TenantAuthorizationPolicy):
+        pass
+
     database = tmp_path / "runtime.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
     await provision_runtime_database(engine)
     await engine.dispose()
 
-    execution_started = asyncio.Event()
+    model_started = asyncio.Event()
 
-    async def blocking_execute(self, scope):
-        del self, scope
-        execution_started.set()
+    async def blocking_model(messages, info):
+        model_started.set()
         await asyncio.Event().wait()
-        raise AssertionError("blocked execution unexpectedly completed")
 
-    monkeypatch.setattr(AgentExecutor, "execute", blocking_execute)
-    state = PersistenceStorage.sqlite(
-        database,
-        object_store=FilesystemObjectStore(tmp_path / "objects"),
-    )
+    def storage():
+        return PersistenceStorage.sqlite(database, object_store=FilesystemObjectStore(tmp_path / "objects"))
+
     features = _agent_group()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    try:
-        async with Persistence.open('default', storage=state) as persistence_286, Runtime.open(persistence=persistence_286, features=model_features(_PersistenceTestModels(), features)) as runtime:
-            task = asyncio.create_task(
-                emit_result(
-                    runtime,
-                    "hello",
-                    "default",
-                    False,
-                    False,
-                    False,
-                )
-            )
-            await asyncio.wait_for(execution_started.wait(), 5)
+    model_features(_Models(_UsageFunctionModel(blocking_model)), features)
+
+    async with (
+        Persistence.open("default", storage=storage()) as persistence,
+        Runtime.open(persistence=persistence, features=features, authorization=Policy()) as runtime,
+    ):
+        terminal = asyncio.get_running_loop().create_future()
+
+        def observe(frame):
+            if frame["type"] == "terminal" and not terminal.done():
+                terminal.set_result(frame)
+
+        unsubscribe = runtime.sessions.observe_turn_session("default", observe)
+        started = asyncio.create_task(model_started.wait())
+        task = asyncio.create_task(emit_result(runtime, "hello", "default", False, False, False))
+        try:
+            done, _ = await asyncio.wait((started, task), timeout=5, return_when=asyncio.FIRST_COMPLETED)
+            if task in done:
+                await task
+                pytest.fail("ai run returned before interrupt")
+            assert started in done
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
-    finally:
-        await runtime._state.close()
+            cancelled = await asyncio.wait_for(terminal, 5)
+            assert cancelled["state"] == "cancelled"
+            turn_id = cancelled["turn_id"]
+        finally:
+            unsubscribe()
+            started.cancel()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(started, task, return_exceptions=True)
 
-    reopened = PersistenceStorage.sqlite(
-        database,
-        object_store=FilesystemObjectStore(tmp_path / "objects"),
-    )
-    try:
-        async with Persistence.open('default', storage=reopened) as persistence_314, Runtime.open(persistence=persistence_314, features=model_features(_PersistenceTestModels(), features)) as reopened_runtime:
-            pass
-    finally:
-        await reopened_runtime._state.close()
+    async with (
+        Persistence.open("default", storage=storage()) as persistence,
+        Runtime.open(persistence=persistence, features=features, authorization=Policy()) as reopened,
+    ):
+        result = await reopened.history.turn_result("default", turn_id, principal=reopened.default_principal)
+        assert result["turn_id"] == turn_id and result["status"] == "CANCELLED"
+        session = await reopened.history.turn_session_state("default", principal=reopened.default_principal)
+        assert session["active_turn_id"] is None
 
 
 @pytest.mark.asyncio
@@ -324,70 +338,39 @@ async def test_session_runtime_persists_and_reads_terminal_result(
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
 
+    class HostAuthorization(TenantAuthorizationPolicy):
+        """Use the host policy for canonical session operations."""
+
     features = _agent_group()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    try:
-        async with Persistence.open('default', storage=state) as persistence_340, Runtime.open(persistence=persistence_340, features=model_features(_PersistenceTestModels(), features)) as runtime:
-            created = await runtime.agents.get("default").create_session("session")
-            loaded = await runtime.sessions.get(
-                created.session_id,
-                principal=runtime.default_principal,
-            )
-            assert loaded.session_id == created.session_id
-
-            result = (await runtime.agents.get("default").run(
-                "hello",
-                output=_PersistenceNestedOutput,
-                session_id=created.session_id,
-                timeout_seconds=10,
-            )).result
-            assert result.status is ExecutionStatus.SUCCEEDED
-
-            session_record = await runtime._state.conversation.sessions.get(
-                created.session_id,
-                tenant_id=runtime.tenant_id,
-            )
-            execution = await runtime._state.execution.executions.get(
-                result.execution_id,
-                tenant_id=runtime.tenant_id,
-            )
-            persisted_result = await runtime._state.execution.executions.get_result(
-                result.execution_id,
-                tenant_id=runtime.tenant_id,
-            )
-            assert session_record is not None
-            assert session_record.active_execution_id is None
-            assert execution is not None
-            assert execution.status is ExecutionStatus.SUCCEEDED
-            assert execution.result is not None
-            assert persisted_result == execution.result
-            assert persisted_result.output is not None
-            assert persisted_result.output.value == {
-                "findings": [
-                    {
-                        "trace_id": "trace",
-                        "labels": [
-                            {"name": "priority", "value": "high"},
-                        ],
-                    }
-                ]
-            }
-
-            assert execution.completed_at is not None
-            next_execution = replace(execution, result=persisted_result)
-            _encode_persisted_domain(persisted_result)
-            _encode_persisted_domain(next_execution)
-
-            inspected = await runtime.executions.inspect(
-                result.execution_id,
-                principal=runtime.default_principal,
-            )
-            waited = (await runtime.executions.wait(
-                result.execution_id,
-                principal=runtime.default_principal,
-            )).result
-            assert inspected.status is ExecutionStatus.SUCCEEDED
-            assert waited.status is ExecutionStatus.SUCCEEDED
-            assert waited.output == persisted_result.output.value
-    finally:
-        await runtime._state.close()
+    authorization = HostAuthorization()
+    expected = {
+        "findings": [{"trace_id": "trace", "labels": [{"name": "priority", "value": "high"}]}],
+    }
+    async with (
+        Persistence.open("default", storage=state) as persistence,
+        Runtime.open(persistence=persistence, authorization=authorization,
+                     features=model_features(_PersistenceTestModels(), features)) as runtime,
+    ):
+        agent = runtime.agents.get("default")
+        created = await agent.create_session("session")
+        loaded = await runtime.sessions.get(created.session_id, principal=runtime.default_principal)
+        assert loaded.session_id == created.session_id
+        result = (await agent.run(
+            "hello", output=_PersistenceNestedOutput, session_id=created.session_id, timeout_seconds=10,
+        )).result
+        assert result.status is ExecutionStatus.SUCCEEDED and result.view["output"] == expected
+        assert (await loaded.inspect())["active_turn_id"] is None
+        assert persistence.conversation.sessions is None
+        records = await persistence.conversation.histories.state_store.read(lambda transaction: transaction.scan_records())
+        assert not any(record.kind in {"session", "session_turn_commit"} for record in records)
+        assert await persistence.execution.executions.get(result.key.turn_id, tenant_id=runtime.tenant_id) is None
+        principal = runtime.default_principal
+    async with (
+        Persistence.open("default", storage=state, read_only=True) as reopened,
+        History.open(persistence=reopened, authorization=authorization) as history,
+    ):
+        stored = await history.turn_result(created.session_id, result.key.turn_id, principal=principal)
+        assert stored["status"] == ExecutionStatus.SUCCEEDED.value
+        assert stored["conversation_committed"]
+        assert stored["output"] == expected

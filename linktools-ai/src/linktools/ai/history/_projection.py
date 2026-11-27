@@ -2285,6 +2285,16 @@ def _trace_item(
     ordinal: int,
     event: StepEvent,
 ) -> "ExecutionTraceItem | None":
+    payload = _trace_payload(event, agent_run_seq=agent_run_seq, depth=depth)
+    if payload is None:
+        return None
+    if depth > 0:
+        payload["child_execution_id"] = record.execution_id
+    return ExecutionTraceItem(record.execution_id, ordinal + 1, payload)
+
+
+def _trace_payload(event: StepEvent, *, agent_run_seq: int, depth: int) -> dict[str, JsonValue] | None:
+    """Project existing safe trace metadata without an Execution owner."""
     mapping = {
         "MODEL_REQUEST_STARTED": ("MODEL_REQUEST", "STARTED"),
         "MODEL_REQUEST_SUCCEEDED": ("MODEL_RESPONSE", "SUCCEEDED"),
@@ -2346,9 +2356,7 @@ def _trace_item(
         payload["tool_call_id"] = event.tool_call_id
     if event.tool_name is not None:
         payload["tool_name"] = event.tool_name
-    if depth > 0:
-        payload["child_execution_id"] = record.execution_id
-    return ExecutionTraceItem(record.execution_id, ordinal + 1, payload)
+    return payload
 
 
 def _request_associations(

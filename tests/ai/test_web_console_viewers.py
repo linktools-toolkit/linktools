@@ -44,6 +44,7 @@ async def test_original_client_http_view_preserves_bytes_and_decode_provenance(e
     calls = []
 
     class History:
+        has_turn_sessions = False
         tenant_id = "default"
 
         async def model_interactions(self, execution_id, *, principal, cursor, limit, include_content=False, include_client_requests=False):
@@ -161,6 +162,7 @@ def _model(request_seq: int) -> ModelInteractionItem:
 
 
 class _ExecutionListHistory:
+    has_turn_sessions = False
     tenant_id = "default"
 
     def __init__(self) -> None:
@@ -212,6 +214,7 @@ async def test_execution_list_scans_for_newest_only_when_explicitly_requested() 
 
 
 class _PagedHistory:
+    has_turn_sessions = False
     tenant_id = "default"
 
     async def inspect_execution(
@@ -356,6 +359,7 @@ async def test_trace_viewer_preserves_compact_model_timing_and_usage() -> None:
 
 
 class _SessionHistory:
+    has_turn_sessions = False
     tenant_id = "default"
 
     async def scan_recent_sessions(
@@ -386,6 +390,7 @@ async def test_session_viewer_preserves_recent_session_metadata() -> None:
 
 
 class _UnavailableSessionTimeline:
+    has_turn_sessions = False
     tenant_id = "default"
 
     def __init__(self) -> None:
@@ -514,6 +519,7 @@ async def test_original_client_selectors_use_existing_model_endpoint() -> None:
     calls = []
 
     class History:
+        has_turn_sessions = False
         tenant_id = "default"
 
         async def model_interactions(self, execution_id, *, principal, cursor, limit, include_content=False,

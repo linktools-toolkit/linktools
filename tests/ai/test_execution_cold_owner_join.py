@@ -26,7 +26,7 @@ async def test_uncached_full_execution_join_retries_cold_archive_and_checks_sour
         repository = state.execution.executions
         if damage == "source":
             async with repository.state_store.storage_group.context.engine.begin() as connection:
-                await connection.execute(text("DELETE FROM ai_step_sequences"))
+                await connection.execute(text("DELETE FROM ai_message_sequences"))
         if damage == "owner":
             await repository.state_store.mutate(
                 lambda transaction: transaction.delete_record(repository.execution_record_key("execution")))
@@ -71,4 +71,4 @@ async def test_uncached_full_execution_join_retries_cold_archive_and_checks_sour
                 event.remove(engine, "before_cursor_execute", observe)
             # Current owner, fixed contents and authenticated Native root-head share one JOIN.
             assert len(statements) == 1
-            assert sum("ai_step_sequences" in statement for statement in statements) == 1
+            assert sum("ai_message_sequences" in statement for statement in statements) == 1

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from linktools.ai.persistence import Persistence
 """Shared SQL startup observes live producers; explicit recovery owns takeover."""
 from ._runtime_test_helpers import model_features
 
@@ -19,7 +18,7 @@ from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.core import ApprovalDecision, ApprovalStatus, ExecutionEventType, ExecutionStatus
+from linktools.ai.core import ApprovalDecision, ApprovalStatus, ExecutionEventType, ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import Execution, ExecutionStreamEvent, ExecutionTreeEvent
 from linktools.ai.runtime import Runtime
@@ -33,18 +32,16 @@ from .test_live_history_readback_integration import _Models
 
 
 @pytest.mark.parametrize(
-    ("mode", "phase"),
-    (("session", "active"), ("standalone", "active"),
-     ("session", "admitted"), ("session", "pending")),
+    "phase", ("active", "admitted", "pending"),
 )
 def test_sql_startup_does_not_take_over_live_process(
-    tmp_path: Path, mode: str, phase: str,
+    tmp_path: Path, phase: str,
 ) -> None:
-    owner = _RuntimeProcess(tmp_path / "runtime.db", mode=mode, phase=phase)
+    owner = _RuntimeProcess(tmp_path / "runtime.db", mode="standalone", phase=phase)
     remote = None
     try:
         remote = _RuntimeProcess(
-            tmp_path / "runtime.db", mode=mode, phase=phase,
+            tmp_path / "runtime.db", mode="standalone", phase=phase,
             execution_id=owner.initial["execution_id"],
         )
         assert owner.process.is_alive()
@@ -76,11 +73,11 @@ def test_sql_startup_does_not_take_over_live_process(
 
 
 def test_explicit_recovery_wins_before_original_worker_installation(tmp_path: Path) -> None:
-    owner = _RuntimeProcess(tmp_path / "runtime.db", phase="admitted")
+    owner = _RuntimeProcess(tmp_path / "runtime.db", mode="standalone", phase="admitted")
     remote = None
     try:
         remote = _RuntimeProcess(
-            tmp_path / "runtime.db", phase="admitted",
+            tmp_path / "runtime.db", mode="standalone", phase="admitted",
             execution_id=owner.initial["execution_id"],
         )
         remote.request("recover")
@@ -103,6 +100,10 @@ def test_explicit_recovery_wins_before_original_worker_installation(tmp_path: Pa
             remote.close()
 
 
+class _SessionAuthority(TenantAuthorizationPolicy):
+    """Explicit native Session host authorization for this fixture."""
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("same_session", (False, True))
 async def test_sql_runtime_session_admission_remains_independent(
@@ -122,34 +123,41 @@ async def test_sql_runtime_session_admission_remains_independent(
 
     first_state = PersistenceStorage.sqlite(tmp_path / "runtime.db")
     second_state = PersistenceStorage.sqlite(tmp_path / "runtime.db")
+    features = RuntimeFeatures(_NAMESPACE)
+    features.agent("default", model="default", allow_tools=())
+    features = model_features(_Models(FunctionModel(stream_function=model)), features)
+
+    async def start(runtime, session_id, prompt, key):
+        return await runtime.sessions.start(
+            session_id, prompt, agent=runtime.agents.get("default"),
+            principal=runtime.default_principal, idempotency_key=key,
+        )
+
     try:
-        async with Persistence.open(_NAMESPACE, storage=first_state) as persistence_124, Runtime.open(persistence=persistence_124, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities(conversation=True))) as first_runtime, Persistence.open(_NAMESPACE, storage=second_state) as persistence_127, Runtime.open(persistence=persistence_127, features=model_features(_Models(FunctionModel(stream_function=model)), _capabilities(conversation=True))) as second_runtime:
+        async with (
+            Runtime.open(_NAMESPACE, storage=first_state, features=features, authorization=_SessionAuthority()) as first_runtime,
+            Runtime.open(_NAMESPACE, storage=second_state, features=features, authorization=_SessionAuthority()) as second_runtime,
+        ):
             await first_runtime.agents.get("default").create_session("first")
             if not same_session:
                 await second_runtime.agents.get("default").create_session("second")
-            first = await first_runtime.agents.get("default").session("first").start(
-                "First", idempotency_key="first",
-            )
+            first = await start(first_runtime, "first", "First", "first")
             await asyncio.wait_for(entered[0].wait(), 10)
             if same_session:
                 with pytest.raises(AIError) as caught:
-                    await second_runtime.agents.get("default").session("first").start(
-                        "Second", idempotency_key="second",
-                    )
+                    await start(second_runtime, "first", "Second", "second")
                 assert caught.value.code is ErrorCode.SESSION_BUSY
                 second = None
                 assert len(calls) == 1
             else:
-                second = await second_runtime.agents.get("default").session("second").start(
-                    "Second", idempotency_key="second",
-                )
+                second = await start(second_runtime, "second", "Second", "second")
                 await asyncio.wait_for(entered[1].wait(), 10)
-                assert first.execution_id != second.execution_id
+                assert first.key.turn_id != second.key.turn_id
                 assert len(calls) == 2
             release.set()
-            assert (await first.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
+            assert (await first.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
             if second is not None:
-                assert (await second.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
+                assert (await second.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
     finally:
         release.set()
 
@@ -161,7 +169,7 @@ async def test_sql_runtime_session_admission_remains_independent(
 async def test_explicit_recovery_does_not_adopt_a_newer_contender_revision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str,
 ) -> None:
-    owner = _RuntimeProcess(tmp_path / "runtime.db", phase=phase)
+    owner = _RuntimeProcess(tmp_path / "runtime.db", mode="standalone", phase=phase)
     original = owner.initial
     owner.crash()
     owner.close()
@@ -477,7 +485,7 @@ async def test_observer_attached_before_recovery_receives_resumed_live_deltas(
     tmp_path: Path, include_model_interactions: bool,
 ) -> None:
     database = tmp_path / "observe-recovery.db"
-    owner = await asyncio.to_thread(_RuntimeProcess, database)
+    owner = await asyncio.to_thread(_RuntimeProcess, database, mode="standalone")
     execution_id = str(owner.initial["execution_id"])
     release = asyncio.Event()
     attached = asyncio.Event()

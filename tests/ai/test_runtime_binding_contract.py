@@ -6,7 +6,6 @@ from linktools.ai.model import create_model_binding
 
 from dataclasses import replace
 from datetime import datetime, timezone
-from types import SimpleNamespace
 from typing import Annotated
 
 import pytest
@@ -525,13 +524,7 @@ def test_binding_rejects_selected_compiled_agent_identity_mismatch() -> None:
     binding = compiler.bind(compiler.compile(AgentSpec("agent")))
     mismatched_compiled_agent = replace(
         binding.compiled_agent,
-        selected_capabilities=(
-            SimpleNamespace(
-                kind="capability",
-                id="unexpected-capability",
-                revision=1,
-            ),
-        ),
+        selected_capabilities=(_configured_contribution("capability", "unexpected-capability", 1, "value"),),
     )
 
     with pytest.raises(AIError) as raised:

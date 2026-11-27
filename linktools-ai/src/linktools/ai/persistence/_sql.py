@@ -36,6 +36,7 @@ from ._content_reference_projection import (
 from ._record_owner import EXECUTION_SHELL_KIND, RECORD_OWNER_TABLES, record_owner_table, record_owner_edge, record_owner_names, record_owner_rows, record_owner_values, record_owner_columns, record_scan_kinds
 from ._schema import build_runtime_sql_metadata
 from ._record_cache import StateRecordCache
+from ._turn_sql_schema import TURN_REQUEST_MAX_BYTES, unoccupied_turn_route
 from .state import state_content_members
 from .state import (
     FactQuery,
@@ -78,6 +79,7 @@ from .state import (
 from ._run_counters import RUN_COUNTER_COLUMNS, run_counter_address, run_counter_streams, run_counter_page_start
 
 if TYPE_CHECKING:
+    from ._plan import PersistencePlan
     from ._execution_authority import ExecutionAuthority, InitialExecutionAuthority
     from typing import Literal
     from ..storage import TurnCoordination, TurnScopeIdentity
@@ -108,6 +110,61 @@ _GROUP_RECORD_BIND_BUDGET = 999
 _ARCHIVE_READ_BIND_BUDGET = 999
 # MySQL repeats fixed predicates/JSON paths across eight branches plus direct content.
 _ARCHIVE_READ_FIXED_BINDS = 145
+_ARCHIVE_SCOPE_RECORD_KEY = record_key("", "", "archive", "archive_scope", ("archive_scope_id",))
+
+
+def _archive_scope_id(record: StoredRecord | None) -> str:
+    scope = None if record is None else record.data.get("archive_scope_id")
+    if not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return scope
+
+
+
+async def _configured_mysql_split_step_source(
+    plan: "PersistencePlan", stores: Mapping[PersistenceDomain, StateStore],
+) -> "tuple[SqlStateStore, str, SqlStateStore] | None":
+    """Recognize provisioned MySQL routes without activating split execution."""
+    execution, checkpoint, conversation = (
+        PersistenceDomain.EXECUTION, PersistenceDomain.CHECKPOINT, PersistenceDomain.CONVERSATION,
+    )
+    durable_domains = plan.durable_domains
+    if plan.checkpoint is None or any(
+        plan.route(domain).kind != "sql" or domain not in durable_domains
+        for domain in (execution, checkpoint, conversation)
+    ):
+        return None
+    source, step, target = stores[execution], stores[checkpoint], stores[conversation]
+    if (
+        not isinstance(source, SqlStateStore)
+        or not isinstance(step, SqlStateStore)
+        or not isinstance(target, SqlStateStore)
+    ):
+        return None
+    source_group, target_group = source.storage_group, target.storage_group
+    if (
+        not isinstance(source_group, SqlStateStorageGroup)
+        or not isinstance(target_group, SqlStateStorageGroup)
+        or step.storage_group is not source_group
+        or source_group is target_group
+        or type(source_group.context.dialect) is not MySQLDialect
+        or type(target_group.context.dialect) is not MySQLDialect
+    ):
+        return None
+    source_id = await source_group._existing_archive_scope_id()
+    if source_id is None:
+        return None
+    target_id = await target_group._existing_archive_scope_id()
+    # Like the SQL context itself, this proof assumes each route stays bound
+    # to one logical database. Identical identities are aliases or copies,
+    # neither of which is safe to use as a split pair.
+    if target_id is None or target_id == source_id:
+        return None
+    from ._step_schema import build_step_domain_sql_metadata
+
+    build_step_domain_sql_metadata((checkpoint,), metadata=source_group.metadata)
+    group_id, archive_store = source_group.opened_archive or await source_group._bind_open_archive(source_id)
+    return source, group_id, archive_store
 
 
 class _SqlGroupTransaction:
@@ -478,8 +535,8 @@ def _payload_table(metadata: "MetaData") -> "Table":
     """Resolve the shared content owner without implicit schema provisioning."""
     from ._step_schema import build_step_sql_metadata
 
-    table = metadata.tables.get("ai_step_messages")
-    return build_step_sql_metadata().tables["ai_step_messages"] if table is None else table
+    table = metadata.tables.get("ai_messages")
+    return build_step_sql_metadata().tables["ai_messages"] if table is None else table
 
 
 class SqlStateStorageGroup:
@@ -499,11 +556,13 @@ class SqlStateStorageGroup:
         uses_archive: bool = False,
         native_content_index: bool = False,
         archive_cache: CacheBackend | None = None,
+        defer_write_access_probe: bool = False,
     ) -> None:
         self._context = context
         self._metadata = metadata
         self._owns_context = owns_context
         self._read_only = read_only
+        self._defer_write_access_probe = defer_write_access_probe
         self._mutation_lock = (
             asyncio.Lock() if context.dialect.single_writer else None
         )
@@ -563,8 +622,23 @@ class SqlStateStorageGroup:
     def opened_archive(self) -> tuple[str, "SqlStateStore"] | None:
         return self._opened_archive
 
+    async def _existing_archive_scope_id(self) -> str | None:
+        """Read an initialized resource identity without provisioning or scanning content."""
+        if active_state_scope() is not None:
+            raise StateTransactionNestingError("archive identity lookup must run outside a state callback")
+        if self._closed:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        if not self._initialized:
+            return None
+        if self._opened_archive is not None:
+            return self._opened_archive[0]
+        async with self._session() as session:
+            metadata = _SqlTransaction(session, self._metadata, self._context, STATE_GROUP_METADATA_KEY)
+            record = await metadata.get_record(_ARCHIVE_SCOPE_RECORD_KEY)
+        return None if record is None else _archive_scope_id(record)
+
     async def open_archive(
-        self, *, create: bool = False,
+        self, *, create: bool = False, sqlite_nowait: bool = False,
     ) -> tuple[str, "SqlStateStore"] | None:
         if active_state_scope() is not None:
             raise StateTransactionNestingError("open_archive must run outside a state callback")
@@ -578,11 +652,14 @@ class SqlStateStorageGroup:
             # Do not repeat its absence/content checks in separate read snapshots.
             async def prepare(_group: StateGroupTransaction) -> None:
                 pass
-            await self.mutate((metadata_store,), prepare)
+            if sqlite_nowait:
+                await self.mutate((metadata_store,), prepare, sqlite_nowait=True)
+            else:
+                await self.mutate((metadata_store,), prepare)
             if self._opened_archive is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return self._opened_archive
-        key = record_key("", "", "archive", "archive_scope", ("archive_scope_id",))
+        key = _ARCHIVE_SCOPE_RECORD_KEY
         record = await metadata_store.read(lambda tx: tx.get_record(key))
         archive_key = STATE_GROUP_ARCHIVE_KEY
         if record is None:
@@ -605,7 +682,14 @@ class SqlStateStorageGroup:
                 await tx.insert_record(value)
                 return value
             try:
-                record = await metadata_store.mutate(initialize_scope)
+                if sqlite_nowait:
+                    record = await self.mutate(
+                        (metadata_store,),
+                        lambda group: initialize_scope(group.transaction(metadata_store)),
+                        sqlite_nowait=True,
+                    )
+                else:
+                    record = await metadata_store.mutate(initialize_scope)
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_CONFLICT:
                     raise
@@ -614,11 +698,10 @@ class SqlStateStorageGroup:
                     raise
         if record is None:
             return None
-        scope = record.data.get("archive_scope_id")
-        if not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        archive_key = STATE_GROUP_ARCHIVE_KEY
-        self._archive_member = await self._open_partition(archive_key)
+        return await self._bind_open_archive(_archive_scope_id(record))
+
+    async def _bind_open_archive(self, scope: str) -> tuple[str, "SqlStateStore"]:
+        self._archive_member = await self._open_partition(STATE_GROUP_ARCHIVE_KEY)
         self._archive_scope_initialized = True
         self._opened_archive = scope, self._archive_member
         return self._opened_archive
@@ -628,16 +711,13 @@ class SqlStateStorageGroup:
     ) -> tuple[str, bool]:
         """Establish resource identity in the first owner mutation's commit."""
         metadata_key = STATE_GROUP_METADATA_KEY
-        key = record_key("", "", "archive", "archive_scope", ("archive_scope_id",))
+        key = _ARCHIVE_SCOPE_RECORD_KEY
         metadata = _SqlTransaction(
             session, self._metadata, self._context, metadata_key, clock=clock,
         )
         record = await metadata.get_record(key)
         if record is not None:
-            scope = record.data.get("archive_scope_id")
-            if not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return scope, True
+            return _archive_scope_id(record), True
         from sqlalchemy import func, literal, select, union_all
 
         # Only existence matters here; never hydrate an orphan's stored body.
@@ -655,10 +735,7 @@ class SqlStateStorageGroup:
                 session, self._metadata, self._context, metadata_key, clock=clock,
             )
             record = await metadata.get_record(key)
-            scope = None if record is None else record.data.get("archive_scope_id")
-            if not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return scope, True
+            return _archive_scope_id(record), True
         record = StoredRecord(
             key=key, scope_key=None, parent_key=None,
             kind="archive_scope", sort_key=b"archive_scope", state=None,
@@ -677,9 +754,7 @@ class SqlStateStorageGroup:
         # Expose only its committed identity, never our rollback-prone candidate.
         metadata = _SqlTransaction(session, self._metadata, self._context, metadata_key, clock=clock)
         winner = await metadata.get_record(key)
-        scope = None if winner is None else winner.data.get("archive_scope_id")
-        if not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        scope = _archive_scope_id(winner)
         return scope, scope != record.data["archive_scope_id"]
 
     async def _open_partition(self, key: bytes) -> "SqlStateStore":
@@ -727,7 +802,8 @@ class SqlStateStorageGroup:
         if self._initialized:
             return
         await self._context.initialize()
-        if not self._read_only:
+        # Detached observation still validates writer access in its actual mutation.
+        if not self._read_only and not self._defer_write_access_probe:
             await self._context.require_write_access()
         self._initialized = True
         _logger.info(
@@ -812,6 +888,8 @@ class SqlStateStorageGroup:
         self,
         stores: Sequence["SqlStateStore"],
         fn: StateGroupCallback[ValueT],
+        *,
+        sqlite_nowait: bool = False,
     ) -> ValueT:
         if self._read_only:
             raise AIError(ErrorCode.STORAGE_READ_ONLY)
@@ -878,10 +956,15 @@ class SqlStateStorageGroup:
 
         lock = self._mutation_lock
         if lock is not None:
-            await lock.acquire()
+            if sqlite_nowait:
+                async with asyncio.timeout(0):
+                    await lock.acquire()
+            else:
+                await lock.acquire()
         try:
             from ._native_content_index import run_native_mutation
-            result = await run_native_mutation(self._context, execute, domain="runtime.state.group")
+            result = await run_native_mutation(self._context, execute, domain="runtime.state.group",
+                                               sqlite_nowait=sqlite_nowait and lock is not None)
             confirmed = True
             if pending_archive_scope is not None:
                 self._opened_archive = pending_archive_scope, self._archive_member
@@ -930,10 +1013,19 @@ class SqlStateStorageGroup:
             else:
                 code = ErrorCode.INTERNAL_ERROR
 
+            frame = error.__traceback__
+            while frame is not None and frame.tb_next is not None:
+                frame = frame.tb_next
+            location = (
+                "unknown" if frame is None else
+                f"{frame.tb_frame.f_globals.get('__name__', '?')}:"
+                f"{frame.tb_frame.f_code.co_name}:{frame.tb_lineno}"
+            )
             _logger.error(
-                "SQL Runtime storage mutation error mapped: error_type=%s code=%s",
+                "SQL Runtime storage mutation error mapped: error_type=%s code=%s at=%s",
                 type(error).__name__,
                 code.value,
+                location,
             )
             if code is ErrorCode.INTERNAL_ERROR:
                 raise AIError(
@@ -1136,71 +1228,13 @@ class SqlStateStore:
             raise StateTransactionNestingError("turn operations require an active SQL storage boundary")
         return active.record_reader.transaction(self)
 
-    async def claim_turn_admission(
-        self, scope: "TurnScopeIdentity", *, session_key: str, request_key: str,
-        request_digest: str, execution_id: str, owner_id: str, duration: float, token: str, coowned: bool = False,
-        publish: "Callable[[InitialExecutionAuthority], Awaitable[int]] | None" = None,
-    ) -> "TurnCoordination | None":
-        self._require_runtime_turn_scope(scope)
-        async def operation(_tx):
-            return await self._turn_transaction().claim_turn_admission(
-                scope, session_key=session_key, request_key=request_key, request_digest=request_digest,
-                execution_id=execution_id, owner_id=owner_id, duration=duration, token=token, coowned=coowned, publish=publish,
-            )
-        active = active_state_transaction(self, writable=True)
-        return await operation(active) if active is not None else await self.mutate(operation)
-
-    async def capture_turn_admission(
-        self, scope: "TurnScopeIdentity", *, route: "Route", identity: str, coowned: bool = False,
-    ) -> "SqlTurnObservation | None":
-        self._require_runtime_turn_scope(scope)
-        return await self.read(lambda _tx: self._turn_transaction().capture_turn_admission(
-            scope, route=route, identity=identity, coowned=coowned,
-        ))
-
-    async def observe_turn_admission(
-        self, scope: "TurnScopeIdentity", *, route: "Route", identity: str, coowned: bool = False,
-    ) -> "SqlTurnProof | None":
-        captured = await self.capture_turn_admission(scope, route=route, identity=identity, coowned=coowned)
-        return None if captured is None or captured.expired else captured.proof
-
-    async def get_turn_operation_proof(self, scope: "TurnScopeIdentity", execution_id: str, *, coowned: bool = False) -> "SqlTurnProof | None":
-        self._require_runtime_turn_scope(scope)
-        return await self.read(lambda _tx: self._turn_transaction().get_turn_operation_proof(scope, execution_id, coowned=coowned))
-
-    async def change_turn_admission(
-        self, scope: "TurnScopeIdentity", *, execution_id: str, receipt: str, kind: "Literal['renew', 'cancel']",
-        lease: tuple[str, str, str, int] | None = None, duration: float | None = None, coowned: bool = False,
-    ) -> "TurnCoordination | None":
-        self._require_runtime_turn_scope(scope)
-        async def operation(_tx):
-            return await self._turn_transaction().change_turn_admission(
-                scope, execution_id=execution_id, receipt=receipt, kind=kind, lease=lease, duration=duration, coowned=coowned,
-            )
-        active = active_state_transaction(self, writable=True)
-        return await operation(active) if active is not None else await self.mutate(operation)
-
-    async def confirm_turn_admission(
+    async def _confirm_native_turn_receipt(
         self, scope: "TurnScopeIdentity", *, execution_id: str, receipt: str, kind: str,
-        expected_claim: tuple[str, str, str, str] | None = None, coowned: bool = False,
     ) -> "TurnCoordination | bool | None":
         self._require_runtime_turn_scope(scope)
-        return await self.read(lambda _tx: self._turn_transaction().confirm_turn_admission(
-            scope, execution_id=execution_id, receipt=receipt, kind=kind, expected_claim=expected_claim, coowned=coowned,
+        return await self.read(lambda _tx: self._turn_transaction()._confirm_native_execution_receipt(
+            scope, execution_id=execution_id, receipt=receipt, kind=kind,
         ))
-
-    async def retire_turn_admission(
-        self, scope: "TurnScopeIdentity", *, session_key: str, request_key: str,
-        execution_id: str, token: str, fence: int, receipt: str, coowned: bool = False,
-    ) -> bool:
-        self._require_runtime_turn_scope(scope)
-        async def operation(_tx):
-            return await self._turn_transaction().retire_turn_admission(
-                scope, session_key=session_key, request_key=request_key,
-                execution_id=execution_id, token=token, fence=fence, receipt=receipt, coowned=coowned,
-            )
-        active = active_state_transaction(self, writable=True)
-        return await operation(active) if active is not None else await self.mutate(operation)
 
     async def validate_integrity(self) -> None:
         self._ensure_ready()
@@ -1380,376 +1414,333 @@ class _SqlTransaction:
             raise StateTransactionNestingError("native rows require a read-only SQL plan in their active boundary")
         return tuple(dict(row) for row in (await self._execute(statement)).mappings())
 
-    async def claim_turn_admission(
-        self, scope: "TurnScopeIdentity", *, session_key: str, request_key: str,
-        request_digest: str, execution_id: str, owner_id: str, duration: float, token: str, coowned: bool = False,
+    async def _claim_execution_owned_standalone(
+        self, scope: "TurnScopeIdentity", *, execution_id: str, request_key: str,
+        request_digest: str, owner_id: str, token: str, duration: float,
         publish: "Callable[[InitialExecutionAuthority], Awaitable[int]] | None" = None,
     ) -> "TurnCoordination | None":
-        from sqlalchemy import literal, update
+        """Claim an explicitly converted standalone scope; never inspect old receipts."""
+        from datetime import timedelta
+        from sqlalchemy import and_, insert, select, true
         from ._execution_authority import ExecutionAuthority, InitialExecutionAuthority
-        from ._turn_sql import SqlTurnProof, SqlTurnRows, turn_hex, turn_session_address
+        from ._turn_sql import STANDALONE, SqlTurnNotOwned, SqlTurnProof, SqlTurnRows, turn_hex
 
         active = active_state_scope()
         if active is None or not active.writable or not is_active_state_transaction(self):
-            raise StateTransactionNestingError("turn claim requires its active mutation boundary")
+            raise StateTransactionNestingError("standalone authority claim requires its SQL write boundary")
+        source = SqlTurnRows(self._metadata, self._store_key, scope, coowned=True)
         dialect = self._context.dialect
-        clock = (dialect.read_snapshot_time_expression() if type(dialect) in (SQLiteDialect, MySQLDialect, PostgreSQLDialect)
-                 else literal(await self._context.run_statement(dialect.database_current_time(self._session))))
-        source = SqlTurnRows(self._metadata, self._store_key, scope, coowned=coowned)
-        turn_hex(owner_id, 32)
-        turn_hex(request_digest, 64)
-        turn_hex(token, 32)
-        captured = (await self._execute(source.select_claim(
-            session_key=session_key, request_key=request_key, execution_id=execution_id, clock=clock,
-        ))).mappings().one()
-        named = {}
-        for key, value in captured.items():
-            if key == "observed_at":
-                continue
-            family, name = key.split("__", 1)
-            named.setdefault(family, {})[name] = value
-        target, incumbent = named["target"], named["incumbent"]
-
-        def admission(family: str):
-            row = named[family]
-            return None if row["execution_id"] is None else SqlTurnProof.from_row(row)
-
-        def verify(slot, proof, *, linked):
-            if proof is None:
-                valid = slot["active_execution_id"] is None and slot["lease_token"] is None and slot["lease_expires_at"] is None
-            else:
-                valid = (proof.active and (slot["session_kind"], slot["session_key"]) == turn_session_address(proof.session_key)
-                         and slot["active_execution_id"] == proof.execution_id.encode("utf-8")
-                         and slot["lease_fence"] == proof.fence and slot["lease_expires_at"] is not None
-                         and type(slot["lease_token"]) is bytes and bool(slot["lease_token"]))
-            if not valid:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if proof is not None:
-                proof.validate_live_token(slot["lease_token"])
-                if linked and slot["execution_key"] != source.execution_key(proof.execution_id):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-        duplicate, owner, proposed = admission("live_request"), admission("target_owner"), admission("proposed")
-        owner_linked = named["target_owner"]["control_id"] is not None
-        duplicate_linked = named["live_request"]["control_id"] is not None
-        verify(target, owner, linked=owner_linked)
-        if duplicate is not None:
-            verify(incumbent, duplicate, linked=duplicate_linked)
-        def live(slot, at):
-            return slot["lease_expires_at"] is not None and dialect.decode_database_time(slot["lease_expires_at"]) > at
-
-        # A replay/busy result has no write authority to establish. One captured
-        # source observation already decides it without touching either owner.
-        observed_at = dialect.decode_database_time(captured["observed_at"])
-        if duplicate is not None and live(incumbent, observed_at):
-            if duplicate.session_key != session_key or duplicate.request_digest != request_digest:
-                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            return duplicate.coordination(scope)
-        if live(target, observed_at):
-            return None
-        if proposed is not None and (
-            (proposed.session_key, proposed.request_key, proposed.request_digest) != (session_key, request_key, request_digest)
-            or proposed.owner_id == owner_id
-        ):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-
-        session = turn_session_address(session_key)
-        protected = {(slot["session_kind"], slot["session_key"]): slot for slot in (target, incumbent) if slot["session_key"] is not None}
+        clock = dialect.read_snapshot_time_expression()
+        for value, width in ((owner_id, 32), (token, 32), (request_digest, 64)):
+            turn_hex(value, width)
+        request = source.select_standalone_execution_receipt(
+            route="request", identity=request_key, clock=clock,
+        ).subquery()
+        table = self._table("ai_execution_records")
+        key = source.execution_key(execution_id)
+        seed = select(clock.label("claim_clock")).subquery()
+        row = (await self._execute(select(
+            seed.c.claim_clock, request, table.c.id.label("candidate_id"),
+            table.c.turn_revision.label("candidate_revision"), table.c.kind.label("candidate_kind"),
+        ).select_from(seed.outerjoin(request, true()).outerjoin(table, and_(
+            table.c.store_key == self._store_key, table.c.key_locator == hashlib.sha256(key).hexdigest(),
+            table.c.key == key,
+        ))))).mappings().one()
+        fence, revision = 1, row["candidate_revision"]
+        session_key = f"request:{request_key}"
+        same_retained_execution = False
         try:
-            lease_duration = timedelta(seconds=duration)
-            retire = {proof.execution_id: (proof, linked)
-                      for proof, linked in ((owner, owner_linked), (duplicate, duplicate_linked))
-                      if proof is not None}
-            retiring_sources = {coowned: source}
-            if any(linked != coowned for _, linked in retire.values()):
-                retiring_sources[not coowned] = SqlTurnRows(
-                    self._metadata, self._store_key, scope, coowned=not coowned,
-                )
-            fence = (target["lease_fence"] or 0) + 1
-            initial_claim = coowned and publish is not None and not retire
-            for key in sorted(set(protected) | {session}):
-                # The first grouped claim publishes the idle slot, Execution,
-                # and receipt atomically; no other reader sees this pointer
-                # before its source record exists.
-                bind = (execution_id, fence) if initial_claim and key == session else None
-                if key not in protected:
-                    await self._execute(source.create_slot(session_key, bind=bind))
-                elif (await self._execute(source.guard_slot_revision(
-                    key, protected[key]["revision"], bind=bind,
-                ))).rowcount != 1:
+            if row["key"] is not None:
+                if row["turn_slot_kind"] != STANDALONE:
+                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                previous, current = source.parse_standalone_control_receipt(row, decode_time=dialect.decode_database_time)
+                if previous.request_digest != request_digest:
+                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                if current is not None and not current.expired:
+                    return previous.coordination(scope)
+                if previous.owner_id == owner_id:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-            for old_id, (old, linked) in sorted(retire.items()):
-                if not linked:
-                    continue
-                old_slot = protected[turn_session_address(old.session_key)]
-                if (await self._execute(retiring_sources[True].control_guard(
-                    session_key=old.session_key, execution_id=old_id, fence=old.fence,
-                    token=old_slot["lease_token"].decode("utf-8"), revision=old_slot["authority_revision"],
-                ))).rowcount != 1:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-            # A fresh grouped claim has no previous lease to check. Only its
-            # Execution row stores the deadline, so sample the clock in that
-            # mandatory INSERT, after the slot's write serialization.
-            initial_duration = (lease_duration if initial_claim
-                                and lease_duration <= timedelta(days=1)
-                                and type(dialect) in (SQLiteDialect, MySQLDialect, PostgreSQLDialect)
-                                and (type(dialect) is not SQLiteDialect or lease_duration.microseconds % 1000 == 0)
-                                else None)
-            now = (None if initial_duration is not None else
-                   await self._context.run_statement(dialect.database_current_time(self._session)))
-            if now is not None and (live(target, now) or duplicate is not None and live(incumbent, now)):
-                # Inconsistent/backward clock evidence after taking the write
-                # guards must not publish a partially claimed turn.
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-
-            for old_id, (old, linked) in sorted(retire.items()):
-                old_source = retiring_sources[linked]
-                if (await self._execute(old_source.retire_admission(
-                    execution_id=old_id, session_key=old.session_key, request_key=old.request_key,
-                    fence=old.fence, receipt=token,
-                    token=protected[turn_session_address(old.session_key)]["lease_token"].decode("utf-8"), kind="expire",
-                ))).rowcount != 1:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                if linked and (await self._execute(old_source.control_set_expiry(
-                    execution_id=old_id, fence=old.fence, expiry=None,
-                    token=protected[turn_session_address(old.session_key)]["lease_token"].decode("ascii"),
-                ))).rowcount != 1:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                if linked and (old_id != execution_id or not coowned):
-                    await self._execute(old_source.reclaim_retired_shell(old_id))
-            if duplicate is not None and duplicate.session_key != session_key:
-                key = turn_session_address(duplicate.session_key)
-                await self._execute(source.bind_slot(key, execution=None, token=None, fence=duplicate.fence, expiry=None))
-            result = SqlTurnProof(execution_id, session_key, request_key, request_digest, owner_id, fence, False, token, "claim", True)
-            previous = proposed
-            if proposed is not None and proposed.execution_id in retire:
-                previous = replace(proposed, receipt_id=token, receipt_kind="expire", active=False)
-            expiry = None if now is None else now + lease_duration
-            control_id = None
-            if coowned:
-                authority = ExecutionAuthority(scope, execution_id, session_key, token, fence)
-                control = named["control"]
-                control_id = control["id"]
-                if publish is not None:
-                    # Grouped synchronous admission must create the complete
-                    # business record, and never stages an unpublished shell.
-                    if control_id is not None:
-                        raise AIError(ErrorCode.STORAGE_CONFLICT)
-                    deadline = expiry if initial_duration is None else initial_duration
-                    assert deadline is not None
-                    control_id = await publish(InitialExecutionAuthority(authority, deadline))
-                elif control_id is None:
-                    assert expiry is not None
-                    control_id = await self.insert_execution_shell(authority, expiry=expiry)
+                prior_revision = row["turn_revision"]
+                if current is not None:
+                    old_token = row["turn_token"].decode("ascii")
+                    locked = await self._execute(source.control_guard(
+                        session_key=session_key, execution_id=previous.execution_id, token=old_token,
+                        fence=previous.fence, revision=prior_revision,
+                    ))
+                    if locked.rowcount != 1:
+                        raise SqlTurnNotOwned()
+                    parked = await self._execute(source.park_standalone_control(
+                        previous, token=old_token, revision=prior_revision + 1, receipt=token,
+                        kind="expire", clock=clock, sqlite=dialect.single_writer,
+                    ))
+                    if parked.rowcount != 1:
+                        raise SqlTurnNotOwned()
+                    previous = replace(previous, active=False, receipt_id=token, receipt_kind="expire")
+                    prior_revision += 2
+                fence = previous.fence + 1
+                if previous.execution_id != execution_id:
+                    archived = await self._execute(source.archive_parked_standalone_control(
+                        previous, revision=prior_revision,
+                    ))
+                    if archived.rowcount != 1:
+                        raise SqlTurnNotOwned()
                 else:
-                    table = self._table("ai_execution_records")
-                    if (await self._execute(update(table).where(
-                        table.c.id == control_id, table.c.store_key == self._store_key, table.c.key == authority.key,
-                        table.c.turn_token.is_(None),
-                    ).values(turn_expiry=expiry, turn_revision=table.c.turn_revision + 1, **authority.authority_values()))).rowcount != 1:
+                    same_retained_execution = True
+                    revision = prior_revision
+            if not 1 <= fence <= 2**63 - 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            proof = SqlTurnProof(execution_id, session_key, request_key, request_digest, owner_id,
+                                 fence, False, token, "claim", True)
+            # This expiry is provisional until the exact unique write returns.
+            expires_at = dialect.decode_database_time(row["claim_clock"]) + timedelta(seconds=duration)
+            if revision is None:
+                authority = ExecutionAuthority(scope, execution_id, session_key, token, fence)
+                if publish is not None:
+                    receipt = source.standalone_control_claim_values(proof, expiry=expires_at)
+                    insertion = InitialExecutionAuthority(authority, timedelta(seconds=duration), receipt_values={
+                        "turn_request_route": receipt["turn_request_route"],
+                        "turn_receipt": receipt["turn_receipt"],
+                    })
+                    control_id = await publish(insertion)
+                    if type(control_id) is not int or insertion.control_id != control_id:
+                        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                    return proof.coordination(scope, token=token)
+                values = authority.shell_values(store_key=self._store_key, expiry=expires_at)
+                values.update(source.standalone_control_claim_values(proof, expiry=expires_at))
+                reserved = await self._execute(insert(table).values(values))
+                self._record_cache[key] = None
+            else:
+                if publish is not None:
+                    if not same_retained_execution:
                         raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if (await self._execute(source.publish_claim(result, previous=previous, control_id=control_id))).rowcount != 1:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if not initial_claim:
-                await self._execute(source.bind_slot(session, execution=execution_id, token=token,
-                                                    fence=fence, expiry=expiry))
+                    if row["candidate_kind"] != EXECUTION_SHELL_KIND:
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    authority = ExecutionAuthority(scope, execution_id, session_key, token, fence)
+                    values = source.standalone_control_claim_values(proof, expiry=expires_at)
+                    insertion = InitialExecutionAuthority(authority, timedelta(seconds=duration), receipt_values={
+                        "turn_request_route": values["turn_request_route"],
+                        "turn_receipt": values["turn_receipt"],
+                    }, shell_revision=(row["candidate_id"], revision))
+                    control_id = await publish(insertion)
+                    if type(control_id) is not int or control_id != row["candidate_id"] or insertion.control_id != control_id:
+                        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                    return proof.coordination(scope, token=token)
+                reserved = await self._execute(source.claim_standalone_control(
+                    proof, expiry=expires_at, previous_revision=revision,
+                ))
+            if reserved.rowcount != 1:
+                raise SqlTurnNotOwned()
+            now = await self._context.run_statement(dialect.database_current_time(self._session))
+            granted = await self._execute(source.control_set_expiry(
+                execution_id=execution_id, token=token, fence=fence,
+                expiry=now + timedelta(seconds=duration),
+            ))
+            if granted.rowcount != 1:
+                raise SqlTurnNotOwned()
         except BaseException as error:
             self._abort_mutation(error)
             raise
-        return result.coordination(scope, token=token)
+        return proof.coordination(scope, token=token)
 
-    async def capture_turn_admission(
-        self, scope: "TurnScopeIdentity", *, route: "Route", identity: str, coowned: bool = False,
-    ) -> "SqlTurnObservation | None":
-        """Read one typed turn source and its coupled clock inside this boundary."""
-        from ._turn_sql import SqlTurnRows
-
-        if not is_active_state_transaction(self):
-            raise StateTransactionNestingError("turn observation requires its active storage transaction")
-        dialect = self._context.dialect
-        source = SqlTurnRows(self._metadata, self._store_key, scope, coowned=coowned)
-        from sqlalchemy import literal
-        current = None
-        if type(dialect) not in (SQLiteDialect, MySQLDialect, PostgreSQLDialect):
-            current = await self._context.run_statement(dialect.database_now(self._session))
-        clock = dialect.read_snapshot_time_expression() if current is None else literal(current)
-        statement = source.select_live(route=route, identity=identity, clock=clock)
-        row = (await self._execute(statement)).mappings().one_or_none()
-        return None if row is None else source.parse_observation(row, decode_time=dialect.decode_database_time)
-
-    async def get_turn_operation_proof(self, scope: "TurnScopeIdentity", execution_id: str, *, coowned: bool = False) -> "SqlTurnProof | None":
-        """Read the exact latest proof, even once a different owner holds the slot."""
-        from ._turn_sql import SqlTurnProof, SqlTurnRows
-
-        if not is_active_state_transaction(self):
-            raise StateTransactionNestingError("turn proof requires its active storage transaction")
-        source = SqlTurnRows(self._metadata, self._store_key, scope, coowned=coowned)
-        row = (await self._execute(source.select_proof(execution_id))).mappings().one_or_none()
-        return None if row is None else SqlTurnProof.from_row(row)
-
-    async def confirm_turn_admission(
-        self, scope: "TurnScopeIdentity", *, execution_id: str, receipt: str, kind: str,
-        expected_claim: tuple[str, str, str, str] | None = None, coowned: bool = False,
-    ) -> "TurnCoordination | bool | None":
-        from ._turn_sql import SqlTurnRows
-
-        if not is_active_state_transaction(self):
-            raise StateTransactionNestingError("turn confirmation requires its active storage transaction")
-        if kind == "release":
-            proof = await self.get_turn_operation_proof(scope, execution_id, coowned=coowned)
-            return True if proof is not None and not proof.active and (
-                proof.receipt_id, proof.receipt_kind,
-            ) == (receipt, kind) else None
-        source = SqlTurnRows(self._metadata, self._store_key, scope, coowned=coowned)
-        dialect = self._context.dialect
-        row = (await self._execute(source.select_live(
-            route="execution", identity=execution_id, clock=dialect.read_snapshot_time_expression(),
-        ))).mappings().one_or_none()
-        proof = None if row is None else source.live_proof(row, decode_time=dialect.decode_database_time)
-        if proof is None:
-            return None
-        token = row["lease_token"].decode("utf-8")
-        if kind == "claim":
-            if token != receipt or expected_claim is not None and expected_claim != (
-                proof.session_key, proof.request_key, proof.request_digest, proof.owner_id,
-            ):
-                return None
-        elif (proof.receipt_id, proof.receipt_kind) != (receipt, kind):
-            return None
-        return proof.cancel_requested if kind == "cancel" else proof.coordination(scope, token=token)
-
-    async def change_turn_admission(
-        self, scope: "TurnScopeIdentity", *, execution_id: str, receipt: str, kind: "Literal['renew', 'cancel']",
-        lease: tuple[str, str, str, int] | None = None, duration: float | None = None, coowned: bool = False,
+    async def _regrant_native_execution_receipt(
+        self, scope: "TurnScopeIdentity", *, session_key: str,
+        execution_id: str, request_key: str, request_digest: str, owner_id: str, token: str, duration: float, split: bool = False,
     ) -> "TurnCoordination | None":
+        """Fence and resume only an existing published execution with its original identity."""
         from dataclasses import replace
         from datetime import timedelta
-        from ._turn_sql import SqlTurnNotOwned, SqlTurnRows, turn_session_address
+        from ._turn_sql import STANDALONE, SqlTurnNotOwned, SqlTurnRows, turn_hex, turn_session_address
 
         active = active_state_scope()
         if active is None or not active.writable or not is_active_state_transaction(self):
-            raise StateTransactionNestingError("turn mutation requires its active write boundary")
+            raise StateTransactionNestingError("native recovery requires its source write boundary")
+        result = await self._read_native_execution_receipt(scope, route="execution", identity=execution_id, split=split)
+        if result is None:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        row, proof, observed = result
+        if (proof.session_key, proof.request_key, proof.request_digest) != (session_key, request_key, request_digest):
+            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+        if row["kind"] != "execution":
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        if observed is not None and not observed.expired:
+            return proof.coordination(scope)
+        if proof.owner_id == owner_id:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        kind, slot = turn_session_address(session_key)
+        route = turn_hex(request_key, TURN_REQUEST_MAX_BYTES)
+        turn_hex(owner_id, 32)
+        next_token = turn_hex(token, 32)
+        if kind != STANDALONE:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if row["turn_request_route"] != route:
+            # An archived standalone receipt no longer owns the request highwater.
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+        source = SqlTurnRows(self._metadata, self._store_key, scope, coowned=True)
+        table = self._table("ai_execution_records")
+        c = table.c
+        revision = row["turn_revision"]
+        exact = (
+            source._execution_address(table, execution_id), c.kind == "execution",
+            c.turn_slot_kind == kind, c.turn_slot_key == slot, c.turn_fence == proof.fence,
+            c.turn_request_route == row["turn_request_route"], c.turn_token == row["turn_token"],
+            c.turn_receipt.is_not(None),
+        )
         dialect = self._context.dialect
-        source = SqlTurnRows(self._metadata, self._store_key, scope, coowned=coowned)
-
-        async def capture():
-            row = (await self._execute(source.select_live(
-                route="execution", identity=execution_id, clock=dialect.read_snapshot_time_expression(),
-            ))).mappings().one_or_none()
-            proof = None if row is None else source.live_proof(row, decode_time=dialect.decode_database_time)
-            return row, proof
-
-        if lease is None:
-            row, proof = await capture()
-            if proof is None:
-                return None
-            actual_coowned = row["control_id"] is not None
-            if actual_coowned != coowned:
-                coowned = actual_coowned
-                source = SqlTurnRows(self._metadata, self._store_key, scope, coowned=coowned)
-            lease = proof.session_key, proof.request_key, row["lease_token"].decode("utf-8"), proof.fence
-        session, request, token, fence = lease
-        matched = (await self._execute(source.serialize_slot(
-            session_key=session, execution_id=execution_id, token=token, fence=fence,
-        ))).rowcount
-        if not matched:
-            return None
         try:
-            if matched != 1:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            row, proof = await capture()
-            if proof is None:
+            locked = await self._execute(table.update().where(
+                *exact, c.turn_revision == revision,
+            ).values(turn_revision=c.turn_revision + 1))
+            if locked.rowcount != 1:
                 raise SqlTurnNotOwned()
-            if (proof.session_key, proof.fence) != (session, fence):
+            fence = proof.fence + 1
+            if fence > 2**63 - 1:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if proof.request_key != request:
+            receipt = {
+                "owner_id": owner_id, "request_digest": request_digest,
+                "receipt_id": token, "receipt_kind": "claim", "cancel_requested": proof.cancel_requested,
+            }
+            clock = dialect.read_snapshot_time_expression()
+            # Fresh database time after obtaining the exact row lock; the old token is replaced rather than copied or re-issued.
+            expired = () if not proof.active else (~source._deadline_is_live(clock, sqlite=dialect.single_writer),)
+            written = await self._execute(table.update().where(
+                *exact, c.turn_revision == revision + 1, *expired,
+            ).values(
+                turn_token=next_token, turn_fence=fence, turn_request_route=route,
+                turn_expiry=_initial_turn_deadline(dialect, timedelta(seconds=duration)), turn_receipt=receipt,
+            ))
+            if written.rowcount != 1:
                 raise SqlTurnNotOwned()
-            if (await self._execute(source.refresh_admission(
-                execution_id=execution_id, session_key=session, request_key=request, fence=fence, receipt=receipt, kind=kind,
-            ))).rowcount != 1:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if kind == "renew":
-                if duration is None:
-                    raise ValueError("renewal requires a lease duration")
-                expiry = dialect.decode_database_time(row["observed_at"]) + timedelta(seconds=duration)
-                renewal = (source.control_set_expiry(execution_id=execution_id, token=token, fence=fence, expiry=expiry)
-                           if coowned else source.bind_slot(turn_session_address(session), execution=execution_id,
-                                                              token=token, fence=fence, expiry=expiry))
-                if (await self._execute(renewal)).rowcount != 1:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
         except BaseException as error:
             self._abort_mutation(error)
             raise
-        changed = replace(proof, cancel_requested=kind == "cancel" or proof.cancel_requested)
-        return changed.coordination(scope, token=token if kind == "renew" else None)
+        return replace(proof, owner_id=owner_id, fence=fence, receipt_id=token,
+                       receipt_kind="claim", active=True).coordination(scope, token=token)
 
-    async def retire_turn_admission(
-        self, scope: "TurnScopeIdentity", *, session_key: str, request_key: str,
-        execution_id: str, token: str, fence: int, receipt: str, coowned: bool = False,
-    ) -> bool:
-        """Retire an exactly owned, live admission and preserve its release receipt."""
-        from ._turn_sql import SqlTurnNotOwned, SqlTurnRows, turn_session_address
+    async def _read_native_execution_receipt(
+        self, scope: "TurnScopeIdentity", *, route: "Route", identity: str, split: bool = False,
+        lease: tuple[str, str, str, int] | None = None,
+    ) -> "tuple[Mapping[str, object], SqlTurnProof, SqlTurnObservation | None] | None":
+        """Read an exact indexed route; row fields remain invisible to business readers."""
+        from ._turn_sql import SqlTurnRows
+
+        if not is_active_state_transaction(self):
+            raise StateTransactionNestingError("standalone authority read requires its SQL boundary")
+        if split:
+            from ._split_turn_anchor import SplitSessionTurnTransactions
+            return await SplitSessionTurnTransactions(self, scope).read(route=route, identity=identity, lease=lease)
+        if route == "session":
+            return None
+        source = SqlTurnRows(self._metadata, self._store_key, scope, coowned=True)
+        dialect = self._context.dialect
+        record = (await self._execute(source.select_standalone_execution_receipt(
+            route=route, identity=identity, clock=dialect.read_snapshot_time_expression(),
+        ))).mappings().one_or_none()
+        if record is None:
+            return None
+        proof, observation = source.parse_standalone_control_receipt(record, decode_time=dialect.decode_database_time)
+        return record, proof, observation
+
+    async def _change_native_execution_receipt(
+        self, scope: "TurnScopeIdentity", *, execution_id: str, receipt: str,
+        kind: "Literal['renew', 'cancel', 'release']", lease: tuple[str, str, str, int] | None,
+        duration: float | None = None, split: bool = False,
+    ) -> "TurnCoordination | bool | None":
+        """Change token, source-clock lease or retained receipt in the same Execution row."""
+        from datetime import timedelta
+        from sqlalchemy import update
+        from ._turn_sql import SESSION, SqlTurnNotOwned, SqlTurnRows, turn_hex
 
         active = active_state_scope()
         if active is None or not active.writable or not is_active_state_transaction(self):
-            raise StateTransactionNestingError("turn retirement requires its active mutation boundary")
-        source = SqlTurnRows(self._metadata, self._store_key, scope, coowned=coowned)
-        if coowned and (await self._execute(source.slot_guard_for_release(session_key, execution_id, fence))).rowcount != 1:
-            return False
+            raise StateTransactionNestingError("standalone authority mutation requires its SQL write boundary")
+        result = await self._read_native_execution_receipt(scope, route="execution", identity=execution_id, split=split, lease=lease)
+        if result is None:
+            return None
+        row, proof, observed = result
+        if split and row["turn_slot_kind"] == SESSION:
+            from ._split_turn_anchor import SplitSessionTurnTransactions
+            return await SplitSessionTurnTransactions(self, scope).change(
+                execution_id=execution_id, receipt=receipt, kind=kind,
+                lease=lease, duration=duration, loaded=result, inline_deadline=_initial_turn_deadline,
+            )
+        if observed is None or observed.expired:
+            return None
+        token = row["turn_token"].decode("ascii")
+        if (lease is None and kind != "cancel") or (
+            lease is not None and lease != (proof.session_key, proof.request_key, token, proof.fence)
+        ):
+            return None
+        turn_hex(receipt, 32)
+        if kind == "renew" and duration is None:
+            raise ValueError("renewal requires a lease duration")
+        source = SqlTurnRows(self._metadata, self._store_key, scope, coowned=True)
+        dialect = self._context.dialect
+        clock = dialect.read_snapshot_time_expression()
         try:
-            published = False
-            if coowned:
-                # A successful rowcount proves the locked source is published;
-                # only an unproven source can need hidden-shell cleanup.
-                matched = (await self._execute(source.control_guard(
-                    session_key=session_key, execution_id=execution_id, token=token, fence=fence,
-                    published_only=True, revoke=True,
-                ))).rowcount
-                published = matched == 1
-                if matched == 0:
-                    matched = (await self._execute(source.control_guard(
-                        session_key=session_key, execution_id=execution_id, token=token, fence=fence, revoke=True,
-                    ))).rowcount
-            else:
-                matched = (await self._execute(source.serialize_slot(
-                    session_key=session_key, execution_id=execution_id, token=token, fence=fence,
-                ))).rowcount
-            if not matched:
-                if coowned:
-                    raise SqlTurnNotOwned()
-                return False
-            if matched != 1:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            dialect = self._context.dialect
-            if not coowned and (await self._execute(source.clear_serialized_slot(
-                session_key=session_key, clock=dialect.read_snapshot_time_expression(), sqlite=dialect.single_writer,
-            ))).rowcount != 1:
+            locked = await self._execute(source.control_guard(
+                session_key=proof.session_key, execution_id=execution_id, token=token, fence=proof.fence,
+                revision=observed.slot_revision,
+            ))
+            if locked.rowcount != 1:
                 raise SqlTurnNotOwned()
-            release_clock = dialect.read_snapshot_time_expression() if coowned else None
-            if (await self._execute(source.retire_admission(
-                execution_id=execution_id, session_key=session_key, request_key=request_key, fence=fence, receipt=receipt,
-                token=token, clock=release_clock, sqlite=dialect.single_writer,
-            ))).rowcount != 1:
-                if release_clock is not None:
-                    # A failed release rolls back all three writes. Compare
-                    # using the same SQL clock/precision as the attempted CAS.
-                    live = (await self._execute(source.revoked_control_deadline(
-                        execution_id=execution_id, fence=fence, clock=release_clock, sqlite=dialect.single_writer,
-                    ))).scalar_one_or_none()
-                    if not live:
-                        raise SqlTurnNotOwned()
-                proof = await self.get_turn_operation_proof(scope, execution_id, coowned=coowned)
-                if proof is not None and (proof.session_key, proof.fence) == (session_key, fence):
-                    proof.validate_live_token(token.encode("utf-8"))
-                    if proof.request_key != request_key:
-                        raise SqlTurnNotOwned()
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if coowned and not published:
-                await self._execute(source.reclaim_retired_shell(execution_id))
+            revision = observed.slot_revision + 1
+            if kind == "release":
+                written = await self._execute(source.park_standalone_control(
+                    proof, token=token, revision=revision, receipt=receipt, kind="release",
+                    clock=clock, sqlite=dialect.single_writer,
+                ))
+                if written.rowcount != 1:
+                    raise SqlTurnNotOwned()
+                return True
+            table = self._table("ai_execution_records")
+            values = {"turn_receipt": {
+                "owner_id": proof.owner_id, "request_digest": proof.request_digest,
+                "receipt_id": receipt, "receipt_kind": kind,
+                "cancel_requested": kind == "cancel" or proof.cancel_requested,
+            }}
+            if kind == "renew":
+                now = await self._context.run_statement(dialect.database_current_time(self._session))
+                values["turn_expiry"] = now + timedelta(seconds=duration)
+            written = await self._execute(update(table).where(
+                source._execution_address(table, execution_id),
+                table.c.turn_token == turn_hex(token, 32), table.c.turn_fence == proof.fence,
+                table.c.turn_revision == revision,
+                table.c.turn_request_route == turn_hex(proof.request_key, TURN_REQUEST_MAX_BYTES),
+                source._deadline_is_live(clock, sqlite=dialect.single_writer),
+            ).values(**values))
+            if written.rowcount != 1:
+                raise SqlTurnNotOwned()
         except BaseException as error:
             self._abort_mutation(error)
             raise
-        return True
+        if kind == "cancel":
+            return True
+        return proof.coordination(scope, token=token)
+
+    async def _confirm_native_execution_receipt(
+        self, scope: "TurnScopeIdentity", *, execution_id: str, receipt: str,
+        kind: "Literal['claim', 'renew', 'cancel', 'release', 'expire']",
+        expected_claim: tuple[str, str, str, str] | None = None, split: bool = False,
+    ) -> "TurnCoordination | bool | None":
+        """Reconcile only the exact retained operation receipt after unknown commit."""
+        result = await self._read_native_execution_receipt(scope, route="execution", identity=execution_id, split=split)
+        if result is None:
+            return None
+        row, proof, observed = result
+        if (proof.receipt_id, proof.receipt_kind) != (receipt, kind):
+            return None
+        if expected_claim is not None and (
+            proof.session_key, proof.request_key, proof.request_digest, proof.owner_id
+        ) != expected_claim:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if kind in ("release", "expire"):
+            return True if not proof.active else None
+        if observed is None or observed.expired:
+            return None
+        if kind == "cancel":
+            return True if proof.cancel_requested else None
+        return proof.coordination(scope, token=row["turn_token"].decode("ascii"))
 
     async def require_execution_authority(
         self, authority: "ExecutionAuthority", *, revision: int | None = None,
@@ -1791,7 +1782,8 @@ class _SqlTransaction:
             self._abort_mutation(error)
             raise
 
-    async def insert_execution_shell(self, authority: "ExecutionAuthority", *, expiry: datetime) -> int:
+    async def insert_execution_shell(self, authority: "ExecutionAuthority", *, expiry: "datetime | ColumnElement",
+        receipt_values: dict[str, object] | None = None) -> int:
         """Create the execution's authoritative row without making it business-visible."""
         from sqlalchemy import insert
 
@@ -1799,7 +1791,18 @@ class _SqlTransaction:
         if active is None or not active.writable or not is_active_state_transaction(self):
             raise StateTransactionNestingError("execution shell requires its active SQL mutation")
         table = self._table("ai_execution_records")
-        result = await self._execute(insert(table).values(authority.shell_values(store_key=self._store_key, expiry=expiry)))
+        if isinstance(expiry, datetime):
+            values = authority.shell_values(store_key=self._store_key, expiry=expiry)
+        else:
+            # shell_values owns canonical record fields; only expiry is a SQL
+            # expression for the native deferred source-clock grant.
+            values = authority.shell_values(store_key=self._store_key, expiry=datetime.now(timezone.utc))
+            values["turn_expiry"] = expiry
+        if receipt_values is not None:
+            if receipt_values.keys() != {"turn_request_route", "turn_receipt"}:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            values.update(receipt_values)
+        result = await self._execute(insert(table).values(values))
         self._record_cache[authority.key] = None
         (control_id,) = result.inserted_primary_key
         if type(control_id) is not int:
@@ -1808,8 +1811,10 @@ class _SqlTransaction:
 
     async def insert_execution_with_authority(
         self, authority: "ExecutionAuthority", record: StoredRecord, *, expiry: datetime | timedelta,
+        receipt_values: dict[str, object] | None = None, shell_revision: tuple[int, int] | None = None,
     ) -> int:
-        from sqlalchemy import insert
+        from sqlalchemy import insert, update
+        from ._turn_sql import STANDALONE, SqlTurnNotOwned, turn_session_address
 
         if not is_active_state_transaction(self):
             raise StateTransactionNestingError("execution source publication requires its SQL mutation")
@@ -1821,8 +1826,36 @@ class _SqlTransaction:
         deadline = (_initial_turn_deadline(self._context.dialect, expiry)
                     if isinstance(expiry, timedelta) else expiry)
         try:
-            result = await self._execute(insert(table).values(**values, **authority.authority_values(), turn_expiry=deadline))
-            (control_id,) = result.inserted_primary_key
+            if receipt_values is not None:
+                if receipt_values.keys() != {"turn_request_route", "turn_receipt"}:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                values.update(receipt_values)
+            write = {**values, **authority.authority_values(), "turn_expiry": deadline}
+            if shell_revision is None:
+                result = await self._execute(insert(table).values(write))
+                (control_id,) = result.inserted_primary_key
+            else:
+                kind, route = turn_session_address(authority.slot)
+                if kind != STANDALONE or receipt_values is None or receipt_values["turn_request_route"] != route:
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                control_id, revision = shell_revision
+                c = table.c
+                exact = (
+                    c.store_key == self._store_key, c.key_locator == _key_locator(record.key), c.key == record.key,
+                    c.id == control_id, c.kind == EXECUTION_SHELL_KIND, c.turn_slot_kind == kind, c.turn_slot_key == route,
+                    c.turn_request_route == route, c.turn_token.is_(None), c.turn_fence == authority.fence - 1,
+                    c.turn_revision == revision, c.turn_receipt.is_not(None),
+                )
+                # Lock the parked owner before computing any deadline on an
+                # engine whose snapshot clock anchors to the statement start.
+                guarded = await self._execute(update(table).where(*exact).values(turn_revision=c.turn_revision + 1))
+                if guarded.rowcount != 1:
+                    raise SqlTurnNotOwned()
+                promoted = await self._execute(update(table).where(
+                    c.id == control_id, c.turn_revision == revision + 1,
+                ).values(**write, turn_revision=c.turn_revision + 1))
+                if promoted.rowcount != 1:
+                    raise SqlTurnNotOwned()
             if type(control_id) is not int:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             self._stage_native_record_owner(record, inserting=True)
@@ -1856,6 +1889,8 @@ class _SqlTransaction:
             live = (func.julianday(expiry) > func.julianday(clock)
                     if self._context.dialect.single_writer else expiry > clock)
             values, = _record_insert_rows(table.name, (record,), self._store_key)
+            values.pop("turn_request_route")
+            values.pop("turn_occupied_route")
             # Physical and logical addresses are unchanged, including the SQL id.
             promoted = await self._execute(update(table).where(exact_shell, live).values(**values))
             if promoted.rowcount != 1:
@@ -1910,49 +1945,6 @@ class _SqlTransaction:
         for key in keys:
             self._record_cache.setdefault(key, None)
         return tuple(result)
-
-    async def read_sequence_window(
-        self, key: bytes, *, before: int | None, limit: int, include_next: bool = False,
-    ) -> tuple[int, tuple[StoredFact, ...]]:
-        """Read the sequence counter and a preceding bounded fact window together.
-
-        Reserving the next sequence also captures its durable predecessor, so
-        the caller can validate an observation against the last admitted fact.
-        Empty pages still carry the counter's physical identity and value.
-        """
-        from sqlalchemy import and_, case, func, literal, select
-
-        validate_stream_key(key)
-        counters, facts = self._table("ai_state_counters"), self._table("ai_state_facts")
-        seed = select(literal(1).label("seed")).subquery()
-        source = select(counters.c.stream_key.label("counter_key"),
-                        counters.c.stream_locator.label("counter_locator"),
-                        counters.c.value.label("counter_value")).select_from(seed.outerjoin(counters, and_(
-                            counters.c.store_key == self._store_key,
-                            counters.c.stream_locator == _key_locator(key),
-                        ))).subquery()
-        head = func.coalesce(source.c.counter_value, 0)
-        page_before = head + 1 + int(include_next) if before is None else literal(before)
-        page_start = case((page_before - limit > 1, page_before - limit), else_=1)
-        read_start = case((and_(literal(include_next), head > 0, head < page_start), head), else_=page_start)
-        read_end = case((head + 1 < page_before, head + 1), else_=page_before)
-        statement = select(source, *facts.c).select_from(source.outerjoin(facts, and_(
-            facts.c.store_key == self._store_key,
-            _key_matches(facts.c.stream_key, key),
-            facts.c.sequence >= read_start, facts.c.sequence < read_end,
-        ))).order_by(facts.c.sequence)
-        rows = await self.read_sql_rows(self._context, statement)
-        first = rows[0]
-        value = 0
-        if first["counter_key"] is not None:
-            if first["counter_key"] != key:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            _validate_locators({"stream_key": first["counter_key"],
-                                "stream_locator": first["counter_locator"]}, "stream_key")
-            value = _row_nonnegative_int(first["counter_value"])
-        if before is not None and not 1 <= before <= value + int(include_next) + 1:
-            return value, ()
-        return value, tuple(_fact_from_row(row) for row in rows if row["sequence"] is not None)
 
     async def read_joined_facts(
         self, context: SqlStorageContext, statement: "Select",
@@ -2421,18 +2413,21 @@ class _SqlTransaction:
         await self.insert_records((record,))
 
     async def insert_records(self, records: Sequence[StoredRecord]) -> None:
+        await self._insert_records(records)
+
+    async def _insert_records(self, records: Sequence[StoredRecord]) -> None:
         values = tuple(records)
         owners = tuple(dict.fromkeys(record_owner_table(record.key, store_key=self._store_key) for record in values))
         if len(owners) > 1:
             try:
                 for owner in owners:
                     batch = tuple(record for record in values if record_owner_table(record.key, store_key=self._store_key) == owner)
-                    await self.insert_records(batch)
+                    await self._insert_records(batch)
             except BaseException as error:
                 self._abort_mutation(error)
                 raise
             return
-        if owners == ("ai_step_messages",):
+        if owners == ("ai_messages",):
             try:
                 if len({record.key for record in values}) != len(values):
                     raise ValueError("duplicate payload keys")
@@ -2486,7 +2481,7 @@ class _SqlTransaction:
                 self._abort_mutation(error)
                 raise
             return
-        if owners == ("ai_step_messages",):
+        if owners == ("ai_messages",):
             try:
                 if len({record.key for record in values}) != len(values):
                     raise ValueError("duplicate payload keys")
@@ -2621,7 +2616,7 @@ class _SqlTransaction:
                 self._abort_mutation(error)
                 raise
             return
-        if owners == ("ai_step_messages",):
+        if owners == ("ai_messages",):
             try:
                 if len({item.record.key for item in values}) != len(values):
                     raise ValueError("duplicate payload replacements")
@@ -2866,7 +2861,7 @@ class _SqlTransaction:
             return
         if not unique_keys:
             return
-        if owners == ("ai_step_messages",):
+        if owners == ("ai_messages",):
             await self._delete_payload_records(unique_keys)
             return
         from sqlalchemy import delete, tuple_, update
@@ -3731,7 +3726,7 @@ class _SqlTransaction:
         return tuple(conditions)
 
     def _is_payload_key(self, key: bytes) -> bool:
-        return record_owner_table(key, store_key=self._store_key) == "ai_step_messages"
+        return record_owner_table(key, store_key=self._store_key) == "ai_messages"
 
     def _payload_owner(self):
         from ._step_payload_sql import StepPayloadSql
@@ -3789,6 +3784,10 @@ def _record_values(record: StoredRecord) -> dict[str, object]:
 def _record_insert_rows(owner: str, records: Sequence[StoredRecord], store_key: bytes) -> list[dict[str, object]]:
     rows = [{**record_owner_values(owner, _record_values(record)), "store_key": store_key}
             for record in records]
+    if owner == "ai_execution_records":
+        for row in rows:
+            unoccupied = unoccupied_turn_route(row["key_locator"])
+            row.update(turn_request_route=unoccupied, turn_occupied_route=unoccupied)
     # Unset projections have the schema's NULL default on INSERT; CAS still
     # explicitly clears a previously populated slot when the payload changes.
     for column in CONTENT_REFERENCE_COLUMNS.get(owner, ()):
@@ -4036,13 +4035,14 @@ def _record_query_statement(metadata: "MetaData", store_key: bytes, query: Recor
                             *, content_columns: Sequence[str] = (), dialect: str | None = None) -> "Select | CompoundSelect":
     from sqlalchemy import literal_column, select, union_all
 
-    if query.kind is not None and query.kind.rstrip(" ") == "execution":
+    if query.kind is not None and query.kind.rstrip(" ") in {"execution", "task_graph"}:
         # Each disjoint range keeps all possible members of the global page.
         # Logical filters and raw-key cursors apply before each branch limit.
+        columns = EXECUTION_REFERENCE_COLUMNS if query.kind.rstrip(" ") == "execution" else content_columns
         branches = [
             _record_page_statement(
                 record_owner_rows(metadata, kind=query.kind, owner=owner, scan_kind=bucket,
-                                  content_columns=EXECUTION_REFERENCE_COLUMNS),
+                                  content_columns=columns),
                 store_key, query,
             )
             for owner in record_owner_names(kind=query.kind)
@@ -4063,24 +4063,6 @@ def _record_query_statement(metadata: "MetaData", store_key: bytes, query: Recor
                 candidates.c.sort_prefix, candidates.c.sort_key, candidates.c.key,
             )
             return statement.limit(query.limit) if query.limit is not None else statement
-    # PAD SPACE collations can make distinct raw states share one equality range.
-    if (query.kind == "task_graph" and query.limit is not None and query.states
-            and len(query.states) <= 2
-            and len({state.rstrip(" ") for state in query.states}) == len(query.states)):
-        # Bound each physical owner's equality range before the global merge.
-        # A range's first N records contain every possible global first-N member.
-        branches = [
-            select(_record_page_statement(
-                record_owner_rows(metadata, owner=owner, kind=query.kind), store_key,
-                replace(query, states=frozenset((state,))),
-            ).subquery())
-            for owner in record_owner_names(kind=query.kind)
-            for state in sorted(query.states)
-        ]
-        candidates = union_all(*branches).subquery()
-        return select(candidates).order_by(
-            candidates.c.sort_prefix, candidates.c.sort_key, candidates.c.key,
-        ).limit(query.limit)
     return _record_page_statement(record_owner_rows(metadata, kind=query.kind,
                                                    content_columns=content_columns), store_key, query)
 

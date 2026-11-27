@@ -20,6 +20,7 @@ from ..core import (
     ToolOperationStatus,
     validate_lease_owner,
     validate_resource_id,
+    validate_tool_operation_id,
 )
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, StoredPayload
@@ -50,6 +51,7 @@ from .state import (
     StateTransaction,
     StoredRecord,
     active_state_scope,
+    active_state_transaction,
 )
 from ._repository_common import (
     RepositoryBase as _RepositoryBase,
@@ -354,7 +356,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         return await self._store.read(operation)
 
     def _tool_key(self, identity: str) -> bytes:
-        return self._key("tool_operation", (identity,))
+        return self._key("tool_operation", (validate_tool_operation_id(identity),))
 
     async def _retry_storage_conflict(
         self,
@@ -448,7 +450,10 @@ class ToolRepositoryImpl(_RepositoryBase):
         transaction: StateTransaction,
         request: ToolOperationAdmission,
         *, observed: Observed[ToolOperationRecord] | None = None, known_new: bool = False,
+        expected_pending: ToolOperationRecord | None = None,
     ) -> Observed[ToolOperationRecord]:
+        if expected_pending is not None and (known_new or observed is not None):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         validate_lease_owner(request.owner)
         if known_new and (observed is not None or request.recovery_agent_run_id is not None):
             raise ValueError("known-new admission cannot carry recovery evidence")
@@ -466,6 +471,8 @@ class ToolRepositoryImpl(_RepositoryBase):
                                  storage_revision=observed.storage_revision)
             else:
                 record = await transaction.get_record(self._tool_key(request.tool_operation_id))
+            if expected_pending is not None and record is None:
+                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
             if record is None:
                 now = datetime.now(timezone.utc)
                 value = ToolOperationRecord(
@@ -502,6 +509,11 @@ class ToolRepositoryImpl(_RepositoryBase):
             current = await self._decode(record, ToolOperationRecord)
             if not _tool_admission_matches(current, request):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+            if expected_pending is not None and (
+                current != expected_pending or current.status is not ToolOperationStatus.PENDING
+                or current.owner is not None
+            ):
+                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
             now = (
                 datetime.now(timezone.utc)
                 if current.status
@@ -611,6 +623,18 @@ class ToolRepositoryImpl(_RepositoryBase):
             return value
         return await self._read_content(read)
 
+    async def settle_deferred_result(
+        self, expected: ToolOperationRecord, *,
+        result_payload: StoredPayload | None, error_code: str | None, error_payload: StoredPayload | None,
+    ) -> ToolOperationRecord:
+        """Settle only inside the waiting turn's already-held receipt transaction."""
+        transaction = active_state_transaction(self.state_store, writable=True)
+        if transaction is None:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        return await self.settle_deferred_result_in_transaction(
+            transaction, expected, result_payload=result_payload, error_code=error_code, error_payload=error_payload,
+        )
+
     async def settle_deferred_result_in_transaction(
         self, transaction: StateTransaction, expected: ToolOperationRecord, *,
         result_payload: StoredPayload | None, error_code: str | None,
@@ -694,6 +718,39 @@ class ToolRepositoryImpl(_RepositoryBase):
         value = None if record is None else await self._decode(record, ToolOperationRecord)
         return value
 
+    async def guard_recovered_subagent_start_in_transaction(
+        self, transaction: StateTransaction, original: ToolOperationRecord,
+    ) -> None:
+        """Keep the exact retained delegate receipt stable through child first-start."""
+        key = self._tool_key(original.tool_operation_id)
+        record = await transaction.get_record(key)
+        if record is None or await self._decode(record, ToolOperationRecord) != original:
+            raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+        if await transaction.guard_record_revision(key, expected_storage_revision=record.storage_revision) is None:
+            raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+
+    async def settle_recovered_subagent_in_transaction(
+        self, transaction: StateTransaction, original: ToolOperationRecord, *,
+        result_payload: StoredPayload | None, error_code: str | None, error_payload: StoredPayload | None,
+        terminal_at: datetime,
+    ) -> ToolOperationRecord:
+        """Settle an original delegate claim after the caller proves the child outcome."""
+        stored = await transaction.get_record(self._tool_key(original.tool_operation_id))
+        if stored is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        current = await self._decode(stored, ToolOperationRecord)
+        target = ToolOperationStatus.COMPLETED if result_payload is not None else ToolOperationStatus.FAILED
+        updated = replace(
+            original, status=target, error_code=error_code, error_payload=error_payload,
+            result_payload=result_payload, effect_ended_at=terminal_at, updated_at=max(original.updated_at, terminal_at),
+        )
+        if current == updated:
+            return current
+        if current != original:
+            raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+        await self._replace_tool_in_transaction(transaction, stored, updated)
+        return updated
+
     async def resolve_effect_in_transaction(
         self,
         transaction: StateTransaction,
@@ -761,15 +818,16 @@ class ToolRepositoryImpl(_RepositoryBase):
         execution_id: str,
         *,
         tenant_id: str,
+        _states: frozenset[str] | None = None,
     ) -> tuple[ToolOperationRecord, ...]:
         async def read(_transaction):
             if tenant_id != self._tenant_id:
                 return ()
             parent = self._parent("tool_operation", "execution", (execution_id,))
             records = await self._tool_content.prefetch_owners(
-                (), query=RecordQuery(kind="tool_operation", parent_key=parent))
+                (), query=RecordQuery(kind="tool_operation", parent_key=parent, states=_states))
             if records is None:
-                records = await self._records("tool_operation", parent=parent)
+                records = await self._records("tool_operation", parent=parent, states=_states)
             values = tuple(
                 [await self._decode(record, ToolOperationRecord) for record in await self._tool_content.expand_many(records)]
             )
@@ -803,7 +861,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         if isinstance(operation_ids, (str, bytes)):
             raise TypeError("operation_ids must be a sequence")
         ordered = tuple(dict.fromkeys(operation_ids))
-        keys = tuple(self._tool_key(validate_resource_id(identity)) for identity in ordered)
+        keys = tuple(self._tool_key(identity) for identity in ordered)
         if not keys:
             return ()
         async def read(transaction: StateTransaction) -> tuple[ToolOperationMetadata, ...]:
@@ -822,6 +880,19 @@ class ToolRepositoryImpl(_RepositoryBase):
             return tuple(values)
         return await self._store.read(read)
 
+    async def cancel_parked_operations_in_transaction(
+        self, transaction: StateTransaction, operations: Sequence[ToolOperationRecord], *, cancelled_at: datetime,
+    ) -> None:
+        for operation in operations:
+            if operation.status is not ToolOperationStatus.PENDING:
+                continue
+            stored = await transaction.get_record(self._tool_key(operation.tool_operation_id))
+            if stored is None or await self._decode(stored, ToolOperationRecord) != operation:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            await self._replace_tool_in_transaction(
+                transaction, stored, replace(operation, status=ToolOperationStatus.CANCELLED, updated_at=cancelled_at),
+            )
+
     async def get_operations(
         self, operation_ids: Sequence[str], *, tenant_id: str,
     ) -> tuple[ToolOperationRecord, ...]:
@@ -833,7 +904,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         ordered = tuple(dict.fromkeys(operation_ids))
         if not ordered:
             return ()
-        keys = tuple(self._tool_key(validate_resource_id(identity)) for identity in ordered)
+        keys = tuple(self._tool_key(identity) for identity in ordered)
         async def read(transaction: StateTransaction) -> tuple[ToolOperationRecord, ...]:
             await self._tool_content.prefetch_owners(keys)
             records = await transaction.get_records(keys)

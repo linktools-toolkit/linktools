@@ -20,7 +20,8 @@ from linktools.ai.runtime import RuntimeFeatures
 
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
-from linktools.ai.core import ExecutionContext
+from linktools.ai.core import ExecutionContext, TenantAuthorizationPolicy
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import MemoryCapability
 from linktools.ai.memory import PersistentMemoryStore
 from linktools.ai.storage import StorageOverlay
@@ -218,43 +219,49 @@ def _workspace_runtime_storage(workspace: Workspace) -> PersistenceStorage:
 
 @pytest.mark.asyncio
 async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
-    workspace = Workspace.load(tmp_path)
-    models = create_model_binding(api='openai', model="gpt-test")
     from linktools.ai.capability import ExecutionCapability
 
+    class HostAuthorization(TenantAuthorizationPolicy):
+        """The workspace declares its native session authorization explicitly."""
+
+    workspace = Workspace.load(tmp_path)
+    models = create_model_binding(api="openai", model="gpt-test")
+    authorization = HostAuthorization()
     features = workspace_features("workspace", workspace=workspace)
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    async with Persistence.open('default', storage=_workspace_runtime_storage(workspace)) as persistence_225, Runtime.open(persistence=persistence_225, features=model_features(models, features)) as runtime:
-        assert runtime.tenant_id == "default"
-        assert runtime.default_principal.tenant_id == "default"
-        created = await runtime.agents.get("default").create_session("remember")
-        agent_created = await runtime.agents.get("default").create_session("remember-agent")
-        assert (
-            await runtime.sessions.history(
-                created.session_id,
-                principal=runtime.default_principal,
-            )
-        ).items == ()
+    features = model_features(models, features)
+    storage = _workspace_runtime_storage(workspace)
+    async with (
+        Persistence.open("default", storage=storage) as state,
+        Runtime.open(persistence=state, features=features, authorization=authorization) as runtime,
+    ):
+        assert runtime.default_principal.tenant_id == runtime.tenant_id == "default"
+        agent = runtime.agents.get("default")
+        created = await agent.create_session("remember")
+        agent_created = await agent.create_session("remember-agent")
+        assert (await created.timeline())["items"] == []
 
-    async with Persistence.open('default', storage=_workspace_runtime_storage(workspace), tenant_id='tenant-a') as persistence_241, Runtime.open(persistence=persistence_241, context=ExecutionContext(None), features=model_features(models, features)) as runtime:
-        assert runtime.tenant_id == "tenant-a"
-        assert runtime.default_principal.tenant_id == "tenant-a"
+    async with (
+        Persistence.open("default", storage=storage, tenant_id="tenant-a") as state,
+        Runtime.open(persistence=state, context=ExecutionContext(None),
+                     features=features, authorization=authorization) as runtime,
+    ):
+        assert runtime.default_principal.tenant_id == runtime.tenant_id == "tenant-a"
         await runtime.agents.get("default").create_session("custom-tenant")
+        with pytest.raises(AIError) as denied:
+            await runtime.sessions.get(created.session_id, principal=runtime.default_principal)
+        assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
 
-    async with Persistence.open('default', storage=_workspace_runtime_storage(workspace)) as persistence_251, Runtime.open(persistence=persistence_251, features=model_features(models, features)) as runtime:
-        loaded = await runtime.sessions.get(
-            created.session_id,
-            principal=runtime.default_principal,
-        )
-        agent_loaded = await runtime.sessions.get(
-            agent_created.session_id,
-            principal=runtime.default_principal,
-        )
-        history = await runtime.sessions.history(
-            created.session_id,
-            principal=runtime.default_principal,
-        )
-
-    assert loaded.session_id == created.session_id
-    assert agent_loaded.session_id == agent_created.session_id
-    assert history.items == ()
+    async with (
+        Persistence.open("default", storage=storage) as state,
+        Runtime.open(persistence=state, features=features, authorization=authorization) as runtime,
+    ):
+        principal = runtime.default_principal
+        loaded = await runtime.sessions.get(created.session_id, principal=principal)
+        agent_loaded = await runtime.sessions.get(agent_created.session_id, principal=principal)
+        assert loaded.session_id == created.session_id
+        assert agent_loaded.session_id == agent_created.session_id
+        assert (await loaded.timeline())["items"] == []
+        with pytest.raises(AIError) as denied:
+            await runtime.sessions.get("custom-tenant", principal=principal)
+        assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED

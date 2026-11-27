@@ -174,7 +174,7 @@ def _stored_bytes(root: Path) -> bytes:
                     walk(json.loads(payload))
             from linktools.ai.persistence._payload import decode_payload_bytes
             for body, compression, raw_size, digest, payload_json in connection.execute(
-                "SELECT message, compression, raw_size, sha256, payload_json FROM ai_step_messages"
+                "SELECT message, compression, raw_size, sha256, payload_json FROM ai_messages"
             ):
                 if payload_json is not None:
                     walk(json.loads(payload_json))

@@ -247,7 +247,7 @@ async def test_inline_scalar_columns_preserve_values_without_json_duplicates(tmp
     from linktools.ai.persistence.codec import _decode_step_envelope, _encode_step_envelope
     from linktools.ai.persistence.state import StoredFact
 
-    values = dict(agent_conversation_id="é" * 64, parent_agent_run_id="父" * 42,
+    values = dict(agent_conversation_id="é" * 64, parent_agent_run_id="父" * 21 + "a",
                   agent_id="agent\x00" + "é" * 200, tool_name="", error="failure\x00" + "诊断" * 200,
                   idempotency_key="0:1:TOOL_CALL_STARTED:" + "工具" * 128)
     if not populated:

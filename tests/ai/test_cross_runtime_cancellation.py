@@ -72,14 +72,13 @@ async def test_remote_cancel_releases_revoked_producer_staging(
     remote_storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
     try:
         async with Persistence.open('remote-cancel-release', storage=owner_storage) as persistence_69, Runtime.open(persistence=persistence_69, features=model_features(_Models(FunctionModel(stream_function=model)), group)) as owner, Persistence.open('remote-cancel-release', storage=remote_storage) as persistence_72, Runtime.open(persistence=persistence_72, features=model_features(_Models(FunctionModel(stream_function=model)), group)) as remote:
-            await owner.agents.get("default").create_session("session")
-            session = owner.agents.get("default").session("session")
+            agent = owner.agents.get("default")
             for turn in range(3):
                 entered.clear()
                 release.clear()
                 model_exited.clear()
                 success_exited.clear()
-                execution = await session.start("Wait", idempotency_key=f"turn-{turn}")
+                execution = await agent.start("Wait", idempotency_key=f"turn-{turn}")
                 await asyncio.wait_for(entered.wait(), 10)
                 observed = []
                 prefix_observed = asyncio.Event()

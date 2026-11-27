@@ -53,6 +53,36 @@ recovery point to meet a transaction budget.
 
 ## One existing SQL transaction
 
+For ordinary tool-enabled sessions, keep Conversation, native Step and
+Checkpoint tool receipts in one SQL storage group (for example, use one
+`PersistenceStorage.sqlite(path)` or one `PersistenceStorage.sql(engine)`).
+Enable this only for session turns with
+`features.capability(SessionCapability(checkpoints=True), scope="runtime")`.
+The host still supplies its explicit session authorization policy; this flag
+does not grant access to sessions.
+This selects the Runtime-owned Step adapter for ordinary sessions. An explicit
+`StepPersistenceCapability` remains available to independent Execution and Task;
+its optional custom store and hook settings are not used by these session turns.
+The session owns the turn lifecycle. Step checkpoints and tool receipts join
+the session's existing transaction boundaries: an external tool runs outside
+the database transaction, and each receipt write shares its transaction with
+the corresponding Step facts under the session's generation fence.
+
+Optional Trace for ordinary session turns runs independently of this transaction
+group. It can use another storage route and may lose observations on write failure,
+overload or process exit. Neither start, stop, recovery nor terminal publication
+waits for Trace storage. The original Step checkpoints and tool receipts are the
+only recovery inputs besides the session turn itself; an uncertain effect is never
+replayed to fill an observation gap. The optional writer retains settled
+observations from the first attempt only; it does not reconstruct Trace after
+cold recovery or guarantee that a cancelled attempt leaves observations.
+
+An explicitly configured split storage group keeps its existing text-only
+session modes: no tools, or one fixed approval tool. It is not a fallback for
+ordinary tools. Unsupported split session profiles are rejected rather than
+rerouted to another database. Independent Execution and task storage are not
+changed by this ordinary-session constraint.
+
 `SqlStepStore.prepare_step` captures original records and encodes/externalizes
 messages before the transaction. `write_prepared_step(transaction, prepared)`
 uses the current writable StateStore transaction's public `run_sql` operation.

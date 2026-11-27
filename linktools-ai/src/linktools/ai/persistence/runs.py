@@ -19,7 +19,7 @@ from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord,
 from ..core import ExecutionStatus, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..model.messages import decode_model_messages
-from ._transcript_staging import StagedTranscript
+from ._transcript_staging import MessageArchive, StagedTranscript
 from ._model_interaction import (
     StagedContextInline,
     StagedContextSpan,
@@ -39,6 +39,7 @@ from .contracts import (
     LoadedModelContext,
     ModelInteractionRecord,
     TranscriptMessageRef,
+    TranscriptOrigin,
     TranscriptSpanRef,
 )
 from ._execution_repositories import ExecutionRepositoryImpl
@@ -77,7 +78,7 @@ from ._step_archive import (
 from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent, AgentRunStore
 from ._native_checkpoint import NativeCheckpoint
 from ._native_event_reference import NativeEventReferences
-from ._step_store import SqlStepStore, StepWriteReceipt
+from ._step_store import SqlStepStore, StepRunAlreadyRegistered, StepWriteReceipt
 from ..steps import NativeStepSource
 from ._sql import SqlStateStore
 from .state import StateGroupTransaction, StateTransaction, StateStore, StoredRecord
@@ -131,7 +132,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self,
         staging: StagingAgentRunStore,
         *,
-        conversation_archive: AgentRunStore,
+        conversation_archive: AgentRunStore | None,
         execution_archive: AgentRunStore | None,
         execution_repository: ExecutionRepository | None = None,
         tenant_id: str | None = None,
@@ -147,10 +148,11 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._native_step_source: NativeStepSource | None = None
         self._pending_producer_guard: Callable[[str, int, bool], bool] | None = None
         self._tenant_id = tenant_id
-        self._archives = {
-            PersistenceDomain.CONVERSATION: conversation_archive,
-            **({PersistenceDomain.TRACE: execution_archive} if execution_archive is not None else {}),
-        }
+        self._archives: dict[PersistenceDomain, AgentRunStore] = {}
+        if conversation_archive is not None:
+            self._archives[PersistenceDomain.CONVERSATION] = conversation_archive
+        if execution_archive is not None:
+            self._archives[PersistenceDomain.TRACE] = execution_archive
         self._initialized = False
         self._preflight = False
         self._execution_producers: dict[str, tuple[str, int]] = {}
@@ -245,12 +247,18 @@ class RuntimeAgentRunStore(AgentRunStore):
 
     def can_join_step_projection(self, run_id: str) -> bool:
         """Admit only synchronous Trace backed by the native transaction group."""
-        if run_id not in self._step_boundaries:
-            return False
-        archive = self._archive_for_run(PersistenceDomain.TRACE, run_id)
+        return (run_id in self._step_boundaries
+                and self.trace_persistence.synchronous(run_id)
+                and self._shares_step_projection(self._archive_for_run(PersistenceDomain.TRACE, run_id)))
+
+    def _shares_graph_step_projection(self) -> bool:
+        archive = self._archives.get(PersistenceDomain.TRACE)
+        return (isinstance(archive, StateStepArchive) and archive.can_share_native_start(self.step_store)
+                and self._shares_step_projection(archive))
+
+    def _shares_step_projection(self, archive: AgentRunStore | OfficialStepReader | None) -> bool:
         native = self.step_store
-        return (self.trace_persistence.synchronous(run_id)
-                and isinstance(native, SqlStepStore)
+        return (isinstance(native, SqlStepStore)
                 and isinstance(archive, StateStepArchive)
                 and isinstance(archive.state_store, SqlStateStore)
                 and self._execution_repository is not None
@@ -349,6 +357,31 @@ class RuntimeAgentRunStore(AgentRunStore):
         """Reuse a successful official write without treating a failed write as confirmed."""
         if snapshot.run_id in self._execution_producers:
             self.checkpoint_persistence.reader.confirm_snapshot(snapshot)
+
+    def confirm_graph_step_trace_source(
+        self, agent_run_id: str, producer_generation: int, root: NativeMessageRoot,
+        messages: Sequence[ModelMessage], *, resumed: bool = False,
+    ) -> None:
+        """Offer committed native bytes to the original live Trace producer."""
+        producer = self._execution_producers.get(agent_run_id)
+        if producer is None or producer[1] != producer_generation:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        archive = self._archives.get(PersistenceDomain.TRACE)
+        native = self.step_store
+        snapshot = MessageArchive().snapshot(messages)
+        digest, size = snapshot.encoded_digest()
+        if (not isinstance(archive, StateStepArchive) or not isinstance(native, SqlStepStore)
+                or root.count != len(snapshot)
+                or not native.can_reuse_message_root(root, raw_digest=digest, raw_size=size)):
+            if resumed:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            return
+        offset = self.trace_persistence.offsets.setdefault(agent_run_id, _ProjectionOffset())
+        if resumed:
+            offset.graph_resumed_source = producer_generation, root, snapshot
+        previous = offset.graph_step_source
+        if previous is None or previous[0] != producer_generation or previous[1].count <= root.count:
+            offset.graph_step_source = producer_generation, root, snapshot
 
     def invalidate_step_run(self, run_id: str) -> None:
         """Discard confirmed data when a source operation has an uncertain outcome."""
@@ -501,17 +534,19 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._preflight = False
         self._initialized = True
 
-    async def prepare_archives(self) -> None:
+    async def prepare_archives(self, *, defer_trace: bool = False) -> None:
         """Prepare writable execution resources before admitting any turns.
 
-        This reads and writes group metadata in an already provisioned store;
-        storage composition and read-only history do not call it.
+        A detached Trace observer can open its own group on first use. A
+        group owned by Conversation or Execution still opens here even when
+        it also contains Trace.
         """
         await self._ensure_business()
         groups = dict.fromkeys(
             archive.state_store.storage_group
-            for archive in self._archives.values()
+            for domain, archive in self._archives.items()
             if isinstance(archive, StateStepArchive)
+            and not (defer_trace and domain is PersistenceDomain.TRACE)
         )
         if isinstance(self._execution_repository, ExecutionRepositoryImpl):
             groups.setdefault(self._execution_repository.state_store.storage_group)
@@ -1087,11 +1122,12 @@ class RuntimeAgentRunStore(AgentRunStore):
 
     async def prepare_execution_terminal_seal(
         self, *, execution_id: str, agent_run_ids: Sequence[str], binding_digest: str,
+        native_alias: tuple[str, NativeMessageRoot, Sequence[ModelMessage]] | None = None,
     ) -> ExecutionTerminalSealPlan:
         return await self._settle_observation_boundary(
             self._prepare_execution_terminal_seal(
                 execution_id=execution_id, agent_run_ids=agent_run_ids,
-                binding_digest=binding_digest,
+                binding_digest=binding_digest, native_alias=native_alias,
             ),
             cancellation_cleanup=self.discard_execution_terminal_seal,
         )
@@ -1102,6 +1138,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         execution_id: str,
         agent_run_ids: Sequence[str],
         binding_digest: str,
+        native_alias: tuple[str, NativeMessageRoot, Sequence[ModelMessage]] | None,
     ) -> ExecutionTerminalSealPlan:
         await self._ensure_business()
         archive = self._archives.get(PersistenceDomain.TRACE)
@@ -1221,7 +1258,8 @@ class RuntimeAgentRunStore(AgentRunStore):
                     await asyncio.shield(completion)
             prepared: list[PreparedExecutionProjection] = []
             durable_heads, preparations = await archive.capture_terminal_projection_preparations(
-                tuple(projection for _seal, projection in captured)
+                tuple(projection for _seal, projection in captured),
+                **({} if native_alias is None else {"native_alias": native_alias}),
             )
             for (_seal, projection), prepare in zip(captured, preparations, strict=True):
                 projection = replace(projection, run=self._canonical_trace_run(projection.run))
@@ -1307,6 +1345,91 @@ class RuntimeAgentRunStore(AgentRunStore):
                     token=terminal_attempt_token,
                 )
             raise
+
+    async def capture_attached_trace_suffix(
+        self, plan: ExecutionTerminalSealPlan, *, execution_id: str, agent_run_id: str,
+        producer_generation: int, approved_prefix: Sequence[ModelMessage],
+        result_messages: Sequence[ModelMessage], native_alias: NativeMessageRoot | None = None,
+    ) -> NativeMessageRoot:
+        """Prove a clipped Graph suffix from this exact owned Trace terminal seal."""
+        archive = self._archives.get(PersistenceDomain.TRACE)
+        if not isinstance(archive, StateStepArchive):
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        matches = tuple(value for value in plan.projections if value.run.agent_run_id == agent_run_id)
+        seal = self._terminal_seals.get(agent_run_id)
+        if (plan.execution_id != execution_id or len(matches) != 1 or seal is None
+                or seal.execution_id != execution_id or seal.token != plan.terminal_attempt_token
+                or plan.token_for(agent_run_id) != seal.token
+                or self._execution_producers.get(agent_run_id) != (execution_id, producer_generation)):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        projection = matches[0]
+        messages = tuple(result_messages)
+        start, end = len(approved_prefix), len(messages)
+        if (projection.producer_generation != producer_generation or start >= end
+                or messages[:start] != tuple(approved_prefix)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        observation = projection.observation
+        traced_count = (projection.target_transcript_message_count if observation is None
+                        else observation.target_message_count)
+        if native_alias is not None and native_alias.count != end:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if traced_count == end - start and start:
+            # Trace can start at the first request made by this run, whereas
+            # the Step checkpoint also includes its accepted conversation prefix.
+            if native_alias is not None:
+                native_alias = native_alias.slice(start, end)
+            messages = messages[start:]
+            start, end = 0, len(messages)
+        retained_end = end if observation is None else observation.base_message_count
+        if (traced_count != end or observation is not None and (
+            observation.owner_id != agent_run_id or not 0 <= retained_end <= end
+        )):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        retained = await archive.transcript_repository.capture_raw_native_range(
+            agent_run_id, start=0, end=retained_end,
+        )
+        roots = []
+        alias_matches = native_alias is not None
+        cursor = 0
+        for root, body in retained:
+            next_cursor = cursor + root.count
+            if tuple(body) != messages[cursor:next_cursor]:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if next_cursor > start:
+                clipped = root.slice(max(start - cursor, 0), root.count)
+                if native_alias is not None and clipped != native_alias.slice(max(start, cursor), next_cursor):
+                    alias_matches = False
+                roots.append(clipped)
+            cursor = next_cursor
+        if cursor != retained_end:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        if observation is not None:
+            for chunk in observation.chunks:
+                next_cursor = cursor + chunk.message_count
+                if (chunk.owner_id != agent_run_id or chunk.origin is not TranscriptOrigin.RAW
+                        or chunk.first_message_index != cursor or not 0 < chunk.message_count
+                        or next_cursor > end or not isinstance(chunk.content, NativeMessageRoot)
+                        or chunk.content.count != chunk.message_count
+                        or MessageArchive().snapshot(messages[cursor:next_cursor]).encoded_digest()
+                           != (chunk.raw_digest, chunk.raw_size)):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if next_cursor > start:
+                    clipped = chunk.content.slice(max(start - cursor, 0), chunk.message_count)
+                    if native_alias is not None and clipped != native_alias.slice(max(start, cursor), next_cursor):
+                        alias_matches = False
+                    roots.append(clipped)
+                cursor = next_cursor
+        if cursor != end or not roots or any(
+            (root.group_id, root.store_key) != (roots[0].group_id, roots[0].store_key) for root in roots
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if native_alias is not None and alias_matches:
+            return native_alias.slice(start, end)
+        # The grouped terminal verifies ordered physical leaf identity when
+        # previously retained Trace chunks use a different sequence shape.
+        return replace(roots[0], slices=tuple(part for root in roots for part in root.slices))
 
     async def finalize_execution_terminal_seal(
         self,
@@ -1892,9 +2015,30 @@ class RuntimeAgentRunStore(AgentRunStore):
             # Consume the preparation baseline; any failed/unknown publication
             # leaves no retained hint for the next attempt.
             offset.confirmed_interactions = ()
+            source = offset.graph_step_source
+            resumed = offset.graph_resumed_source
+            if (resumed is not None and captured.transcript is not None
+                    and captured.base_message_index < resumed[1].count):
+                left = captured.base_message_index
+                count = min(len(captured.transcript.messages), resumed[1].count - left)
+                if (resumed[0] != captured.producer_generation or not isinstance(archive, StateStepArchive)
+                        or not isinstance(self.step_store, SqlStepStore)):
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                digest, size = resumed[2].encoded_digest()
+                if (not self.step_store.can_reuse_message_root(resumed[1], raw_digest=digest, raw_size=size)
+                        or MessageArchive().snapshot(captured.transcript.messages[:count]).encoded_digest()
+                        != resumed[2][left:left + count].encoded_digest()):
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                # Carry the old exact scope through any overlap; only this
+                # attempt's tail may go through ordinary native preparation.
+                source = resumed
+            native_alias = (source[1:] if source is not None and source[0] == captured.producer_generation
+                            and isinstance(archive, StateStepArchive) and captured.transcript is not None
+                            and captured.base_message_index < source[1].count else None)
             prepared, observation, interactions, interaction_archive, durable_head = await archive.prepare_captured_projection(
                 captured, baseline=offset.request_projection,
                 confirmed_interactions=confirmed_interactions,
+                **({} if native_alias is None else {"native_alias": native_alias}),
             )
             expected_head = ExecutionRunSealHead(
                 captured.run.agent_run_id,
@@ -2669,4 +2813,4 @@ from ._model_interaction_store import ModelInteractionStateStepArchive
 from ._step_contracts import AgentRunHistoryCapture, CheckpointState, StepEventType, TOOL_ERROR_CODE_METADATA_KEY
 from ._views import SESSION_HISTORY_VIEW_V1, project_execution_transcript_message, project_session_history_message
 
-__all__ = ['NativeCheckpoint', 'AgentRunCheckpoint', 'AgentRunHistoryCapture', 'AgentRunRecord', 'AgentRunStore', 'ArchiveFrontierReader', 'ArchiveNodeRead', 'ArchiveNodeSlot', 'ArchiveRoot', 'CheckpointPersistence', 'CheckpointState', 'ContentArchive', 'ConversationPersistence', 'ExecutionProjectionBatch', 'ExecutionTerminalSealPlan', 'InMemoryStepArchive', 'LockOrderError', 'ModelInteractionStateStepArchive', 'OfficialStepReader', 'PreparedAgentRunCheckpoint', 'PreparedAgentRunCheckpointBatch', 'PreparedArchive', 'PreparedExecutionProjection', 'RuntimeAgentRunStore', 'SESSION_HISTORY_VIEW_V1', 'StagedContextProjection', 'StagedContextSpan', 'StagedModelInteraction', 'StagedStreamAttemptRecord', 'StagedTranscript', 'StagingAgentRunStore', 'StateStepArchive', 'StepEvent', 'StepEventType', 'TOOL_ERROR_CODE_METADATA_KEY', 'TracePersistence', 'build_context_projection', 'build_inline_context_projection', 'model_identity', 'project_execution_transcript_message', 'project_public_messages', 'project_session_history_message', 'request_envelope']
+__all__ = ['NativeCheckpoint', 'AgentRunCheckpoint', 'AgentRunHistoryCapture', 'AgentRunRecord', 'AgentRunStore', 'ArchiveFrontierReader', 'ArchiveNodeRead', 'ArchiveNodeSlot', 'ArchiveRoot', 'CheckpointPersistence', 'CheckpointState', 'ContentArchive', 'ConversationPersistence', 'ExecutionProjectionBatch', 'ExecutionTerminalSealPlan', 'InMemoryStepArchive', 'LockOrderError', 'ModelInteractionStateStepArchive', 'OfficialStepReader', 'PreparedAgentRunCheckpoint', 'PreparedAgentRunCheckpointBatch', 'PreparedArchive', 'PreparedExecutionProjection', 'RuntimeAgentRunStore', 'SESSION_HISTORY_VIEW_V1', 'StagedContextProjection', 'StagedContextSpan', 'StagedModelInteraction', 'StagedStreamAttemptRecord', 'StagedTranscript', 'StagingAgentRunStore', 'StateStepArchive', 'StepEvent', 'StepEventType', 'StepRunAlreadyRegistered', 'TOOL_ERROR_CODE_METADATA_KEY', 'TracePersistence', 'build_context_projection', 'build_inline_context_projection', 'model_identity', 'project_execution_transcript_message', 'project_public_messages', 'project_session_history_message', 'request_envelope']

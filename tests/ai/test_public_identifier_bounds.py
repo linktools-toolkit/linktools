@@ -25,9 +25,9 @@ from .test_session_timeline import _session
 
 
 @pytest.mark.parametrize("validate", (
-    validate_persistence_namespace, validate_memory_scope, validate_principal_id,
+    validate_memory_scope, validate_principal_id,
     validate_capability_id, validate_capability_write_key, validate_idempotency_key,
-    validate_resource_id, validate_tenant_id,
+    validate_resource_id,
 ))
 @pytest.mark.parametrize("value", ("x" * 128, "界" * 42 + "ab"))
 def test_atomic_identifiers_preserve_128_bytes_and_reject_129(validate: Callable[[str], str], value: str) -> None:
@@ -44,17 +44,23 @@ def test_logical_identity_limit_remains_64_characters(validate: Callable[[str], 
         validate(value + "界")
 
 
-def test_lease_owner_retains_compound_identity_budget() -> None:
-    owner = "task-engine:" + "界" * 42 + "ab:" + "f" * 32
-    assert len(owner.encode("utf-8")) == 173
+@pytest.mark.parametrize("owner", ("x" * 64, "界" * 21 + "a"))
+def test_lease_owner_rejects_values_over_64_bytes(owner: str) -> None:
     assert validate_lease_owner(owner) == owner
-    assert validate_lease_owner("x" * 256) == "x" * 256
     with pytest.raises(AIError):
-        validate_lease_owner("x" * 257)
+        validate_lease_owner(owner + "x")
+
+
+@pytest.mark.parametrize("validate", (validate_persistence_namespace, validate_tenant_id))
+def test_storage_scope_preserves_64_utf8_bytes_and_rejects_65(validate: Callable[[str], str]) -> None:
+    value = "界" * 21 + "a"
+    assert validate(value) == value
+    with pytest.raises(AIError):
+        validate(value + "x")
 
 
 def test_metrics_namespace_matches_atomic_input_and_all_sql_dialects() -> None:
-    namespace = "界" * 42 + "ab"
+    namespace = "界" * 21 + "a"
     assert Metrics.in_memory(namespace=namespace).namespace == namespace
     with pytest.raises(AIError):
         Metrics.in_memory(namespace=namespace + "x")
@@ -62,7 +68,7 @@ def test_metrics_namespace_matches_atomic_input_and_all_sql_dialects() -> None:
     for name in ("ai_metric_definitions", "ai_metric_observations"):
         column = metadata.tables[name].c.namespace
         for dialect in (mysql.dialect(), postgresql.dialect(), sqlite.dialect()):
-            assert column.type.dialect_impl(dialect).length == 128
+            assert column.type.dialect_impl(dialect).length == 64
 
 
 @pytest.mark.asyncio

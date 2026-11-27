@@ -43,6 +43,8 @@ class _Bridge:
     def __init__(self, decision: ToolOperationDecision) -> None:
         self.decision = decision
         self.calls: list[str] = []
+        self.active_checks = 0
+        self.fresh_control_checks = 0
 
     async def begin(
         self,
@@ -60,10 +62,10 @@ class _Bridge:
         return self.decision
 
     async def require_active(self) -> None:
-        return None
+        self.active_checks += 1
 
     async def require_fresh_control(self) -> None:
-        await self.require_active()
+        self.fresh_control_checks += 1
 
     async def complete(self, decision: ToolOperationDecision, result: Any) -> bool:
         del decision, result
@@ -174,6 +176,8 @@ async def test_actual_tool_handler_emits_one_execution_metric() -> None:
 
     assert result == {"ok": True}
     assert bridge.calls == ["begin", "complete"]
+    assert bridge.active_checks == 1
+    assert bridge.fresh_control_checks == 0
     assert len(recorder.observations) == 1
     observation = recorder.observations[0]
     assert observation.kind == "linktools.tool.execution"

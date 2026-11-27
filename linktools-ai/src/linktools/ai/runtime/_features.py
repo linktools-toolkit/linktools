@@ -23,6 +23,7 @@ from ..model import ModelBinding
 from ..spec import (
     AgentSpec,
     AgentUsageLimits,
+    CapabilityRef,
     MCPServerSpec,
     RepositoryInstructionDocument,
     RepositoryInstructions,
@@ -40,6 +41,7 @@ from ..capability import (
     CapabilityLoadContext,
     ToolEffectPolicy,
     ToolResponsesCapability,
+    ProviderMessagesCapability,
     ReferencedInputsCapability,
     FileSystemCapability,
     capture_contributions,
@@ -204,12 +206,13 @@ class RuntimeFeatures(Generic[AppT]):
         revision: int = 1,
         effect_policy: ToolEffectPolicy = "replay_safe",
         plan_safe: bool = False,
+        sequential: bool = False,
     ) -> "Tool[AgentContext[AppT]]":
         """Register one ordinary model-visible Python tool."""
         _validate_tool_effect_policy(effect_policy, plan_safe)
         tool_name = name or function.__name__
         _validate_business_tool_name(tool_name)
-        adapted = _adapt_tool(function, name=tool_name)
+        adapted = _adapt_tool(function, name=tool_name, sequential=sequential)
         adapted.metadata = tool_metadata(
             effect_policy=effect_policy,
             plan_safe=plan_safe,
@@ -234,18 +237,22 @@ class RuntimeFeatures(Generic[AppT]):
         revision: int = 1,
         config: "Mapping[str, JsonValue] | None" = None,
         scope: Literal["agent", "runtime"] = "runtime",
+        tools: Sequence[CapabilityRef] | None = None,
     ) -> "AbstractCapability[AgentContext[AppT]]":
         """Register Runtime-wide behavior, or explicitly opt into Agent selection.
 
         Runtime-scoped capabilities bypass Agent selection and are current host
         policy, outside durable Agent bindings. They must not defer loading.
+        For agent-scoped SDK Capability declarations on checkpointed Sessions,
+        tools lists registered tool revisions. Change the capability revision
+        when membership changes.
         """
         if not isinstance(capability, AbstractCapability):
             raise TypeError("capability must be an AbstractCapability")
         capability_id = _capability_registration_id(capability, id)
         contribution = CapabilityContribution.from_opaque(
             "capability", capability_id, capability, revision=revision,
-            config=config, scope=scope,
+            config=config, scope=scope, tool_members=None if tools is None else tuple(tools),
         )
         previous = [item for item in self._contributions
                     if (item.kind, item.id) != (contribution.kind, contribution.id)]
@@ -384,9 +391,9 @@ def _runtime_declarations(contributions):
             filesystem_capabilities.append(value)
         else:
             def collect_leaf(leaf: AbstractCapability[object]) -> None:
-                if isinstance(leaf, ReferencedInputsCapability) and scope != "agent":
+                if isinstance(leaf, (ReferencedInputsCapability, ProviderMessagesCapability)) and scope != "agent":
                     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-                                  "ReferencedInputsCapability requires Agent scope")
+                                  f"{type(leaf).__name__} requires Agent scope")
                 if isinstance(leaf, ToolResponsesCapability):
                     response_capabilities.append(leaf)
                 elif isinstance(leaf, ShellCapability):
@@ -454,7 +461,7 @@ def _tool_context(ctx: PydanticRunContext[AgentContext[object]]) -> AgentContext
     )
 
 
-def _adapt_tool(function: Callable[..., object], *, name: str) -> Tool:
+def _adapt_tool(function: Callable[..., object], *, name: str, sequential: bool) -> Tool:
     if not callable(function):
         raise TypeError("tool function must be callable")
     signature = inspect.signature(function)
@@ -498,7 +505,7 @@ def _adapt_tool(function: Callable[..., object], *, name: str) -> Tool:
         **get_type_hints(function, include_extras=True),
         parameters[0].name: first.annotation,
     }
-    return Tool(invoke, takes_ctx=True, name=name)
+    return Tool(invoke, takes_ctx=True, name=name, sequential=sequential)
 
 
 def _validate_business_tool_name(value: str) -> None:

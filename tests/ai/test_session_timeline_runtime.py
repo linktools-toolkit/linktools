@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from linktools.ai.persistence import Persistence
 """End-to-end Session timeline coverage through the public Runtime API."""
-from ._runtime_test_helpers import model_features
 
 from collections.abc import Awaitable, Callable
 from functools import partial
@@ -12,15 +10,16 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.core import ExecutionStatus
+from linktools.ai.core import AuthorizationAction, ExecutionStatus, Principal, TenantAuthorizationPolicy
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.history import History
 from linktools.ai.core import Page
 from linktools.ai.session import SessionTurn
 from linktools.ai.runtime import Runtime
-from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import Persistence, PersistenceStorage
 
-from ._runtime_test_helpers import RuntimeUsageModels
+from ._runtime_test_helpers import RuntimeUsageModels, model_features
 
 
 @pytest.mark.asyncio
@@ -57,18 +56,11 @@ async def test_in_memory_session_run_restores_timeline() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "exclusive_sqlite"))
-async def test_session_timeline_fork_reads_match_live_and_reopened_history(
-    tmp_path: Path, backend: str,
-) -> None:
+async def test_in_memory_session_timeline_fork_matches_history() -> None:
     application = RuntimeFeatures("application")
     application.capability(ExecutionCapability(retain_history=True), scope="runtime")
     application.agent("default", model="default", allow_tools=())
-    storage = (
-        PersistenceStorage.in_memory()
-        if backend == "memory"
-        else PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
-    )
+    storage = PersistenceStorage.in_memory()
 
     async def check_pages(
         read: Callable[..., Awaitable[Page[SessionTurn]]],
@@ -120,123 +112,156 @@ async def test_session_timeline_fork_reads_match_live_and_reopened_history(
             page.items,
         )
 
-    if backend == "exclusive_sqlite":
-        async with Persistence.open('default', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id="default", read_only=True) as history_persistence_118, History.open(persistence=history_persistence_118) as history:
-            await check_pages(
-                partial(read_history_page, history, principal),
-                page.items,
-            )
+class _TimelinePolicy(TenantAuthorizationPolicy):
+    async def authorize(self, principal, action, resource):
+        await super().authorize(principal, action, resource)
+        if principal.principal_id == "restricted" and action is AuthorizationAction.SESSION_READ and resource.id == "parent":
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+
+
+def _native_timeline_features():
+    features = RuntimeFeatures("application")
+    features.agent("default", model="default", allow_tools=())
+    return model_features(RuntimeUsageModels(), features)
+
+
+async def _native_timeline_run(runtime, session_id, text, request):
+    turn = await runtime.agents.get().start(text, session_id=session_id, idempotency_key=request)
+    result = await turn.wait_final(timeout_seconds=10)
+    assert result.status is ExecutionStatus.SUCCEEDED
+    return result.view
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("turn_count", "limit", "sequences"), (
-    (2, 1, (1, 2)),
-    (6, 2, (3, 4, 5, 6)),
-))
-async def test_session_timeline_reads_only_captured_tail_during_append(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    turn_count: int, limit: int, sequences: tuple[int, ...],
-) -> None:
-    from linktools.ai.history import _history as history_module
-    from linktools.ai.persistence._sql import _SqlTransaction
-
-    application = RuntimeFeatures("application")
-    application.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    application.agent("default", model="default", allow_tools=())
+async def test_session_timeline_fork_reads_match_live_and_reopened_history(tmp_path: Path) -> None:
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
+    policy = _TimelinePolicy()
+
+    async def check_pages(read, expected):
+        assert await read() == {"items": expected, "next_cursor": None}
+        newest = await read(limit=1)
+        assert newest["items"] == expected[-1:] and newest["next_cursor"] is not None
+        assert await read(limit=1, cursor=newest["next_cursor"]) == {
+            "items": expected[:1], "next_cursor": None,
+        }
+
+    async def read_history(history, principal, **paging):
+        return (await history.turn_session("child", principal=principal, **paging))["timeline"]
 
     async with (
-        Persistence.open("default", storage=storage) as persistence,
-        Runtime.open(persistence=persistence, features=model_features(RuntimeUsageModels(), application)) as runtime,
+        Persistence.open("default", storage=storage) as state,
+        Runtime.open(persistence=state, features=_native_timeline_features(), authorization=policy) as runtime,
     ):
-        session = await runtime.agents.get("default").create_session("session")
         principal = runtime.default_principal
-        for n in range(turn_count):
-            result = (await session.run(f"repeat {n % 2}", timeout_seconds=10)).result
-            assert result.status is ExecutionStatus.SUCCEEDED
-        full = (await runtime.history.session_detail("session", principal=principal)).timeline
-        previous_capture = history_module.capture_session_timeline
-        get_facts = _SqlTransaction.get_facts
-        requested: list[tuple[int, ...]] = []
+        await runtime.sessions.create_turn_session("parent", principal=principal)
+        empty = await runtime.history.turn_session("parent", principal=principal)
+        assert empty["timeline"] == {"items": [], "next_cursor": None}
+        parent_turn = await _native_timeline_run(runtime, "parent", "before fork", "first")
+        parent = await runtime.history.turn_session_state("parent", principal=principal)
+        assert await runtime.sessions.fork_turn_session(
+            "parent", "child", principal=principal, expected_revision=parent["revision"], idempotency_key="fork",
+        )
+        parent = await runtime.history.turn_session_state("parent", principal=principal)
+        assert await runtime.sessions.close_turn_session("parent", principal=principal, expected_revision=parent["revision"])
+        child_turn = await _native_timeline_run(runtime, "child", "after fork", "second")
+        assert [turn["user_input"]["prompt"] for turn in (parent_turn, child_turn)] == ["before fork", "after fork"]
+        assert all(turn["conversation_committed"] and turn["output"] for turn in (parent_turn, child_turn))
+        expected = [parent_turn, child_turn]
+        await check_pages(partial(read_history, runtime.history, principal), expected)
+        with pytest.raises(AIError) as denied:
+            await read_history(runtime.history, Principal("restricted", principal.tenant_id))
+        assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
 
-        async def read_facts(transaction, stream, sequences):
-            values = await get_facts(transaction, stream, sequences)
-            if values and values[-1].kind == "transcript_chunk":
-                requested.append(tuple(sequences))
-            return values
+    async with (
+        Persistence.open("default", storage=storage, read_only=True) as state,
+        History.open(persistence=state, authorization=policy) as history,
+    ):
+        await check_pages(partial(read_history, history, principal), expected)
 
-        async def capture_then_append(*args, **kwargs):
-            captured = await previous_capture(*args, **kwargs)
-            assert (await session.run("newest", timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
-            return captured
 
-        with monkeypatch.context() as patch:
-            patch.setattr(_SqlTransaction, "get_facts", read_facts)
-            patch.setattr(history_module, "capture_session_timeline", capture_then_append)
-            page = (await runtime.history.session_detail("session", principal=principal, limit=limit)).timeline
-        assert page.items == full.items[-limit:]
-        assert requested == [sequences]
-        older = (await runtime.history.session_detail("session", principal=principal, cursor=page.next_cursor)).timeline
-        assert older.items == full.items[:-limit]
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("turn_count", "limit"), ((2, 1), (6, 2)))
+async def test_session_timeline_reads_only_captured_tail_during_append(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, turn_count: int, limit: int,
+) -> None:
+    from linktools.ai.persistence._session_turn_sql import SqlSessionTurnReader
+
+    storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
+    async with (
+        Persistence.open("default", storage=storage) as state,
+        Runtime.open(persistence=state, features=_native_timeline_features(), authorization=_TimelinePolicy()) as runtime,
+    ):
+        principal = runtime.default_principal
+
+        async def read(**paging):
+            return (await runtime.history.turn_session("session", principal=principal, **paging))["timeline"]
+
+        await runtime.sessions.create_turn_session("session", principal=principal)
+        results = [await _native_timeline_run(runtime, "session", f"repeat {n % 2}", f"turn-{n}") for n in range(turn_count)]
+        assert (await read())["items"] == results
+        original_page = SqlSessionTurnReader.turn_page
+        captures = []
+
+        async def append_after_capture(reader, session_id, **kwargs):
+            assert kwargs["through"] == turn_count and kwargs["limit"] == limit + 1
+            assert kwargs["body_limit"] == limit
+            _, _, original_capture = reader._transcript_source
+
+            async def capture(roots, **options):
+                captures.append(tuple(roots))
+                return await original_capture(roots, **options)
+
+            turn_store, archive, _ = reader._transcript_source
+            newest.append(await _native_timeline_run(runtime, "session", "newest", "newest"))
+            with monkeypatch.context() as fault:
+                fault.setattr(reader, "_transcript_source", (turn_store, archive, capture))
+                return await original_page(reader, session_id, **kwargs)
+
+        newest = []
+        with monkeypatch.context() as fault:
+            fault.setattr(SqlSessionTurnReader, "turn_page", append_after_capture)
+            page = await read(limit=limit)
+        assert page["items"] == results[-limit:]
+        [roots] = captures
+        assert len(roots) == limit  # The extra cursor row did not hydrate its body.
+        older = await read(cursor=page["next_cursor"])
+        assert older == {"items": results[:-limit], "next_cursor": None}
+        assert (await read())["items"] == [*results, *newest]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fault", ("missing", "malformed", "coordinate_gap", "head"))
 @pytest.mark.parametrize("turn_count", (2, 3))
 async def test_session_timeline_rejects_invalid_captured_tail(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str, turn_count: int,
+    tmp_path: Path, fault: str, turn_count: int,
 ) -> None:
-    from dataclasses import replace
+    from linktools.ai.persistence.turns import SessionTurnKey
 
-    from linktools.ai.errors import AIError, ErrorCode
-    from linktools.ai.history import _history as history_module
-    from linktools.ai.persistence._history import TranscriptRepository
-    from linktools.ai.persistence._sql import _SqlTransaction
-
-    application = RuntimeFeatures("application")
-    application.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    application.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
-
     async with (
-        Persistence.open("default", storage=storage) as persistence,
-        Runtime.open(persistence=persistence, features=model_features(RuntimeUsageModels(), application)) as runtime,
+        Persistence.open("default", storage=storage) as state,
+        Runtime.open(persistence=state, features=_native_timeline_features(), authorization=_TimelinePolicy()) as runtime,
     ):
-        session = await runtime.agents.get("default").create_session("session")
-        for _ in range(turn_count):
-            assert (await session.run("repeat", timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
-        get_facts = _SqlTransaction.get_facts
-        decode_chunk = TranscriptRepository.decode_chunk
-        capture = history_module.capture_session_timeline
-
-        async def read_facts(transaction, stream, sequences):
-            values = await get_facts(transaction, stream, sequences)
-            if not values or values[-1].kind != "transcript_chunk":
-                return values
-            if fault == "missing":
-                return values[:-1]
-            if fault == "malformed":
-                return (*values[:-1], replace(values[-1], data={}))
-            return values
-
-        def decode(repository, fact):
-            chunk = decode_chunk(repository, fact)
-            return replace(chunk, first_message_index=chunk.first_message_index + 1) if (
-                fault == "coordinate_gap" and fact.sequence == turn_count and fact.kind == "transcript_chunk"
-            ) else chunk
-
-        async def capture_bad_head(*args, **kwargs):
-            captured = await capture(*args, **kwargs)
-            if fault != "head":
-                return captured
-            return replace(captured, histories={
-                identity: (repository, record, replace(head, chunk_count=head.chunk_count + 1))
-                for identity, (repository, record, head) in captured.histories.items()
-            })
-
-        monkeypatch.setattr(_SqlTransaction, "get_facts", read_facts)
-        monkeypatch.setattr(TranscriptRepository, "decode_chunk", decode)
-        monkeypatch.setattr(history_module, "capture_session_timeline", capture_bad_head)
+        principal = runtime.default_principal
+        await runtime.sessions.create_turn_session("session", principal=principal)
+        completed = [
+            await _native_timeline_run(runtime, "session", "repeat", f"turn-{n}") for n in range(turn_count)
+        ]
+        turns = state.session_turns
+        assert (await runtime.history.turn_session("session", principal=principal, limit=1))["timeline"]["items"] == completed[-1:]
+        async with turns._context.engine.begin() as connection:
+            if fault == "head":
+                query = turns._sessions.update().filter_by(**turns._session_values("session")).values(
+                    last_turn_no=turn_count + 1,
+                )
+            elif fault == "coordinate_gap":
+                key = SessionTurnKey("session", completed[-2]["turn_id"])
+                query = turns._turns.update().filter_by(**turns._turn_values(key)).values(turn_no=turn_count + 1)
+            else:
+                key = SessionTurnKey("session", completed[-1]["turn_id"])
+                query = turns._turns.delete() if fault == "missing" else turns._turns.update().values(result_json={})
+                query = query.filter_by(**turns._turn_values(key))
+            assert (await connection.execute(query)).rowcount == 1
         with pytest.raises(AIError) as error:
-            await runtime.history.session_detail("session", principal=runtime.default_principal, limit=1)
+            await runtime.history.turn_session("session", principal=principal, limit=1)
         assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

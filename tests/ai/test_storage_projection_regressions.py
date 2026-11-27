@@ -7,11 +7,11 @@ from ._runtime_test_helpers import model_features
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.messages import ModelResponse, TextPart, UserPromptPart
 
 from linktools.ai.capability import AgentContext, ExecutionCapability
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.core import CommitPolicy, ExecutionStatus
+from linktools.ai.core import CommitPolicy, ExecutionStatus, TenantAuthorizationPolicy, canonical_json_bytes
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.storage import InMemoryCacheBackend
@@ -24,10 +24,12 @@ from ._runtime_test_helpers import _Models, _UsageFunctionModel
 async def test_promotion_archives_accepted_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, effect_policy: str,
 ) -> None:
+    import asyncio
     from pydantic_ai.messages import ToolCallPart, ToolReturnPart
     calls = []
     state = PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
     owner = {}
+    ready = asyncio.Event()
     async def lookup(context: AgentContext[None]) -> str:
         record = await runtime._state.execution.executions.get(context.execution_id, tenant_id=context.principal.tenant_id)
         if record is not None:
@@ -36,6 +38,7 @@ async def test_promotion_archives_accepted_context(
         return 'value'
     async def model(messages, info):
         if not any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
+            await ready.wait()
             assert await runtime._state.execution.executions.get(owner['execution'], tenant_id=owner['tenant']) is None
             return ModelResponse(parts=[ToolCallPart('lookup', {}, tool_call_id='lookup-call')])
         return ModelResponse(parts=[TextPart('answer')])
@@ -44,7 +47,7 @@ async def test_promotion_archives_accepted_context(
     group.tool(lookup, effect_policy=effect_policy)
     group.agent('default', model='default', allow_tools=('lookup',))
     async with Persistence.open('pending-tool', storage=state) as persistence_43, Runtime.open(persistence=persistence_43, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
-        session = await runtime.agents.get().create_session('session')
+        agent = runtime.agents.get()
         original = SqlStorageContext.run_mutation
         commits = []
         cleanups = []
@@ -54,8 +57,9 @@ async def test_promotion_archives_accepted_context(
             (cleanups if domain == "native.content_cleanup" else commits).append(domain)
             return result
         monkeypatch.setattr(SqlStorageContext, 'run_mutation', count)
-        execution = await session.start('question')
+        execution = await agent.start('question')
         owner.update(execution=execution.execution_id, tenant=runtime.tenant_id)
+        ready.set()
         assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
         assert len(calls) == 1
         if effect_policy != 'non_replay_safe':
@@ -69,45 +73,42 @@ async def test_promotion_archives_accepted_context(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("terminal", (False, True))
-async def test_session_admission_reuses_verified_history_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal: bool) -> None:
-    from linktools.ai.inputs import ExecutionContextArchive
-    from linktools.ai.persistence._archive import ContentArchive
-    prepared = []
-    from contextvars import ContextVar
-    active = ContextVar("input_prepare_active", default=False)
-    body_reads = []
-    original = ExecutionContextArchive.prepare
-    original_read = ContentArchive._read_content
-    async def observe(self, context, **kwargs):
-        token = active.set(True)
-        try:
-            result = await original(self, context, **kwargs)
-        finally:
-            active.reset(token)
-        prepared.append((len(context.model_messages()), kwargs.get('history_root'), len(result.records.records)))
-        return result
-    async def read(self, content):
-        if active.get():
-            body_reads.append(content.codec)
-        return await original_read(self, content)
-    monkeypatch.setattr(ExecutionContextArchive, 'prepare', observe)
-    monkeypatch.setattr(ContentArchive, '_read_content', read)
-    async def model(messages, info):
-        return ModelResponse(parts=[TextPart('answer')])
-    features = RuntimeFeatures('review-context')
-    features.capability(ExecutionCapability(retain_history=True,
-        commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync()))
-    features.agent('default', model='default', allow_tools=())
-    async with Persistence.open('review-context', storage=PersistenceStorage.sqlite(tmp_path / 'context.db', coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if terminal else None)) as persistence_95, Runtime.open(persistence=persistence_95, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
-        session = await runtime.agents.get().create_session('session')
-        for value in ('first', 'second', 'third'):
-            result = await session.run(value, timeout_seconds=5)
-            assert result.result.status is ExecutionStatus.SUCCEEDED
-    later = [item for item in prepared if item[0] > 0]
-    assert len(later) == 2
-    assert all(root is not None and count == 0 for _, root, count in later)
-    assert body_reads == []
+async def test_native_session_admission_reuses_verified_turn_history(tmp_path: Path) -> None:
+    class HostAuthorization(TenantAuthorizationPolicy):
+        """Provide session authority for the SQL runtime."""
+
+    prompts = ("first", "second", "third")
+    seen = []
+
+    async def model(messages, _info):
+        visible = [part.content for message in messages for part in message.parts
+                   if isinstance(part, UserPromptPart)]
+        assert visible == list(prompts[:len(seen) + 1])
+        seen.append(visible[-1])
+        return ModelResponse(parts=[TextPart("answer")])
+
+    features = RuntimeFeatures("review-context")
+    features.capability(ExecutionCapability(retain_history=True))
+    features.agent("default", model="default", allow_tools=())
+    storage = PersistenceStorage.from_root(tmp_path / "context")
+    async with (
+        Persistence.open("review-context", storage=storage) as state,
+        Runtime.open(persistence=state, authorization=HostAuthorization(),
+                     features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime,
+    ):
+        agent = runtime.agents.get()
+        await agent.create_session("session")
+        snapshots = {}
+        for prompt in prompts:
+            turn = await agent.start(prompt, session_id="session", idempotency_key=prompt)
+            assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+            row = await state.session_turns.get_turn(turn.key)
+            snapshots[turn.key] = canonical_json_bytes(dict(row)["result_json"])
+        for key, result in snapshots.items():
+            row = await state.session_turns.get_turn(key)
+            assert canonical_json_bytes(dict(row)["result_json"]) == result
+            assert await state.execution.executions.get(key.turn_id, tenant_id=runtime.tenant_id) is None
+        assert seen == list(prompts)
 
 
 @pytest.mark.asyncio
@@ -116,6 +117,9 @@ async def test_session_admission_captures_current_rules_without_rewriting_histor
     from linktools.ai.capability import AssetCapability
     from linktools.ai.spec import RepositoryInstructionDocument, RepositoryInstructions
     from linktools.ai.storage import StorageOverlay
+
+    class HostAuthorization(TenantAuthorizationPolicy):
+        """Supply session authority without binding session to an Agent."""
 
     backend = InMemoryAssetBackend()
     assets = AssetStore(StorageOverlay(backend, writer=backend))
@@ -133,10 +137,12 @@ async def test_session_admission_captures_current_rules_without_rewriting_histor
     rule = AssetKey("rule", "current.md")
     expected = None
     try:
-        async with Persistence.open("current-instructions", storage=PersistenceStorage.sqlite(tmp_path / "rules.db")) as persistence, Runtime.open(
+        async with Persistence.open("current-instructions", storage=PersistenceStorage.from_root(tmp_path / "rules")) as persistence, Runtime.open(
             persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
+            authorization=HostAuthorization(),
         ) as runtime:
-            session = await runtime.agents.get().create_session("session")
+            agent = runtime.agents.get()
+            await agent.create_session("session")
             records = []
             for index in range(3):
                 if index == 1:
@@ -148,21 +154,18 @@ async def test_session_admission_captures_current_rules_without_rewriting_histor
                     ),))
                 elif index == 2:
                     await assets.delete(rule)
-                result = (await session.run(f"question {index}", timeout_seconds=5)).result
-                assert result.status is ExecutionStatus.SUCCEEDED
-                record = await persistence.execution.executions.get(result.execution_id, tenant_id=runtime.tenant_id)
-                assert record is not None
-                records.append(record)
-            assert records[0].repository_instructions is None
-            assert records[2].repository_instructions is None
-            reader = runtime._execution_service.runtime_backend()
-            assert records[1].repository_instructions is None
-            contexts = [await reader.load_input_context(record.input_context) for record in records]
-            assert all(context is not None for context in contexts)
-            assert contexts[0].repository_instructions is None
+                turn = await agent.start(f"question {index}", session_id="session",
+                                         idempotency_key=f"question-{index}")
+                assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+                row = await persistence.session_turns.get_turn(turn.key)
+                records.append((turn.key, row["request_json"]))
+            empty = RepositoryInstructions(()).to_payload()
+            assert records[0][1]["repository_instructions"] == empty
             assert expected is not None
-            assert contexts[1].repository_instructions == expected.to_payload()
-            assert contexts[2].repository_instructions is None
+            assert records[1][1]["repository_instructions"] == expected.to_payload()
+            assert records[2][1]["repository_instructions"] == empty
+            for key, request in records:
+                assert (await persistence.session_turns.get_turn(key))["request_json"] == request
             assert "Rule added after startup" not in observed[0]
             assert "Rule added after startup" in observed[1]
             assert "Rule added after startup" not in observed[2]
@@ -244,57 +247,72 @@ async def test_projection_boundary_read_budget(tmp_path: Path, monkeypatch: pyte
 
 
 @pytest.mark.asyncio
-async def test_pending_large_history_is_process_local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_native_admission_does_not_stage_a_second_large_history_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import asyncio
     from linktools.ai.storage._object_sql import SqlObjectStore
     from linktools.ai.persistence.coordination import PendingTurnCoordination
-    from linktools.ai.inputs import ExecutionContextArchive
-    from linktools.ai.core import PersistenceDomain
+
+    class HostAuthorization(TenantAuthorizationPolicy):
+        """Exercise the real native Session and immutable input policy."""
+
     entered, finish = asyncio.Event(), asyncio.Event()
-    large = 'review-private-history-' * 10000
+    large = "review-private-history-" * 10000
     calls = 0
     blocked = False
-    published = []
     original_put = SqlObjectStore.put
-    original_publish = PendingTurnCoordination.publish
+
     async def put(self, *args, **kwargs):
-        assert not blocked, 'Pending admission wrote a temporary object'
+        assert not blocked, "Native admission wrote a temporary history object"
         return await original_put(self, *args, **kwargs)
-    async def publish(self, record, coordination, **kwargs):
-        await original_publish(self, record, coordination, **kwargs)
-        raw = await self._cache.get(self._record_key(coordination))
-        assert raw is not None and b'review-private-history-' not in raw
-        observed = await self.read_execution(record.execution_id, tenant_id=self._tenant_id)
-        assert observed is not None and observed.input_context is None
-        published.append(record.input_context)
-    monkeypatch.setattr(SqlObjectStore, 'put', put)
-    monkeypatch.setattr(PendingTurnCoordination, 'publish', publish)
-    async def model(messages, info):
+
+    async def forbidden_pending(*args, **kwargs):
+        pytest.fail("Native Session must not publish accepted history in legacy coordination")
+
+    monkeypatch.setattr(SqlObjectStore, "put", put)
+    monkeypatch.setattr(PendingTurnCoordination, "publish", forbidden_pending)
+
+    async def model(messages, _info):
         nonlocal calls
         calls += 1
         if calls == 2:
+            assert large in str(messages)
             entered.set()
             await finish.wait()
-        return ModelResponse(parts=[TextPart(large if calls == 1 else 'done')])
-    features = RuntimeFeatures('review-pending-large')
+        return ModelResponse(parts=[TextPart(large if calls == 1 else "done")])
+
+    namespace = "review-pending-large"
+    features = RuntimeFeatures(namespace)
     features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()))
-    features.agent('default', model='default', allow_tools=())
-    async with Persistence.open('review-pending-large', storage=PersistenceStorage.sqlite(tmp_path / 'pending.db', coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))) as persistence_203, Runtime.open(persistence=persistence_203, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
-        session = await runtime.agents.get().create_session('session')
-        assert (await session.run('first')).result.status is ExecutionStatus.SUCCEEDED
-        published.clear()
+    features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
+    storage = PersistenceStorage.sqlite(
+        tmp_path / "pending.db", coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024),
+    )
+    async with (
+        Persistence.open(namespace, storage=storage) as state,
+        Runtime.open(persistence=state, features=model_features(_Models(_UsageFunctionModel(model)), features),
+                     authorization=HostAuthorization()) as runtime,
+    ):
+        agent = runtime.agents.get()
+        await agent.create_session("session")
+        first = await agent.start("first", session_id="session", idempotency_key="first")
+        assert (await first.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
+        turns = state.session_turns
+        first_row = await turns.get_turn(first.key)
         blocked = True
-        execution = await session.start('second')
         try:
+            execution = await agent.start("second", session_id="session", idempotency_key="second")
             await asyncio.wait_for(entered.wait(), 5)
-            assert published and any(item is not None for item in published)
+            pending = await turns.get_turn(execution.key)
+            assert (pending["context_from"], pending["context_through"]) == (1, 1)
+            assert pending["request_json"]["prompt"] == "second"
+            assert b"review-private-history-" not in canonical_json_bytes(pending["request_json"])
+            assert pending["result_json"] is None
+            assert await state.execution.executions.get(execution.key.turn_id, tenant_id=runtime.tenant_id) is None
         finally:
             blocked = False
             finish.set()
-        assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
-        record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
-        assert record is not None and record.input_context is not None
-        assert record.input_context.payload.decode()['kind'] == 'execution-context'
-        archive = ExecutionContextArchive(runtime._state.execution.executions.state_store, runtime._state.archive_object_store(PersistenceDomain.EXECUTION), namespace='review-pending-large', tenant_id=runtime.tenant_id)
-        loaded = await archive.load(record.input_context)
-        assert large in str(loaded.model_messages())
+        assert (await execution.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
+        assert await turns.get_turn(first.key) == first_row
+        assert await state.execution.executions.get(execution.key.turn_id, tenant_id=runtime.tenant_id) is None
+        history = await runtime.history.turn_session("session", principal=runtime.default_principal)
+        assert [item["output"] for item in history["timeline"]["items"]] == [{"text": large}, {"text": "done"}]

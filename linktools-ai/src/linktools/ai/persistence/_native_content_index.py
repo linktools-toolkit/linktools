@@ -58,8 +58,10 @@ def stage_owner(
     data: object | None, *, state: object = None, inserting: bool = False,
 ) -> None:
     from ._archive_closure import iter_native_message_roots
+    from ._message_root import NativeMessageRoot
 
-    roots = () if data is None else tuple(iter_native_message_roots(data))
+    roots = ((data,) if isinstance(data, NativeMessageRoot)
+             else () if data is None else tuple(iter_native_message_roots(data)))
     session.info.setdefault(_PENDING, {})[(kind, store, tuple(identity))] = roots
 
 
@@ -69,6 +71,7 @@ def register_recovery(session: "AsyncSession", recovery: Callable[[], Awaitable[
 
 async def run_native_mutation(
     context: "SqlStorageContext", callback: Callable[["AsyncSession"], Awaitable[ValueT]], *, domain: str,
+    sqlite_nowait: bool = False,
 ) -> ValueT:
 
     async def execute(session: "AsyncSession") -> ValueT:
@@ -84,13 +87,13 @@ async def run_native_mutation(
     recovered: set[Callable[[], Awaitable[None]]] = set()
     while True:
         try:
-            return await context.run_mutation(execute, domain=domain)
+            return await context.run_mutation(execute, domain=domain, **({"sqlite_nowait": True} if sqlite_nowait else {}))
         except NativeContentUnavailable as error:
             # Only a confirmed rollback reaches here. Each candidate may be
             # rematerialized once, even if later publishers reveal another stale
             # root on the next attempt. Unknown commits never enter this branch.
             fresh = tuple(recover for recover in error.recoveries if recover not in recovered)
-            if not fresh:
+            if sqlite_nowait or not fresh:
                 raise AIError(ErrorCode.STORAGE_CONFLICT) from error
             for recover in fresh:
                 recovered.add(recover)
@@ -104,7 +107,7 @@ async def capture_retention_root_evidence(
     """Read clock and existing roots; activate only after the observed owner CAS."""
     from sqlalchemy import and_, literal, select
 
-    sequences = native_message_sql_tables()["ai_step_sequences"]
+    sequences = native_message_sql_tables()["ai_message_sequences"]
     seed = select(literal(1).label("seed")).subquery()
     rows = tuple((await execute(select(audit_time.label("observed_at"), sequences.c.sha256).select_from(
         seed.outerjoin(sequences, and_(
@@ -134,7 +137,7 @@ async def resolve_targets(
 ) -> dict[str, int]:
     from sqlalchemy import select
     tables = native_message_sql_tables()
-    sequences, messages = tables["ai_step_sequences"], tables["ai_step_messages"]
+    sequences, messages = tables["ai_message_sequences"], tables["ai_messages"]
     table = messages if kind == "message" else sequences
     result = {}
     identities = tuple(sorted(set(identities)))
@@ -158,7 +161,7 @@ async def index_nodes(
     from sqlalchemy import literal, select, union_all
 
     tables = native_message_sql_tables()
-    sequence_table, message_table = tables["ai_step_sequences"], tables["ai_step_messages"]
+    sequence_table, message_table = tables["ai_message_sequences"], tables["ai_messages"]
     sequence_ids = tuple(sorted({
         identity for row in rows for identity in (row["sha256"], row["left_sha256"], row["right_sha256"], row["next_sha256"])
         if identity is not None

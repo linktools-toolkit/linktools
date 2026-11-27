@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from linktools.ai.capability import ExecutionCapability
-from linktools.ai.core import Principal
+from linktools.ai.core import ExecutionStatus, Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.session import CreateSessionRequest
 from linktools.ai.persistence import PersistenceStorage
@@ -67,16 +67,24 @@ async def test_existing_session_close_during_binding_still_fails_cas(monkeypatch
 
 
 async def test_existing_session_start_after_same_version_reopen(tmp_path):
+    class HostAuthorization(TenantAuthorizationPolicy):
+        """Supply the host policy on both sides of a physical reopen."""
+
     actor = Principal("caller", "default", "service")
     storage = PersistenceStorage.from_root(tmp_path / "state")
-    async with Runtime.open("strict-reopen", storage=storage,
-                            features=model_features(RuntimeUsageModels())) as runtime:
-        await runtime.sessions.create("default", CreateSessionRequest(actor, "session", "create"))
-    async with Runtime.open("strict-reopen", storage=storage,
-                            features=model_features(RuntimeUsageModels())) as runtime:
-        execution = await runtime.sessions.start("session", "hello", principal=actor, idempotency_key="turn")
-        await execution.wait(timeout_seconds=10)
-        assert (await execution.inspect()).session_id == "session"
+    features = model_features(RuntimeUsageModels())
+    async with Runtime.open("strict-reopen", storage=storage, features=features,
+                            authorization=HostAuthorization()) as runtime:
+        await runtime.sessions.create(CreateSessionRequest(actor, "session", "create"))
+    async with Runtime.open("strict-reopen", storage=storage, features=features,
+                            authorization=HostAuthorization()) as runtime:
+        turn = await runtime.sessions.start(
+            "session", "hello", principal=actor, agent=runtime.agents.get(), idempotency_key="turn",
+        )
+        result = await turn.wait_final(timeout_seconds=10)
+        assert result.status is ExecutionStatus.SUCCEEDED
+        assert result.key.session_id == "session"
+        assert runtime._state.conversation.sessions is None
 
 
 async def test_existing_session_explicit_output_and_correlation():

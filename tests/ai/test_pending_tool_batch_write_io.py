@@ -5,14 +5,16 @@
 from pathlib import Path
 
 import pytest
+from pydantic_ai.messages import ModelRequest, ToolReturnPart
 from sqlalchemy import event
-from sqlalchemy.engine import Engine
 
 from linktools.ai.core import ToolOperationStatus, agent_run_id, canonical_sha256
+from linktools.ai.model.messages import encode_model_messages
 from linktools.ai.persistence.contracts import ToolOperationRecord
 from linktools.ai.storage import StoredPayload
 
-from .test_pending_turn_commit import _pending_turn, _snapshot, _turn_state
+from .test_pending_turn_commit import _snapshot
+from .test_pending_turn_sessionless import _commit, _conversation, _sessionless_state, _standalone
 
 
 @pytest.mark.asyncio
@@ -22,8 +24,13 @@ from .test_pending_turn_commit import _pending_turn, _snapshot, _turn_state
 async def test_pending_terminal_batches_tool_receipt_inserts(
     tmp_path: Path, count: int, custom: bool, rollback: bool, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with _turn_state("sqlite", tmp_path) as state:
-        turn = _pending_turn(state)
+    # SQL native Session tools keep real live receipts, rather than staging
+    # effects behind the retired SQL Session publisher. The batching contract
+    # below still belongs to the independent pending Execution publisher.
+    async with _sessionless_state("sqlite", tmp_path) as state:
+        turn = _standalone(state)
+        session_before = await _conversation(state)
+        assert state.storage.conversation.sessions is None
         execution = turn.commit.execution
         operations = tuple(ToolOperationRecord(
             tool_operation_id=f"operation-{index}", execution_id=execution.execution_id,
@@ -35,7 +42,9 @@ async def test_pending_terminal_batches_tool_receipt_inserts(
             error_code=None, created_at=execution.created_at, updated_at=execution.updated_at,
             producer_generation=execution.producer_generation,
             arguments_payload=StoredPayload.inline_bytes(b"{}"),
-            result_payload=StoredPayload.inline_bytes(b"result"),
+            result_payload=StoredPayload.inline_bytes(encode_model_messages((ModelRequest(parts=[
+                ToolReturnPart("runtime", f"result-{index}", tool_call_id=f"operation-{index}"),
+            ]),))),
         ) for index in range(count))
         reserves = []
         if custom:
@@ -58,20 +67,16 @@ async def test_pending_terminal_batches_tool_receipt_inserts(
                 inserts.append(len(parameters))
 
         async def commit():
-            return await state.commands.commit_pending_turn(
-                turn.reservation, turn.commit, expected_session=state.session,
-                next_cursor=turn.cursor, conversation_agent_run=turn.run,
-                conversation_checkpoint=turn.checkpoint, audit_events=turn.audit_events,
-                tool_operations=operations,
-            )
+            return await _commit(state, turn, tool_operations=operations)
 
-        event.listen(Engine, "before_cursor_execute", sql)
+        group = state.storage.execution.executions.state_store.storage_group
+        engine = group.context.engine.sync_engine
+        event.listen(engine, "before_cursor_execute", sql)
         try:
             if rollback:
                 from linktools.ai.errors import AIError, ErrorCode
 
                 before = await _snapshot(state)
-                group = state.storage.execution.executions.state_store.storage_group
                 original = type(group).mutate
 
                 async def fail_after_write(owner, stores, callback):
@@ -102,8 +107,9 @@ async def test_pending_terminal_batches_tool_receipt_inserts(
             inserts.clear()
             assert await commit() == first
             assert inserts == []
+            assert await _conversation(state) == session_before
             repository = state.storage.checkpoint.tools
             for expected in operations:
                 assert await repository.get_operation(expected.tool_operation_id, tenant_id="tenant") == expected
         finally:
-            event.remove(Engine, "before_cursor_execute", sql)
+            event.remove(engine, "before_cursor_execute", sql)

@@ -118,44 +118,87 @@ async def test_memory_admission_is_atomic_and_cas_preserves_token() -> None:
 
 @pytest.mark.asyncio
 async def test_sql_admission_is_atomic_and_token_survives_reopen(tmp_path) -> None:
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
-    await provision_database(engine)
-    state = PersistenceStorage.sql(engine)
-    state = Persistence(state)
-    await state.initialize(namespace="session-admission-sql", tenant_id="tenant")
-    await state.conversation.sessions.create(_session())
-    try:
-        results = await asyncio.gather(
-            _admission_result(state, "execution-a"),
-            _admission_result(state, "execution-b"),
-        )
-        assert sorted(results) == ["SESSION_BUSY", "execution-a"] or sorted(results) == [
-            "SESSION_BUSY",
-            "execution-b",
-        ]
-        current = await state.conversation.sessions.get("session", tenant_id="tenant")
-        assert current is not None
-        assert current.revision == 0
-        owner = current.active_execution_id
-        assert owner is not None
-        await state.close()
+    from pydantic_ai.messages import ModelResponse, TextPart
 
-        reopened = PersistenceStorage.sql(engine)
-        reopened = Persistence(reopened)
-        await reopened.initialize(namespace="session-admission-sql", tenant_id="tenant")
-        try:
-            persisted = await reopened.conversation.sessions.get(
-                "session",
-                tenant_id="tenant",
-            )
-            assert persisted is not None
-            assert persisted.active_execution_id == owner
-            assert persisted.revision == 0
-        finally:
-            await reopened.close()
+    from linktools.ai.history import History
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
+    from linktools.ai.session import SessionTurnAdmission
+    from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
+
+    class HostAuthorization(TenantAuthorizationPolicy):
+        """Supply the same authorization boundary for writer and read-only peers."""
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
+    entered, finish = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def model(messages, _info):
+        calls.append(messages)
+        entered.set()
+        await finish.wait()
+        return ModelResponse(parts=[TextPart("done")])
+
+    namespace = "session-admission-sql"
+    principal = Principal("owner", "tenant")
+    features = RuntimeFeatures(namespace)
+    features.agent("default", model="default", allow_tools=())
+    features = model_features(_Models(_UsageFunctionModel(model)), features)
+    try:
+        await provision_database(engine)
+        storage = PersistenceStorage.sql(engine)
+        async with (
+            Persistence.open(namespace, storage=storage, tenant_id=principal.tenant_id) as state,
+            Runtime.open(persistence=state, features=features, authorization=HostAuthorization()) as runtime,
+            asyncio.timeout(10),
+        ):
+            await runtime.sessions.create_turn_session("session", principal=principal)
+
+            async def start(key):
+                try:
+                    return await runtime.sessions.start(
+                        "session", key, agent="default", principal=principal, idempotency_key=key,
+                    )
+                except AIError as error:
+                    return error.code
+
+            try:
+                results = await asyncio.gather(start("request-a"), start("request-b"))
+                winner, = (result for result in results if not isinstance(result, ErrorCode))
+                denial, = (result for result in results if isinstance(result, ErrorCode))
+                assert denial in (ErrorCode.SESSION_BUSY, ErrorCode.SESSION_CONFLICT)
+                await entered.wait()
+                assert len(calls) == 1
+                winner_key = next(key for key, result in zip(("request-a", "request-b"), results) if result is winner)
+                loser_key = "request-b" if winner_key == "request-a" else "request-a"
+                # Once admission is visible, a new request deterministically loses to occupancy.
+                assert await start(loser_key) is ErrorCode.SESSION_BUSY
+                assert await runtime.sessions.lookup_admission(
+                    "session", principal=principal, idempotency_key=loser_key,
+                ) is None
+                replay = await start(winner_key)
+                assert replay.key == winner.key
+                live = await runtime.history.turn_session_state("session", principal=principal)
+                assert live["active_turn_id"] == winner.key.turn_id
+                async with (
+                    Persistence.open(namespace, storage=PersistenceStorage.sql(engine),
+                                     tenant_id=principal.tenant_id, read_only=True) as reopened,
+                    History.open(persistence=reopened, authorization=HostAuthorization()) as history,
+                ):
+                    assert await history.turn_session_state("session", principal=principal) == live
+                    accepted = await history.turn_result("session", winner.key.turn_id, principal=principal)
+                    assert not accepted["conversation_committed"]
+                    assert accepted["user_input"]["prompt"] == winner_key
+            finally:
+                finish.set()
+            terminal = await winner.wait_final(timeout_seconds=5)
+            assert terminal.status is ExecutionStatus.SUCCEEDED
+            assert await runtime.sessions.lookup_admission(
+                "session", principal=principal, idempotency_key=winner_key,
+            ) == SessionTurnAdmission(winner.key.turn_id, winner_key)
+            timeline = (await runtime.history.turn_session("session", principal=principal))["timeline"]
+            assert timeline["items"] == [terminal.view]
+            assert len(calls) == 1
     finally:
-        if state.ready:
-            await state.close()
         await engine.dispose()
 
 

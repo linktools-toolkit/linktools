@@ -18,7 +18,7 @@ from linktools.ai.persistence.contracts import ContextProjection
 
 from .test_checkpoint_metadata_snapshot_io import _checkpoint
 from .test_incremental_projection_boundaries import _storage
-from .test_session_history_projection import _session
+from .test_transcript_read_io import _create_history
 
 pytestmark = pytest.mark.asyncio
 
@@ -30,9 +30,7 @@ async def test_session_context_reuses_one_metadata_query(
     state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="context-capture", tenant_id="tenant")
     try:
-        session = await state.conversation.sessions.create(_session())
-        history_id = session.history_id
-        assert history_id is not None
+        history_id = await _create_history(state)
         archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
         repository = archive.transcript_repository
         summary = ModelRequest(parts=[UserPromptPart("retained summary")])
@@ -105,9 +103,7 @@ async def test_session_context_keeps_custom_history_reader(tmp_path: Path, monke
     state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="context-capture", tenant_id="tenant")
     try:
-        session = await state.conversation.sessions.create(_session())
-        history_id = session.history_id
-        assert history_id is not None
+        history_id = await _create_history(state)
         archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
         repository = archive.transcript_repository
         reads = []
@@ -131,9 +127,7 @@ async def test_session_context_capture_preserves_source_checks(tmp_path: Path, f
     state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="context-capture", tenant_id="tenant")
     try:
-        session = await state.conversation.sessions.create(_session())
-        history_id = session.history_id
-        assert history_id is not None
+        history_id = await _create_history(state)
         archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
         if failure != "missing_checkpoint":
             await archive.materialize_checkpoint(

@@ -173,7 +173,7 @@ class TaskEngine(Generic[AppT]):
         )
         self._launcher = LocalTaskGraphLauncher(
             persistence.task.tasks, self._task_node_runtime,
-            owner=f"task-engine:{self.tenant_id}:{uuid.uuid4().hex}",
+            owner=f"task-engine:{uuid.uuid4().hex}",
             acquire_execution_hold=self._execution_reads.acquire_dependency_hold,
             release_execution_hold=self._execution_reads.release_dependency_hold,
         )
@@ -376,6 +376,10 @@ class TaskEngine(Generic[AppT]):
 
     def _release_observation(self, session: ObservationSession) -> None:
         self._observation_sessions.discard(session)
+
+    async def wake_owned_graph(self, graph_id: str, *, tenant_id: str) -> bool:
+        """Prompt an already-running scheduler to observe a committed graph change."""
+        return await self._launcher.wake_owned_graph(graph_id, tenant_id=tenant_id)
 
     def add_close_callback(self, callback: Callable[[TaskEngine[AppT]], None]) -> None:
         """Notify an owner after successful cleanup; definition views share that lifetime.

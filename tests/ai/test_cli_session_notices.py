@@ -225,35 +225,28 @@ async def test_publisher_skips_its_own_descriptor_but_sends_to_same_process_peer
     assert not own
 
 
-def test_local_session_feed_decodes_existing_tool_shape_without_forwarding_invalid_rows():
+def test_local_session_feed_accepts_only_scoped_turn_lifecycle_notices():
     from types import SimpleNamespace
 
-    from linktools.ai.session import ToolProcessItem
-    from linktools.commands.ai._common import _LocalSessionFeed
+    from linktools.commands.ai._common import _receive_local_turn
 
     invalidations = []
-    feed = _LocalSessionFeed(SimpleNamespace(sessions=SimpleNamespace(invalidate=invalidations.append)))
-    received = []
-    unsubscribe = feed.subscribe("session", lambda execution, item: received.append((execution, item)))
+
+    def invalidate(*args, **kwargs):
+        invalidations.append((args, kwargs))
+
+    runtime = SimpleNamespace(
+        namespace="workspace", tenant_id="tenant",
+        sessions=SimpleNamespace(invalidate_turn_session=invalidate),
+    )
     notice = {
-        "kind": "tool", "session_id": "session", "execution_id": "execution",
-        "process": {
-            "kind": "tool", "key": "tool:abc", "tool_name": "search", "status": "SUCCEEDED", "position": [2, 0],
-            "elapsed_ms": 7,
-        },
+        "kind": "ordinary_turn", "namespace": "workspace", "tenant_id": "tenant",
+        "session_id": "session", "turn_id": "turn", "revision": 2, "phase": "terminal",
     }
     for change in (
-        {"key": "tool:"}, {"status": "UNCONFIRMED"}, {"kind": "other"},
-        {"position": [True, 0]}, {"position": [2, -1]}, {"position": [2]}, {"position": "2:0"},
+        {"kind": "tool"}, {"kind": "terminal"}, {"namespace": "other"}, {"tenant_id": "other"},
+        {"phase": "unknown"}, {"turn_id": None}, {"revision": True}, {"revision": 0},
     ):
-        feed.receive({**notice, "process": {**notice["process"], **change}})
-    feed.receive(notice)
-    feed.receive({**notice, "process": {**notice["process"], "position": None}})
-    unsubscribe()
-    feed.receive(notice)
-    feed.receive({**notice, "kind": "terminal"})
-    assert received == [
-        ("execution", ToolProcessItem("tool:abc", "search", "SUCCEEDED", (2, 0), elapsed_ms=7)),
-        ("execution", ToolProcessItem("tool:abc", "search", "SUCCEEDED", elapsed_ms=7)),
-    ]
-    assert invalidations == ["session"]
+        _receive_local_turn(runtime, {**notice, **change})
+    _receive_local_turn(runtime, notice)
+    assert invalidations == [(("session", "turn"), {"revision": 2, "phase": "terminal"})]

@@ -453,7 +453,7 @@ async def test_sql_kind_only_query_filters_other_record_kinds(
 ) -> None:
     owner = Persistence(PersistenceStorage.sqlite(tmp_path / "kind-query.db"))
     await owner.initialize(namespace="n", tenant_id="t")
-    store = owner.conversation.sessions.state_store
+    store = await owner.capability_store("kind-query")
     first = StoredRecord(
         b"a" * 32,
         None,

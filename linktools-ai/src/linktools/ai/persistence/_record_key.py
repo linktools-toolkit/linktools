@@ -5,7 +5,7 @@
 from collections.abc import Sequence
 
 
-RECORD_KEY_MAX_BYTES = 768
+RECORD_KEY_MAX_BYTES = 640
 
 
 def validate_record_key(value: bytes) -> bytes:

@@ -2,7 +2,7 @@
 
 These Runtime StateStore tables store **native JSON objects** in their
 `payload_json` columns: `ai_state_records`, `ai_execution_records`,
-`ai_task_graphs`, `ai_step_tool_operations`, `ai_step_run_admissions`,
+`ai_step_tool_operations`, `ai_step_run_admissions`,
 `ai_state_facts` and `ai_state_operations`.
 
 The SQLAlchemy metadata and [MySQL schema](../migrations/init_schema.sql) declare

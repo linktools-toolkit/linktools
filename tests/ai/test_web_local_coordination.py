@@ -45,15 +45,15 @@ async def _hold_turn(root: Path) -> None:
     ) as local:
         runtime = local.runtime
         actor = runtime.default_principal
-        await runtime.sessions.create("default", CreateSessionRequest(actor, "session", "create"))
-        turn = await runtime.sessions.start("session", "first", principal=actor, idempotency_key="first")
+        await runtime.sessions.create(CreateSessionRequest(actor, "session", "create"))
+        turn = await runtime.sessions.start("session", "first", principal=actor, agent="default", idempotency_key="first")
         try:
             await asyncio.wait_for(entered.wait(), 10)
             print("turn-held", flush=True)
             await asyncio.to_thread(sys.stdin.readline)
         finally:
             release.set()
-        assert (await turn.wait(timeout_seconds=10)).result.output == {"text": "complete"}
+        assert (await turn.wait_final(timeout_seconds=10)).view["output"] == {"text": "complete"}
 
 
 @pytest.mark.asyncio
@@ -92,25 +92,22 @@ async def test_local_session_rejects_cross_process_busy_and_releases(
             event.listen(Engine, "after_cursor_execute", count_statement)
             try:
                 with pytest.raises(AIError) as caught:
-                    await runtime.sessions.start("session", "other", principal=actor, idempotency_key="second")
+                    await runtime.sessions.start("session", "other", principal=actor, agent="default", idempotency_key="second")
             finally:
                 event.remove(Engine, "after_cursor_execute", count_statement)
             record_property("busy_attempt_selects", sum(verb in {"SELECT", "WITH"} for verb in statements))
             assert caught.value.code is ErrorCode.SESSION_BUSY
             assert model_calls == 0
 
-            await runtime.sessions.create("default", CreateSessionRequest(actor, "other-session", "create-other"))
-            independent = await runtime.sessions.start("other-session", "independent", principal=actor, idempotency_key="other")
-            assert (await independent.wait(timeout_seconds=10)).result.output == {"text": "complete"}
+            await runtime.sessions.create(CreateSessionRequest(actor, "other-session", "create-other"))
+            independent = await runtime.sessions.start("other-session", "independent", principal=actor, agent="default", idempotency_key="other")
+            assert (await independent.wait_final(timeout_seconds=10)).view["output"] == {"text": "complete"}
 
             _, stderr = await asyncio.wait_for(owner.communicate(b"release\n"), 20)
             assert owner.returncode == 0, stderr.decode()
-            # The earlier rejected request is stable; a new request may enter.
-            with pytest.raises(AIError) as replay:
-                await runtime.sessions.start("session", "other", principal=actor, idempotency_key="second")
-            assert replay.value.code is ErrorCode.SESSION_BUSY
-            following = await runtime.sessions.start("session", "other", principal=actor, idempotency_key="after-release")
-            assert (await following.wait(timeout_seconds=10)).result.output == {"text": "complete"}
+            # A busy request never admitted a turn; the same key can enter now.
+            following = await runtime.sessions.start("session", "other", principal=actor, agent="default", idempotency_key="second")
+            assert (await following.wait_final(timeout_seconds=10)).view["output"] == {"text": "complete"}
             assert model_calls == 2
     finally:
         if owner.returncode is None:

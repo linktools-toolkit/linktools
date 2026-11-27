@@ -14,16 +14,15 @@ from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 from linktools.ai.model.messages import encode_model_messages
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence.state import GroupRecordReader
-from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence import Persistence
 from linktools.ai.persistence._archive import ContentArchive, ContentRecord, PreparedArchive
-from linktools.ai.persistence._step_archive import PreparedAgentRunCheckpointBatch
-from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
 from linktools.ai.persistence.state import StateGroupTransaction, StateStore, StoredRecord, active_state_scope
 from linktools.ai.storage import InMemoryObjectStore
 from linktools.ai.steps import native_store_locator
 
-from .test_pending_turn_commit import _commit, _pending_turn, _snapshot, _turn_state
+from .test_incremental_projection_boundaries import _storage
+from .test_session_turn_sql import _TRANSCRIPT, accept
 from .test_state_group_record_batch import _database, _record
 
 pytestmark = pytest.mark.asyncio
@@ -65,36 +64,36 @@ async def _publish(archive: ContentArchive, prepared: PreparedArchive) -> None:
     await archive.store.mutate(lambda transaction: archive.publish(transaction, prepared))
 
 
-async def test_pending_turn_rejects_content_winner_after_preparation_and_rolls_back_owners(
+async def test_native_turn_rejects_content_winner_after_preparation_and_rolls_back_owners(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with _turn_state("sqlite", tmp_path) as state:
-        turn = _pending_turn(state)
-        step = state.storage.run_store.read_store(PersistenceDomain.CONVERSATION)
-        original = step.prepare_conversation_checkpoint
+    from linktools.ai.persistence.turns import SessionTurnKey
+
+    key = SessionTurnKey("chat", "turn")
+    async with Persistence.open("integrity", tenant_id="tenant", storage=_storage("sqlite", tmp_path)) as state:
+        turns = state.session_turns
+        await turns.create("chat", config={})
+        assert await accept(turns, key.turn_id)
+        native = turns._transcript_write_binding[2]
+        original = native.prepare_archived_messages
         captured: list[tuple[object, ...]] = []
         rivals: list[dict[str, object]] = []
-        native = step.transcript_repository._native_messages
-        assert native is not None
         metadata = build_step_sql_metadata()
-        messages = metadata.tables["ai_step_messages"]
+        messages = metadata.tables["ai_messages"]
 
-        async def native_snapshot() -> tuple[tuple[dict[str, object], ...], ...]:
+        async def snapshot() -> tuple[object, ...]:
             async with native.storage_context.engine.connect() as connection:
-                return tuple([
+                rows = tuple([
                     tuple(dict(row) for row in (await connection.execute(
                         select(table).order_by(table.c.id),
                     )).mappings())
                     for table in metadata.sorted_tables
                 ])
+            return await turns.get_session("chat"), await turns.get_turn(key), rows
 
-        async def inject_after_prepare(
-            run: AgentRunRecord, checkpoint: AgentRunCheckpoint, *, archive: PreparedArchive | None = None,
-            observed_records=None,
-        ) -> tuple[AgentRunCheckpoint, PreparedAgentRunCheckpointBatch]:
-            result = await original(run, checkpoint, archive=archive, observed_records=observed_records)
+        async def inject_after_prepare(messages_input, prepared):
+            result = await original(messages_input, prepared)
             assert active_state_scope() is None
-            prepared = result[1][0].archive
             retained = next(iter(prepared.native_messages.values()))
             identity, body = retained.messages[0]
             rival = {"store_key": native.store_key, "store_locator": native_store_locator(native.store_key), "sha256": identity,
@@ -102,23 +101,23 @@ async def test_pending_turn_rejects_content_winner_after_preparation_and_rolls_b
             async with native.storage_context.engine.begin() as connection:
                 await connection.execute(insert(messages).values(**rival))
             rivals.append(rival)
-            captured.append((await _snapshot(state), await native_snapshot()))
+            captured.append(await snapshot())
             return result
 
-        monkeypatch.setattr(step, "prepare_conversation_checkpoint", inject_after_prepare)
+        monkeypatch.setattr(native, "prepare_archived_messages", inject_after_prepare)
         with pytest.raises(AIError) as raised:
-            await _commit(state, turn)
+            await turns.finish(key, generation=1, turn_no=1, state="succeeded", transcript=_TRANSCRIPT)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         assert len(captured) == len(rivals) == 1
-        assert (await _snapshot(state), await native_snapshot()) == captured[0]
+        assert await snapshot() == captured[0]
         async with native.storage_context.engine.connect() as connection:
             remaining = await connection.execute(select(
                 messages.c.store_key, messages.c.store_locator, messages.c.sha256, messages.c.message,
                 messages.c.compression, messages.c.raw_size, messages.c.payload_json,
             ))
             assert tuple(dict(row) for row in remaining.mappings()) == tuple(rivals)
-        assert await state.storage.execution.executions.get("execution", tenant_id="tenant") is None
-        assert await state.storage.conversation.sessions.get("session", tenant_id="tenant") == state.session
+        assert await state.execution.executions.get(key.turn_id, tenant_id="tenant") is None
+        assert (await turns.get_session("chat"))["active_turn_id"] == b"turn"
 
 
 @pytest.mark.parametrize("operation", ("content", "append"))

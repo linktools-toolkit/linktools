@@ -23,19 +23,19 @@ from linktools.ai.core import (
     OperationKind,
     OperationLedgerRecord,
     OperationStatus,
+    Principal,
     ResourceKind,
-    SessionStatus,
+    TenantAuthorizationPolicy,
     ToolOperationStatus,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.capability import TraceCapability
+from linktools.ai.capability import SessionCapability, TraceCapability
 from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint, seed_native_snapshot
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.execution import ToolEffectApplied, ToolEffectFailed, ToolEffectNotApplied
-from linktools.ai.persistence import PersistenceStorage, PersistencePlan
-from linktools.ai.storage import StorageRoute
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.execution import CancelExecutionRequest
@@ -63,6 +63,7 @@ from pydantic_ai.usage import RunUsage
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from ._runtime_test_helpers import _Models, _UsageFunctionModel, _wait_for_committed
 from ._session_tool_test_helpers import (
     _ToolModelBinding,
     _ToolModels,
@@ -143,6 +144,64 @@ async def _state(
     raise AssertionError(backend)
 
 
+class _NativeSessionPolicy(TenantAuthorizationPolicy):
+    tool_returns = False
+
+    async def session_tool_return_names(self, principal, session_id, turn) -> frozenset[str]:
+        return frozenset({"lookup"}) if self.tool_returns else frozenset()
+
+
+async def _native_session_tool_turn_commits_terminal_and_history(
+    state: PersistenceStorage, calls: list[str],
+) -> None:
+    features = _application(calls)
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
+    features.capability(TraceCapability(), scope="runtime")
+    policy = _NativeSessionPolicy()
+    async with (
+        Persistence.open("session-tool-terminal", storage=state) as persistence,
+        Runtime.open(persistence=persistence, features=model_features(_ToolModels(), features),
+                     authorization=policy) as runtime,
+    ):
+        principal = Principal("owner", runtime.tenant_id)
+        await runtime.sessions.create_turn_session("session", principal=principal)
+        turns = runtime.sessions
+        owner = await turns.start("session", "inspect", agent="default", principal=principal, idempotency_key="turn-1")
+        result = await owner.wait_final(timeout_seconds=10)
+        assert result.status is ExecutionStatus.SUCCEEDED and calls == ["lookup"]
+        assert result.view["conversation_committed"]
+        call, answer = result.view["items"]
+        assert (call["item_kind"], answer["item_kind"]) == ("tool_call", "assistant")
+        process, = result.view["process"]
+        assert process["key"] == f"tool:{call['tool_call_id']}"
+        assert process["status"] == "SUCCEEDED" and process["elapsed_ms"] >= 0
+
+        policy.tool_returns = True
+        returned, = await runtime.history.turn_tool_returns(
+            "session", owner.key.turn_id, principal=principal, tool_names=frozenset({"lookup"}),
+        )
+        assert returned == {"tool_name": "lookup", "tool_call_id": call["tool_call_id"], "value": "tool-result"}
+
+        async def trace():
+            return await runtime.history.turn_trace("session", owner.key.turn_id, principal=principal)
+
+        observed = await _wait_for_committed(trace, lambda value: bool(value.items), timeout=10)
+        projected = [item.payload for item in observed.items
+                     if item.payload.get("kind") in {"TOOL_CALL", "TOOL_RESULT", "TOOL_ERROR"}]
+        assert [item["kind"] for item in projected] == ["TOOL_CALL", "TOOL_RESULT"]
+        assert projected[0]["model_request_seq"] == projected[1]["model_request_seq"] == 1
+        assert all(not {"purpose", "content", "args", "arguments", "result", "output", "text", "error_diagnostics"}
+                   .intersection(item) for item in projected)
+
+        replay = await turns.start("session", "inspect", agent="default", principal=principal, idempotency_key="turn-1")
+        assert replay.key == owner.key and (await replay.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
+        second = await turns.start("session", "continue", agent="default", principal=principal, idempotency_key="turn-2")
+        assert (await second.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
+        page = await runtime.history.turn_session("session", principal=principal)
+        assert [item["turn_id"] for item in page["timeline"]["items"]] == [owner.key.turn_id, second.key.turn_id]
+        assert calls == ["lookup"]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite", "sql"))
 async def test_session_tool_turn_commits_terminal_and_history(
@@ -151,6 +210,13 @@ async def test_session_tool_turn_commits_terminal_and_history(
 ) -> None:
     state, engine = await _state(backend, tmp_path)
     calls: list[str] = []
+    if backend != "memory":
+        try:
+            await _native_session_tool_turn_commits_terminal_and_history(state, calls)
+        finally:
+            if engine is not None:
+                await engine.dispose()
+        return
     application = _application(calls)
     try:
         application.capability(native_checkpoint(), scope="runtime")
@@ -288,268 +354,152 @@ async def test_rejected_session_start_cleans_only_its_admission(
     rejection: str,
     expected_code: ErrorCode,
 ) -> None:
-    if storage_mode == "same_group":
-        state = PersistenceStorage.sqlite(tmp_path / "same-group.db")
-    else:
-        state = PersistenceStorage(
-            PersistencePlan(
-                conversation=StorageRoute.sqlite(
-                    tmp_path / "conversation.db"
-                ),
-                execution=StorageRoute.sqlite(tmp_path / "execution.db"),
-            )
-        )
-    calls: list[str] = []
-    tool_started = asyncio.Event()
-    release_tool = asyncio.Event()
-    application = _application(
-        calls,
-        started=tool_started,
-        release=release_tool,
-    )
-    try:
-        application.capability(native_checkpoint(), scope="runtime")
-        application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('session-admission-cleanup', storage=state) as persistence_310, Runtime.open(persistence=persistence_310, features=model_features(_ToolModels(), application)) as runtime:
-            try:
-                await runtime.agents.get("default").create_session("session")
-                session = runtime.agents.get("default").session("session")
-                owner = None
-                conflict_snapshot: list[object] = []
+    state = (PersistenceStorage.sqlite(tmp_path / "same-group.db") if storage_mode == "same_group"
+             else _split_sqlite_storage(tmp_path / "split.db"))
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def model(messages, _info):
+        calls.append(messages)
+        entered.set()
+        await release.wait()
+        return ModelResponse(parts=[TextPart("answer")])
+
+
+    features = RuntimeFeatures("session-admission-cleanup")
+    features.agent("default", model="default", allow_tools=())
+    async with (
+        Persistence.open("session-admission-cleanup", storage=state) as persistence,
+        Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
+                     authorization=_NativeSessionPolicy()) as runtime,
+    ):
+        principal = runtime.default_principal
+        sessions, store = runtime.sessions, persistence.session_turns
+        before = await sessions.create_turn_session("session", principal=principal)
+        owner = None
+        try:
+            with monkeypatch.context() as fault:
                 if rejection == "busy":
-                    owner = await session.start(
-                        "inspect",
-                        idempotency_key="turn-owner",
-                    )
-                    await asyncio.wait_for(tool_started.wait(), timeout=10)
+                    owner = await sessions.start("session", "owner", agent="default", principal=principal,
+                                                 idempotency_key="turn-owner")
+                    await asyncio.wait_for(entered.wait(), timeout=10)
+                    before = await runtime.history.turn_session_state("session", principal=principal)
+                    assert before["active_turn_id"] == owner.key.turn_id
                 else:
-                    # Race a source transition after independent reservation.
-                    runtime._execution_service._runtime_bridge.prepare_reserved_start = None
-                    original_prepare_start = LocalExecutionBackend.prepare_start
+                    accept = store.accept
 
-                    async def conflict_after_reservation(
-                        backend: LocalExecutionBackend,
-                        request: object,
-                        execution_record: object,
-                        identity: object,
-                    ) -> object:
-                        await runtime._state.conversation.sessions.transition_status(
-                            "session",
-                            tenant_id=runtime.default_principal.tenant_id,
-                            expected=frozenset({SessionStatus.OPEN}),
-                            next_status=SessionStatus.CLOSING,
+                    async def change_revision(key, **kwargs):
+                        assert await sessions.update_turn_session(
+                            "session", principal=principal, expected_revision=before["revision"],
+                            metadata={"source": "concurrent owner"},
                         )
-                        conflict_snapshot.append(
-                            await runtime._state.conversation.sessions.get(
-                                "session",
-                                tenant_id=runtime.default_principal.tenant_id,
-                            )
-                        )
-                        return await original_prepare_start(
-                            backend,
-                            request,  # type: ignore[arg-type]
-                            execution_record,  # type: ignore[arg-type]
-                            identity,  # type: ignore[arg-type]
-                        )
+                        return await accept(key, **kwargs)
 
-                    monkeypatch.setattr(
-                        LocalExecutionBackend,
-                        "prepare_start",
-                        conflict_after_reservation,
-                    )
-
-                session_before = None
-                if owner is not None:
-                    session_before = await runtime._state.conversation.sessions.get(
-                        "session",
-                        tenant_id=runtime.default_principal.tenant_id,
-                    )
-                    assert session_before is not None
-                    assert session_before.active_execution_id == owner.execution_id
-
+                    fault.setattr(store, "accept", change_revision)
                 with pytest.raises(AIError) as raised:
-                    await session.start("rejected", idempotency_key="turn-rejected")
-                assert raised.value.code is expected_code
-                if rejection == "conflict":
-                    assert len(conflict_snapshot) == 1
-                    session_before = conflict_snapshot[0]
-                assert session_before is not None
-
-                executions = await runtime._state.execution.executions.list_by_session(
-                    "session",
-                    tenant_id=runtime.default_principal.tenant_id,
-                )
-                rejected = next(
-                    item
-                    for item in executions
-                    if item.error_code == expected_code.value
-                )
-                assert rejected.status is ExecutionStatus.FAILED
-                assert rejected.started_at is None
-                assert rejected.error_code == expected_code.value
-                assert (
-                    await runtime._state.execution.executions.get_result(
-                        rejected.execution_id,
-                        tenant_id=runtime.default_principal.tenant_id,
-                    )
-                ) is not None
-                identities = await runtime._state.execution.idempotency.list_by_resource(
-                    ResourceKind.EXECUTION,
-                    rejected.execution_id,
-                    tenant_id=runtime.default_principal.tenant_id,
-                )
-                assert len(identities) == 1
-                assert identities[0].status.value == "FAILED"
-
-                checkpoint = await runtime._state.execution.executions.get(
-                    rejected.execution_id,
-                    tenant_id=runtime.default_principal.tenant_id,
-                )
-                assert checkpoint is not None and checkpoint.status is ExecutionStatus.FAILED
-                assert checkpoint.recovery is None
-                if storage_mode != "same_group":
-                    await runtime._execution_service.runtime_backend().abort_start(
-                        rejected
-                    )
-                    assert await runtime._state.execution.executions.get(
-                        rejected.execution_id,
-                        tenant_id=runtime.default_principal.tenant_id,
-                    ) == checkpoint
-
-                session_after = await runtime._state.conversation.sessions.get(
-                    "session",
-                    tenant_id=runtime.default_principal.tenant_id,
-                )
-                assert session_after is not None
-                assert session_after.status is session_before.status
-                assert session_after.active_execution_id == session_before.active_execution_id
-                assert session_after.continuation == session_before.continuation
-
-                release_tool.set()
-                if owner is not None:
-                    result = (await owner.wait(timeout_seconds=15)).result
-                    assert result.status is ExecutionStatus.SUCCEEDED
-            finally:
-                release_tool.set()
-    finally:
-        await runtime._state.close()
+                    await sessions.start("session", "rejected", agent="default", principal=principal,
+                                         idempotency_key="turn-rejected")
+            assert raised.value.code is expected_code
+            current = await runtime.history.turn_session_state("session", principal=principal)
+            assert current["last_turn_no"] == 0
+            assert not await store.find_request("session", "turn-rejected")
+            if owner is None:
+                assert current["active_turn_id"] is None
+                assert current["metadata"] == {"source": "concurrent owner"}
+                assert current["revision"] == before["revision"] + 1
+                assert not calls
+            else:
+                assert current == before
+                assert len(calls) == 1
+        finally:
+            release.set()
+        if owner is not None:
+            assert (await owner.wait_final(timeout_seconds=15)).status is ExecutionStatus.SUCCEEDED
+            assert len(calls) == 1
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("release_committed", (False, True))
-async def test_split_start_cleanup_failure_remains_recoverable_after_restart(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    release_committed: bool,
+@pytest.mark.parametrize("committed", (False, True))
+async def test_split_admission_unknown_preserves_only_committed_turn_after_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, committed: bool,
 ) -> None:
+
     database = tmp_path / "start-cleanup-restart.db"
-    state = _split_sqlite_storage(database)
-    calls: list[str] = []
-    execution_id: str | None = None
-    try:
-        application = _application(calls)
-        application.capability(native_checkpoint(), scope="runtime")
-        application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('start-cleanup-restart', storage=state) as persistence_454, Runtime.open(persistence=persistence_454, features=model_features(_ToolModels(), application)) as runtime:
-            original_mutate = runtime._state.conversation.sessions.state_store.mutate
+    calls = []
+    attempted = []
 
-            async def conflict_after_session_reservation(
-                _claim: Any,
-            ) -> Any:
-                raise AIError(ErrorCode.SESSION_CONFLICT)
+    async def model(messages, _info):
+        calls.append(messages)
+        return ModelResponse(parts=[TextPart("answer")])
 
-            async def fail_session_release(callback, *args, **kwargs) -> Any:
-                if callback.__name__ != "release_conversation":
-                    return await original_mutate(callback, *args, **kwargs)
-                if release_committed:
-                    await original_mutate(callback, *args, **kwargs)
-                raise AIError(
-                    ErrorCode.STORAGE_COMMIT_UNKNOWN if release_committed
-                    else ErrorCode.STORAGE_RECOVERY_REQUIRED
-                )
+    features = RuntimeFeatures("start-cleanup-restart")
+    features.agent("default", model="default", allow_tools=())
+    features = model_features(_Models(_UsageFunctionModel(model)), features)
+    async with (
+        Persistence.open("start-cleanup-restart", storage=_split_sqlite_storage(database)) as persistence,
+        Runtime.open(persistence=persistence, features=features, authorization=_NativeSessionPolicy()) as runtime,
+    ):
+        principal = runtime.default_principal
+        sessions, store = runtime.sessions, persistence.session_turns
+        await sessions.create_turn_session("session", principal=principal)
+        before = await runtime.history.turn_session_state("session", principal=principal)
+        accept = store.accept
 
-            with monkeypatch.context() as scoped:
-                scoped.setattr(
-                    runtime._state.execution.executions,
-                    "claim_start",
-                    conflict_after_session_reservation,
-                )
-                scoped.setattr(
-                    runtime._state.conversation.sessions.state_store,
-                    "mutate",
-                    fail_session_release,
-                )
-                await runtime.agents.get("default").create_session("session")
-                session = runtime.agents.get("default").session("session")
+        async def lose_ack(key, **kwargs):
+            attempted.append(key)
+            if committed:
+                assert await accept(key, **kwargs)
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+
+        with monkeypatch.context() as fault:
+            fault.setattr(store, "accept", lose_ack)
+            if committed:
+                replay = await sessions.start("session", "inspect", agent="default", principal=principal,
+                                              idempotency_key="turn-cleanup-restart")
+                assert replay.key == attempted[0]
+            else:
                 with pytest.raises(AIError) as rejected:
-                    await session.start(
-                        "inspect",
-                        idempotency_key="turn-cleanup-restart",
-                    )
-                assert rejected.value.code is (
-                    ErrorCode.SESSION_CONFLICT if release_committed else ErrorCode.STORAGE_RECOVERY_REQUIRED
-                )
+                    await sessions.start("session", "inspect", agent="default", principal=principal,
+                                         idempotency_key="turn-cleanup-restart")
+                assert rejected.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
 
-                executions = await runtime._state.execution.executions.list_by_session(
-                    "session",
-                    tenant_id=runtime.default_principal.tenant_id,
-                )
-                failed = next(
-                    item
-                    for item in executions
-                    if item.error_code == ErrorCode.SESSION_CONFLICT.value
-                )
-                execution_id = failed.execution_id
-                assert failed.status is ExecutionStatus.FAILED
-                assert failed.started_at is None
-                checkpoint = await runtime._state.execution.executions.get(
-                    execution_id,
-                    tenant_id=runtime.default_principal.tenant_id,
-                )
-                assert checkpoint is not None
-                assert checkpoint.status is ExecutionStatus.FAILED
-                assert checkpoint.recovery is not None
-                assert checkpoint.recovery_state.value == ("completed" if release_committed else "handoff")
-                recoverable = await runtime._state.execution.executions.list_recoverable_page(
-                    tenant_id=runtime.default_principal.tenant_id,
-                    cursor=None,
-                    limit=10,
-                )
-                assert any(item.execution_id == execution_id for item in recoverable.items) is not release_committed
-                session_record = await runtime._state.conversation.sessions.get(
-                    "session",
-                    tenant_id=runtime.default_principal.tenant_id,
-                )
-                assert session_record is not None
-                assert session_record.active_execution_id == (
-                    None if release_committed else execution_id
-                )
-                assert calls == []
-    finally:
-        await runtime._state.close()
+        key, = attempted
+        assert not calls
+        current = await runtime.history.turn_session_state("session", principal=principal)
+        if not committed:
+            assert current == before
+            assert await store.get_turn(key) is None
+        else:
+            assert current["active_turn_id"] == key.turn_id and current["last_turn_no"] == 0
+            row = await store.get_turn(key)
+            assert row["state"] == "accepted" and row["generation"] == 1
 
-    assert execution_id is not None
-    reopened = _split_sqlite_storage(database)
-    try:
-        application = _application(calls)
-        application.capability(native_checkpoint(), scope="runtime")
-        application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('start-cleanup-restart', storage=reopened) as persistence_540, Runtime.open(persistence=persistence_540, features=model_features(_ToolModels(), application), auto_recover=True) as runtime:
-            checkpoint = await runtime._state.execution.executions.get(
-                execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert checkpoint is not None
-            assert checkpoint.recovery_state.value == "completed"
-            session_record = await runtime._state.conversation.sessions.get(
-                "session",
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert session_record is not None
-            assert session_record.active_execution_id is None
-            assert calls == []
-    finally:
-        await runtime._state.close()
+    async with (
+        Persistence.open("start-cleanup-restart", storage=_split_sqlite_storage(database)) as persistence,
+        Runtime.open(persistence=persistence, features=features, authorization=_NativeSessionPolicy()) as runtime,
+    ):
+        store = persistence.session_turns
+        current = await runtime.history.turn_session_state("session", principal=principal)
+        assert not calls
+        if not committed:
+            assert current == before and await store.get_turn(key) is None
+        else:
+            assert current["active_turn_id"] == key.turn_id
+            table = store._turns
+            async with store._context.engine.begin() as connection:
+                expired = await connection.execute(table.update().filter_by(
+                    **store._turn_values(key), generation=1,
+                ).values(lease_until=0))
+                assert expired.rowcount == 1
+            assert await runtime.sessions.recover_turn("session", key.turn_id, principal=principal)
+
+            async def released():
+                return await runtime.history.turn_result("session", key.turn_id, principal=principal)
+
+            view = await _wait_for_committed(released, lambda item: item["conversation_committed"], timeout=10)
+            assert view["status"] == "SUCCEEDED" and len(calls) == 1
+            current = await runtime.history.turn_session_state("session", principal=principal)
+            assert current["active_turn_id"] is None and current["last_turn_no"] == 1
 
 
 @pytest.mark.asyncio
@@ -557,219 +507,104 @@ async def test_session_start_cancel_before_worker_run_commits_cancelled_terminal
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = PersistenceStorage.sqlite(tmp_path / "cancel-start-before-run.db")
+    from linktools.ai.runtime._regenerable_turn import _RegenerableTurnRunner
+
+    storage = PersistenceStorage.sqlite(tmp_path / "cancel-start-before-run.db")
     calls: list[str] = []
     worker_entered = asyncio.Event()
-    release_worker = asyncio.Event()
-    application = _application(calls)
-    original_run = LocalExecutionBackend._run
+    features = _application(calls)
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
 
-    async def pause_worker(
-        backend: LocalExecutionBackend, *args: Any, **kwargs: Any,
-    ) -> None:
+    async def pause_worker(*_args, **_kwargs):
         worker_entered.set()
-        await release_worker.wait()
-        await original_run(backend, *args, **kwargs)
+        await asyncio.Event().wait()
 
-    monkeypatch.setattr(LocalExecutionBackend, "_run", pause_worker)
-    try:
-        application.capability(native_checkpoint(), scope="runtime")
-        application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('session-start-cancel-before-run', storage=state) as persistence_593, Runtime.open(persistence=persistence_593, features=model_features(_ToolModels(), application)) as runtime:
-            await runtime.agents.get("default").create_session("session")
-            session = runtime.agents.get("default").session("session")
-            before = await runtime._state.conversation.sessions.get(
-                "session",
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert before is not None
-            execution = await session.start("inspect", idempotency_key="turn-1")
-            await asyncio.wait_for(worker_entered.wait(), timeout=10)
-
-            admitted = await runtime._state.conversation.sessions.get(
-                "session",
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert admitted is not None
-            assert admitted.active_execution_id == execution.execution_id
-            cancelled = await runtime._execution_service.cancel(
-                execution.execution_id,
-                CancelExecutionRequest(
-                    runtime.default_principal,
-                    "cancel-before-worker-run",
-                ),
-            )
-            assert cancelled.cancelled is True
-            record = await runtime._state.execution.executions.get(
-                execution.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert record is not None
-            assert record.status is ExecutionStatus.CANCELLED
-            assert record.error_code == ErrorCode.EXECUTION_CANCELLED.value
-            result = await runtime._state.execution.executions.get_result(
-                execution.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert result is not None
-            identities = await runtime._state.execution.idempotency.list_by_resource(
-                ResourceKind.EXECUTION,
-                execution.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert len(identities) == 1
-            assert identities[0].status.value == "CANCELLED"
-            assert identities[0].error_code is None
-            assert result.output is None
-            assert result.stop_reason.value == "CANCELLED"
-            events = await execution.list_events(limit=100)
-            assert any(
-                item.event_type == ExecutionEventType.EXECUTION_CANCELLED
-                for item in events.items
-            )
-            assert not any(
-                item.event_type
-                in {
-                    ExecutionEventType.EXECUTION_SUCCEEDED,
-                    ExecutionEventType.EXECUTION_FAILED,
-                }
-                for item in events.items
-            )
-            after = await runtime._state.conversation.sessions.get(
-                "session",
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert after is not None
-            assert after.status is before.status
-            assert after.active_execution_id is None
-            assert after.continuation == before.continuation
-            replayed = await runtime._execution_service.cancel(
-                execution.execution_id,
-                CancelExecutionRequest(
-                    runtime.default_principal,
-                    "cancel-before-worker-run",
-                ),
-            )
-            assert replayed.cancelled is True
-            assert calls == []
-    finally:
-        release_worker.set()
-        await runtime._state.close()
+    monkeypatch.setattr(_RegenerableTurnRunner, "settle", pause_worker)
+    async with (
+        Persistence.open("session-start-cancel-before-run", storage=storage) as state,
+        Runtime.open(persistence=state, features=model_features(_ToolModels(), features),
+                     authorization=_NativeSessionPolicy()) as runtime,
+    ):
+        principal = runtime.default_principal
+        sessions = runtime.sessions
+        await sessions.create_turn_session("session", principal=principal)
+        before = await runtime.history.turn_session_state("session", principal=principal)
+        turn = await sessions.start("session", "inspect", agent="default", principal=principal, idempotency_key="turn-1")
+        await asyncio.wait_for(worker_entered.wait(), timeout=10)
+        admitted = await runtime.history.turn_session_state("session", principal=principal)
+        assert admitted["active_turn_id"] == turn.key.turn_id
+        assert await turn.cancel()
+        result = await turn.wait_final(timeout_seconds=10)
+        assert result.status is ExecutionStatus.CANCELLED
+        assert result.view["conversation_committed"]
+        assert result.view["error_code"] == ErrorCode.EXECUTION_CANCELLED.value
+        assert result.view["output"] is None and result.view["items"] == []
+        after = await runtime.history.turn_session_state("session", principal=principal)
+        assert after["status"] == before["status"] and after["active_turn_id"] is None
+        assert after["last_turn_no"] == before["last_turn_no"] + 1
+        assert await turn.cancel()
+        replay = await sessions.start("session", "inspect", agent="default", principal=principal, idempotency_key="turn-1")
+        assert replay.key == turn.key
+        assert (await replay.result()).view == result.view and not calls
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("storage_mode", ("same_group", "split_conversation"))
-async def test_pending_start_cancel_commits_terminal_before_admission(
+async def test_native_pending_start_cannot_publish_after_session_closes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     storage_mode: str,
 ) -> None:
-    from linktools.ai.persistence.contracts import ExecutionRecoveryState
+    storage = (PersistenceStorage.sqlite(tmp_path / "pending-start-cancel.db") if storage_mode == "same_group"
+               else _split_sqlite_storage(tmp_path / "pending-start-cancel.db"))
+    calls = []
+    prepared, release = asyncio.Event(), asyncio.Event()
+    keys = []
 
-    state = (
-        PersistenceStorage.sqlite(tmp_path / "pending-start-cancel.db")
-        if storage_mode == "same_group"
-        else _split_sqlite_storage(tmp_path / "pending-start-cancel.db")
-    )
-    calls: list[str] = []
-    preparing = asyncio.Event()
-    release_prepare = asyncio.Event()
-    original_prepare = LocalExecutionBackend.prepare_start
+    async def model(messages, _info):
+        calls.append(messages)
+        return ModelResponse(parts=[TextPart("not expected")])
 
-    async def pause_prepare(
-        backend: LocalExecutionBackend,
-        request: Any,
-        execution_record: Any,
-        identity: Any,
-    ) -> Any:
-        preparing.set()
-        await release_prepare.wait()
-        return await original_prepare(backend, request, execution_record, identity)
+    features = RuntimeFeatures("pending-start-cancel")
+    features.agent("default", model="default", allow_tools=())
+    async with (
+        Persistence.open("pending-start-cancel", storage=storage) as state,
+        Runtime.open(persistence=state, features=model_features(_Models(_UsageFunctionModel(model)), features),
+                     authorization=_NativeSessionPolicy()) as runtime,
+    ):
+        principal = runtime.default_principal
+        sessions, store = runtime.sessions, state.session_turns
+        await sessions.create_turn_session("session", principal=principal)
+        initial = await runtime.history.turn_session_state("session", principal=principal)
+        accept = store.accept
 
-    monkeypatch.setattr(LocalExecutionBackend, "prepare_start", pause_prepare)
-    try:
-        application = _application(calls)
-        application.capability(native_checkpoint(), scope="runtime")
-        application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open(f'pending-start-cancel-{storage_mode}', storage=state) as persistence_711, Runtime.open(persistence=persistence_711, features=model_features(_ToolModels(), application)) as runtime:
-            start_task = None
-            try:
-                # PENDING_START remains observable when combined admission is unavailable.
-                runtime._execution_service._runtime_bridge.prepare_reserved_start = None
-                await runtime.agents.get("default").create_session("session")
-                session = runtime.agents.get("default").session("session")
-                start_task = asyncio.create_task(
-                    session.start("inspect", idempotency_key="turn-pending-start")
-                )
-                await asyncio.wait_for(preparing.wait(), timeout=10)
+        async def pause_accept(key, **kwargs):
+            keys.append(key)
+            prepared.set()
+            await release.wait()
+            return await accept(key, **kwargs)
 
-                pending = await runtime._state.execution.executions.list_by_session(
-                    "session",
-                    tenant_id=runtime.default_principal.tenant_id,
-                )
-                assert len(pending) == 1
-                execution_record = pending[0]
-                assert execution_record.status is ExecutionStatus.PENDING_START
-                assert execution_record.started_at is None
-
-                cancellation = await runtime.executions.cancel(
-                    execution_record.execution_id,
-                    CancelExecutionRequest(
-                        runtime.default_principal,
-                        "cancel-pending-start",
-                    ),
-                )
-                assert cancellation.cancelled is True
-                terminal = await runtime._state.execution.executions.get(
-                    execution_record.execution_id,
-                    tenant_id=runtime.default_principal.tenant_id,
-                )
-                assert terminal is not None
-                assert terminal.status is ExecutionStatus.CANCELLED
-                assert terminal.started_at is None
-                assert await runtime._state.execution.executions.get_result(
-                    execution_record.execution_id,
-                    tenant_id=runtime.default_principal.tenant_id,
-                ) is not None
-                checkpoint = await runtime._state.execution.executions.get(
-                    execution_record.execution_id,
-                    tenant_id=runtime.default_principal.tenant_id,
-                )
-                assert checkpoint is not None
-                if storage_mode == "same_group":
-                    assert checkpoint.recovery is None
-                else:
-                    assert checkpoint.recovery_state is ExecutionRecoveryState.COMPLETED
-                    assert checkpoint.recovery.agent_run_id is None
-                session_record = await runtime._state.conversation.sessions.get(
-                    "session",
-                    tenant_id=runtime.default_principal.tenant_id,
-                )
-                assert session_record is not None
-                assert session_record.active_execution_id is None
-                assert calls == []
-
-                release_prepare.set()
-                try:
-                    started = await start_task
-                except AIError:
-                    pass
-                else:
-                    assert started.execution_id == execution_record.execution_id
-                final = await runtime._state.execution.executions.get(
-                    execution_record.execution_id,
-                    tenant_id=runtime.default_principal.tenant_id,
-                )
-                assert final is not None
-                assert final.status is ExecutionStatus.CANCELLED
-                assert calls == []
-            finally:
-                release_prepare.set()
-                if start_task is not None:
-                    await asyncio.gather(start_task, return_exceptions=True)
-    finally:
-        release_prepare.set()
-        await runtime._state.close()
+        monkeypatch.setattr(store, "accept", pause_accept)
+        request = asyncio.create_task(sessions.start(
+            "session", "inspect", agent="default", principal=principal, idempotency_key="turn-pending-start",
+        ))
+        try:
+            await asyncio.wait_for(prepared.wait(), timeout=10)
+            key, = keys
+            # There is no cancellable turn identifier until native admission commits.
+            assert not await sessions.cancel_turn("session", key.turn_id, principal=principal)
+            assert await store.get_turn(key) is None
+            assert await runtime.history.turn_session_state("session", principal=principal) == initial
+            assert await sessions.close_turn_session("session", principal=principal, expected_revision=initial["revision"])
+        finally:
+            release.set()
+            received, = await asyncio.gather(request, return_exceptions=True)
+        assert isinstance(received, AIError) and received.code is ErrorCode.SESSION_CONFLICT
+        assert await store.get_turn(key) is None
+        assert not await store.find_request("session", "turn-pending-start") and not calls
+        current = await runtime.history.turn_session_state("session", principal=principal)
+        assert current["status"] == "CLOSED" and current["active_turn_id"] is None
+        assert current["last_turn_no"] == 0
 
 
 @pytest.mark.asyncio
@@ -791,9 +626,7 @@ async def test_cancel_during_unknown_tool_effect_preserves_recovery_and_cancel_i
         application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('cancel-unknown-tool-effect', storage=state) as persistence_801, Runtime.open(persistence=persistence_801, features=model_features(_ToolModels(), application)) as runtime:
-            await runtime.agents.get("default").create_session("session")
-            session = runtime.agents.get("default").session("session")
-            execution = await session.start(
+            execution = await runtime.agents.get("default").start(
                 "inspect",
                 idempotency_key="turn-1",
             )
@@ -831,12 +664,7 @@ async def test_cancel_during_unknown_tool_effect_preserves_recovery_and_cancel_i
             assert cancel_operations[0].operation_kind is OperationKind.EXECUTION_CANCEL
             assert cancel_operations[0].status is OperationStatus.PENDING
 
-            session_record = await runtime._state.conversation.sessions.get(
-                "session",
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert session_record is not None
-            assert session_record.active_execution_id == execution.execution_id
+            assert current.session_id is None
 
             replayed_cancel = await execution.cancel(idempotency_key="cancel-1")
             assert replayed_cancel.cancelled is False
@@ -889,8 +717,7 @@ async def test_cancel_intent_replay_readback_preserves_sqlite_state(
         application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('cancel-intent-readback', storage=state) as persistence_903, Runtime.open(persistence=persistence_903, features=model_features(_ToolModels(), application)) as runtime:
-            await runtime.agents.get("default").create_session("session")
-            execution = await runtime.agents.get("default").session("session").start(
+            execution = await runtime.agents.get("default").start(
                 "inspect",
                 idempotency_key="turn-probe",
             )
@@ -1101,12 +928,7 @@ async def test_cancel_intent_replay_readback_preserves_sqlite_state(
                 execution.execution_id,
                 tenant_id=principal.tenant_id,
             ) is None
-            session_record = await runtime._state.conversation.sessions.get(
-                "session",
-                tenant_id=principal.tenant_id,
-            )
-            assert session_record is not None
-            assert session_record.active_execution_id == execution.execution_id
+            assert after_unreadable.session_id is None
             assert calls == ["lookup"]
 
             before_partial = after_unreadable
@@ -1172,8 +994,7 @@ async def _prepare_unresolved_tool_source(
         application.capability(native_checkpoint(database=tmp_path / "native.db"), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('session-tool-recovery-resolution', storage=state) as persistence_1204, Runtime.open(persistence=persistence_1204, features=model_features(_RecoveryToolModels(), application)) as runtime:
-            await runtime.agents.get("default").create_session("session")
-            execution = await runtime.agents.get("default").session("session").start(
+            execution = await runtime.agents.get("default").start(
                 "inspect",
                 idempotency_key="turn-resolution",
             )
@@ -1339,10 +1160,7 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
         )
         assert operation is not None and operation.status is ToolOperationStatus.EFFECT_UNKNOWN
         assert operation.producer_generation == source.producer_generation
-        session = await runtime._state.conversation.sessions.get(
-            "session", tenant_id=runtime.default_principal.tenant_id,
-        )
-        assert session is not None and session.active_execution_id == execution_id
+        assert current.session_id is None
         with pytest.raises(AIError) as unresolved:
             await execution.recover()
         assert unresolved.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
@@ -1387,17 +1205,11 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
         assert effect_log.read_text().splitlines() == [execution_id] * (
             1 + retry_count
         )
-        session_record = await runtime._state.conversation.sessions.get(
-            "session",
-            tenant_id=runtime.default_principal.tenant_id,
-        )
-        assert session_record is not None
-        assert session_record.active_execution_id is None
         checkpoint = await runtime._state.execution.executions.get(
             execution_id,
             tenant_id=runtime.default_principal.tenant_id,
         )
-        assert checkpoint is not None
+        assert checkpoint is not None and checkpoint.session_id is None
         assert checkpoint.recovery_state.value == "completed"
 
         if with_cancel:
@@ -1444,8 +1256,7 @@ async def test_no_worker_cancel_intent_survives_replay_and_recovery(
         application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('recovery-no-worker-cancel', storage=state) as persistence_1374, Runtime.open(persistence=persistence_1374, features=model_features(_ToolModels(), application)) as runtime:
-            await runtime.agents.get("default").create_session("session")
-            execution = await runtime.agents.get("default").session("session").start(
+            execution = await runtime.agents.get("default").start(
                 "inspect",
                 idempotency_key="turn-1",
             )
@@ -1518,276 +1329,163 @@ async def test_no_worker_cancel_intent_survives_replay_and_recovery(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("boundary", ("unknown_write", "recovery_projection"))
 async def test_cancel_at_unknown_effect_boundaries_stays_nonterminal(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    boundary: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str,
 ) -> None:
-    state = PersistenceStorage.sqlite(tmp_path / f"cancel-boundary-{boundary}.db")
-    calls: list[str] = []
-    tool_started = asyncio.Event()
-    release_tool = asyncio.Event()
-    boundary_started = asyncio.Event()
-    release_boundary = asyncio.Event()
-    application = _application(
-        calls,
-        effect_policy="non_replay_safe",
-        effect_log=tmp_path / f"effects-{boundary}.txt",
-        started=tool_started,
-        release=release_tool,
-    )
-    try:
-        application.capability(native_checkpoint(), scope="runtime")
-        application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open(f'cancel-unknown-boundary-{boundary}', storage=state) as persistence_1473, Runtime.open(persistence=persistence_1473, features=model_features(_ToolModels(), application)) as runtime:
-            if boundary == "unknown_write":
-                repository = runtime._state.checkpoint.tools
-                original_mark = repository.mark_effect_unknown
+    from linktools.ai.runtime._regenerable_turn import _RegenerableTurnRunner
 
-                async def pause_unknown_write(*args: Any, **kwargs: Any) -> Any:
-                    boundary_started.set()
-                    await release_boundary.wait()
-                    return await original_mark(*args, **kwargs)
+    database = tmp_path / "state.db"
+    effect_log = tmp_path / "effects.txt"
+    calls = []
+    tool_started, release_tool = asyncio.Event(), asyncio.Event()
+    boundary_started, release_boundary, stopped = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    features = _application(calls, effect_policy="non_replay_safe", effect_log=effect_log,
+                            started=tool_started, release=release_tool)
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
+    notify_stopped = _RegenerableTurnRunner._producer_stopped
 
-                monkeypatch.setattr(
-                    repository,
-                    "mark_effect_unknown",
-                    pause_unknown_write,
-                )
-            else:
-                original_projection = LocalExecutionBackend._commit_recovery_required
+    def producer_stopped(runner, turn):
+        notify_stopped(runner, turn)
+        stopped.set()
 
-                async def pause_recovery_projection(
-                    backend: LocalExecutionBackend,
-                    execution_record: Any,
-                    error: AIError,
-                    effects: Any,
-                    *,
-                    expected_revision: int | None = None,
-                    producer_generation: int | None = None,
-                ) -> Any:
-                    if error.code is ErrorCode.TOOL_EFFECT_UNKNOWN:
-                        boundary_started.set()
-                        await release_boundary.wait()
-                    return await original_projection(
-                        backend,
-                        execution_record,
-                        error,
-                        effects,
-                        expected_revision=expected_revision,
-                        producer_generation=producer_generation,
-                    )
+    monkeypatch.setattr(_RegenerableTurnRunner, "_producer_stopped", producer_stopped)
+    async with (
+        Persistence.open("cancel-unknown-boundary", storage=PersistenceStorage.sqlite(database)) as state,
+        Runtime.open(persistence=state, features=model_features(_ToolModels(), features),
+                     authorization=_NativeSessionPolicy()) as runtime,
+    ):
+        principal = runtime.default_principal
+        repository = state.checkpoint.tools
+        mark_unknown = repository.mark_effect_unknown
+        list_operations = repository.list_by_execution
+        issued = False
 
-                monkeypatch.setattr(
-                    LocalExecutionBackend,
-                    "_commit_recovery_required",
-                    pause_recovery_projection,
-                )
+        async def pause_unknown_write(*args, **kwargs):
+            nonlocal issued
+            if boundary == "unknown_write" and not issued:
+                issued = True
+                boundary_started.set()
+                await release_boundary.wait()
+            return await mark_unknown(*args, **kwargs)
 
-            await runtime.agents.get("default").create_session("session")
-            session = runtime.agents.get("default").session("session")
-            execution = await session.start("inspect", idempotency_key="turn-1")
+        async def pause_recovery_projection(*args, **kwargs):
+            nonlocal issued
+            operations = await list_operations(*args, **kwargs)
+            if boundary == "recovery_projection" and not issued and kwargs.get("_states") and any(
+                item.status is ToolOperationStatus.EFFECT_UNKNOWN for item in operations
+            ):
+                issued = True
+                boundary_started.set()
+                await release_boundary.wait()
+            return operations
+
+        monkeypatch.setattr(repository, "mark_effect_unknown", pause_unknown_write)
+        monkeypatch.setattr(repository, "list_by_execution", pause_recovery_projection)
+        await runtime.sessions.create_turn_session("session", principal=principal)
+        turn = await runtime.sessions.start("session", "inspect", agent="default", principal=principal,
+                                            idempotency_key="turn-1")
+        try:
             await asyncio.wait_for(tool_started.wait(), timeout=10)
-            cancel_task = asyncio.create_task(
-                execution.cancel(idempotency_key="cancel-at-boundary")
-            )
+            [claim] = await list_operations(turn.key.turn_id, tenant_id=principal.tenant_id)
+            assert claim.status is ToolOperationStatus.CLAIMED
+            assert await turn.cancel()
             await asyncio.wait_for(boundary_started.wait(), timeout=10)
-
-            current = await runtime._state.execution.executions.get(
-                execution.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert current is not None
-            assert current.status is ExecutionStatus.CANCELLING
-            assert await runtime._state.execution.executions.get_result(
-                execution.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            ) is None
-            tools = await runtime._state.checkpoint.tools.list_by_execution(
-                execution.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert len(tools) == 1
-            assert tools[0].status is (
-                ToolOperationStatus.CLAIMED
-                if boundary == "unknown_write"
-                else ToolOperationStatus.EFFECT_UNKNOWN
-            )
-            session_record = await runtime._state.conversation.sessions.get(
-                "session",
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert session_record is not None
-            assert session_record.active_execution_id == execution.execution_id
-            cancel_intents = await runtime._state.execution.operations.list_pending(
-                ResourceKind.EXECUTION,
-                execution.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-                limit=100,
-            )
-            assert len(cancel_intents) == 1
-            assert cancel_intents[0].operation_kind is OperationKind.EXECUTION_CANCEL
-            assert cancel_intents[0].status is OperationStatus.PENDING
-
+            row = await state.session_turns.get_turn(turn.key)
+            assert row["state"] == "cancelling" and row["result_json"] is None
+            assert row["generation"] == claim.producer_generation
+            [effect] = await list_operations(turn.key.turn_id, tenant_id=principal.tenant_id)
+            assert effect.status is (ToolOperationStatus.CLAIMED if boundary == "unknown_write"
+                                     else ToolOperationStatus.EFFECT_UNKNOWN)
+            assert (effect.tool_operation_id, effect.owner, effect.fence) == (
+                claim.tool_operation_id, claim.owner, claim.fence)
+            assert (await runtime.history.turn_session_state("session", principal=principal))[
+                "active_turn_id"] == turn.key.turn_id
+        finally:
             release_boundary.set()
-            cancelled = await asyncio.wait_for(cancel_task, timeout=10)
-            assert cancelled.cancelled is False
-            recovered = await runtime._state.execution.executions.get(
-                execution.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert recovered is not None
-            assert recovered.status is ExecutionStatus.RECOVERY_REQUIRED
-            assert await runtime._state.execution.executions.get_result(
-                execution.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            ) is None
-            final_session = await runtime._state.conversation.sessions.get(
-                "session",
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert final_session is not None
-            assert final_session.active_execution_id == execution.execution_id
-            events = await execution.list_events(limit=100)
-            terminal_types = {
-                ExecutionEventType.EXECUTION_SUCCEEDED,
-                ExecutionEventType.EXECUTION_FAILED,
-                ExecutionEventType.EXECUTION_CANCELLED,
-            }
-            assert not any(item.event_type in terminal_types for item in events.items)
-            assert calls == ["lookup"]
-            assert (tmp_path / f"effects-{boundary}.txt").read_text().splitlines() == [
-                execution.execution_id
-            ]
-    finally:
-        release_tool.set()
-        release_boundary.set()
-        await runtime._state.close()
+            release_tool.set()
+        await asyncio.wait_for(stopped.wait(), timeout=10)
+        row = await state.session_turns.get_turn(turn.key)
+        assert row["state"] == "cancelling" and row["result_json"] is None
+        [effect] = await list_operations(turn.key.turn_id, tenant_id=principal.tenant_id)
+        assert effect.status is ToolOperationStatus.EFFECT_UNKNOWN
+        assert (effect.tool_operation_id, effect.owner, effect.fence) == (
+            claim.tool_operation_id, claim.owner, claim.fence)
+        page = await runtime.history.turn_session("session", principal=principal)
+        assert page["session"]["active_turn_id"] == turn.key.turn_id and page["timeline"]["items"] == []
+        assert calls == ["lookup"] and effect_log.read_text().splitlines() == [turn.key.turn_id]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("readback", "expected_error"),
-    (
-        ("claimed", ErrorCode.STORAGE_RECOVERY_REQUIRED),
-        ("unavailable", ErrorCode.STORAGE_RECOVERY_REQUIRED),
-    ),
-)
+@pytest.mark.parametrize("readback", ("claimed", "unavailable"))
 async def test_unverified_unknown_effect_write_does_not_terminalize_execution(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    readback: str,
-    expected_error: ErrorCode,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, readback: str,
 ) -> None:
-    state = PersistenceStorage.sqlite(tmp_path / f"unknown-write-{readback}.db")
-    calls: list[str] = []
-    tool_started = asyncio.Event()
-    release_tool = asyncio.Event()
-    write_attempted = asyncio.Event()
-    application = _application(
-        calls,
-        effect_policy="non_replay_safe",
-        effect_log=tmp_path / f"effects-unknown-write-{readback}.txt",
-        started=tool_started,
-        release=release_tool,
-    )
-    close_failure_expected = False
-    try:
-        application.capability(native_checkpoint(), scope="runtime")
-        application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open(f'unknown-write-{readback}', storage=state) as persistence_1633, Runtime.open(persistence=persistence_1633, features=model_features(_ToolModels(), application)) as runtime:
-            source_group = persistence_1633.execution.executions.state_store.storage_group
-            owners = tuple(persistence_1633._runtime_owners)
-            repository = runtime._state.checkpoint.tools
-            original_get = repository.get_operation
+    from linktools.ai.runtime._regenerable_turn import _RegenerableTurnRunner
 
-            async def fail_unknown_write(*args: Any, **kwargs: Any) -> Any:
-                write_attempted.set()
-                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+    database = tmp_path / "state.db"
+    effect_log = tmp_path / "effects.txt"
+    calls = []
+    tool_started, release_tool = asyncio.Event(), asyncio.Event()
+    attempted, stopped = asyncio.Event(), asyncio.Event()
+    proof_reads = []
+    features = _application(calls, effect_policy="non_replay_safe", effect_log=effect_log,
+                            started=tool_started, release=release_tool)
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
+    notify_stopped = _RegenerableTurnRunner._producer_stopped
 
-            async def read_unknown_write(
-                operation_id: str,
-                *,
-                tenant_id: str,
-            ) -> Any:
-                if readback == "unavailable" and write_attempted.is_set():
+    def producer_stopped(runner, turn):
+        notify_stopped(runner, turn)
+        stopped.set()
+
+    monkeypatch.setattr(_RegenerableTurnRunner, "_producer_stopped", producer_stopped)
+    async with (
+        Persistence.open("unknown-write", storage=PersistenceStorage.sqlite(database)) as state,
+        Runtime.open(persistence=state, features=model_features(_ToolModels(), features),
+                     authorization=_NativeSessionPolicy()) as runtime,
+    ):
+        principal = runtime.default_principal
+        repository = state.checkpoint.tools
+        get_operation = repository.get_operation
+
+        async def fail_unknown_write(*_args, **_kwargs):
+            attempted.set()
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+
+        async def read_operation(operation_id, *, tenant_id):
+            if attempted.is_set():
+                proof_reads.append(operation_id)
+                if readback == "unavailable":
                     raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-                return await original_get(operation_id, tenant_id=tenant_id)
+            return await get_operation(operation_id, tenant_id=tenant_id)
 
-            async def fail_cancel_reconciliation(*args: Any, **kwargs: Any) -> Any:
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-
-            monkeypatch.setattr(repository, "mark_effect_unknown", fail_unknown_write)
-            monkeypatch.setattr(repository, "reconcile_turn_claim_in_transaction", fail_cancel_reconciliation)
-            monkeypatch.setattr(repository, "get_operation", read_unknown_write)
-
-            await runtime.agents.get("default").create_session("session")
-            session = runtime.agents.get("default").session("session")
-            execution = await session.start("inspect", idempotency_key="turn-1")
-            await asyncio.wait_for(tool_started.wait(), timeout=10)
-            with pytest.raises(AIError) as cancel_error:
-                await asyncio.wait_for(
-                    execution.cancel(idempotency_key="cancel-unverified-write"), timeout=10,
-                )
-            assert cancel_error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
-            assert write_attempted.is_set()
-
-            current = await runtime._state.execution.executions.get(
-                execution.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert current is not None
-            assert current.status is ExecutionStatus.CANCELLING
-            assert await runtime._state.execution.executions.get_result(
-                execution.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            ) is None
-            tools = await runtime._state.checkpoint.tools.list_by_execution(
-                execution.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert len(tools) == 1
-            assert tools[0].status is ToolOperationStatus.CLAIMED
-            session_record = await runtime._state.conversation.sessions.get(
-                "session",
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert session_record is not None
-            assert session_record.active_execution_id == execution.execution_id
-            backend = runtime._execution_service.runtime_backend()
-            failure = backend.worker_failure(
-                execution.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert failure is not None
-            assert failure.code is expected_error
-            events = await execution.list_events(limit=100)
-            terminal_types = {
-                ExecutionEventType.EXECUTION_SUCCEEDED,
-                ExecutionEventType.EXECUTION_FAILED,
-                ExecutionEventType.EXECUTION_CANCELLED,
-            }
-            assert not any(item.event_type in terminal_types for item in events.items)
-            assert calls == ["lookup"]
-            assert (
-                tmp_path / f"effects-unknown-write-{readback}.txt"
-            ).read_text().splitlines() == [execution.execution_id]
-            close_failure_expected = True
-    except AIError as close_error:
-        if not close_failure_expected:
-            raise
-        assert close_error.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
-    finally:
-        release_tool.set()
+        await runtime.sessions.create_turn_session("session", principal=principal)
+        turn = await runtime.sessions.start("session", "inspect", agent="default", principal=principal,
+                                            idempotency_key="turn-1")
         try:
-            with pytest.raises(AIError) as persistence_error:
-                await persistence_1633.close()
-            assert persistence_error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
-            assert persistence_1633.ready and tuple(persistence_1633._runtime_owners) == owners
+            await asyncio.wait_for(tool_started.wait(), timeout=10)
+            [claim] = await repository.list_by_execution(turn.key.turn_id, tenant_id=principal.tenant_id)
+            with monkeypatch.context() as fault:
+                fault.setattr(repository, "mark_effect_unknown", fail_unknown_write)
+                fault.setattr(repository, "get_operation", read_operation)
+                assert await turn.cancel()
+                await asyncio.wait_for(stopped.wait(), timeout=10)
+                assert attempted.is_set() and set(proof_reads) == {claim.tool_operation_id}
+            row = await state.session_turns.get_turn(turn.key)
+            assert row["state"] == "cancelling" and row["result_json"] is None
+            assert row["generation"] == claim.producer_generation
+            assert await repository.get_operation(claim.tool_operation_id, tenant_id=principal.tenant_id) == claim
+            assert claim.status is ToolOperationStatus.CLAIMED
+            page = await runtime.history.turn_session("session", principal=principal)
+            assert page["session"]["active_turn_id"] == turn.key.turn_id and page["timeline"]["items"] == []
+            assert calls == ["lookup"] and effect_log.read_text().splitlines() == [turn.key.turn_id]
         finally:
-            # Keep the unknown effect and producer ownership; dispose only this fixture's source.
-            await source_group.close()
-            await source_group.context.close()
-            assert source_group.context.closed
+            release_tool.set()
+
+    async with Persistence.open("unknown-write", storage=PersistenceStorage.sqlite(database), read_only=True) as state:
+        row = await state.session_turn_reader.get_turn(turn.key)
+        assert row["state"] == "cancelling" and row["result_json"] is None
+        owner = await state.session_turn_reader.get_session("session")
+        assert owner["active_turn_id"] == turn.key.turn_id.encode() and owner["last_turn_no"] == 0
+        assert await state.checkpoint.tools.get_operation(claim.tool_operation_id, tenant_id=principal.tenant_id) == claim
 
 
 @pytest.mark.asyncio
@@ -2034,7 +1732,7 @@ def unconfirmed_tool_source_copy(
             with pytest.MonkeyPatch.context() as patch:
                 patch.setenv("LINKTOOLS_TEST_STEP_DATABASE", str(source / "native.db"))
                 await _exit_at_boundary(
-                    source / "runtime.db", source / "effects.txt", "sqlite", "effect_unconfirmed",
+                    source / "runtime.db", source / "effects.txt", "sqlite", "standalone_effect_unconfirmed",
                 )
             frozen = source.rename(source.with_name(source.name + "-stopped"))
         # The process is dead. Copy raw databases and their WAL/SHM sidecars
@@ -2069,7 +1767,7 @@ async def test_abandoned_tool_claim_waits_for_explicit_recovery_after_restart(
                 execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             )
-            assert current is not None
+            assert current is not None and current.session_id is None
             assert current.status is ExecutionStatus.STARTED
             tools = await runtime._state.checkpoint.tools.list_by_execution(
                 execution_id,
@@ -2094,6 +1792,13 @@ async def test_abandoned_tool_claim_waits_for_explicit_recovery_after_restart(
             )
             assert recovered is not None
             assert recovered.status is ExecutionStatus.RECOVERY_REQUIRED
+            [unresolved] = await runtime._state.checkpoint.tools.list_by_execution(
+                execution_id, tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert unresolved.status is ToolOperationStatus.EFFECT_UNKNOWN
+            assert (unresolved.tool_operation_id, unresolved.owner, unresolved.fence, unresolved.producer_generation) == (
+                tools[0].tool_operation_id, tools[0].owner, tools[0].fence, tools[0].producer_generation,
+            )
             assert calls == []
             assert effect_log.read_text().splitlines() == committed_effects
     finally:
@@ -2133,11 +1838,7 @@ async def test_idempotent_replay_does_not_claim_active_tool_execution(
                 execution_id, tenant_id=runtime.default_principal.tenant_id,
             )
 
-            same = (
-                await runtime.agents.get("default")
-                .session("session")
-                .start("inspect", idempotency_key="turn-1")
-            )
+            same = await runtime.agents.get("default").start("inspect", idempotency_key="turn-1")
             assert same.execution_id == execution_id
             assert await runtime._state.execution.executions.get(
                 execution_id, tenant_id=runtime.default_principal.tenant_id,
@@ -2146,6 +1847,9 @@ async def test_idempotent_replay_does_not_claim_active_tool_execution(
                 execution_id, tenant_id=runtime.default_principal.tenant_id,
             ) == before_head
             assert not runtime._execution_service.runtime_backend().worker_installed(execution_id)
+            assert await runtime._state.checkpoint.tools.list_by_execution(
+                execution_id, tenant_id=runtime.default_principal.tenant_id,
+            ) == tools
             with pytest.raises(AIError) as raised:
                 await same.recover()
                 await same.wait(timeout_seconds=10)
@@ -2167,200 +1871,149 @@ async def test_idempotent_replay_does_not_claim_active_tool_execution(
         await runtime._state.close()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("phase", "expected_status"),
-    (
-        ("handoff_prepared", ExecutionStatus.STARTED),
-        ("terminal_before_handoff_complete", ExecutionStatus.SUCCEEDED),
-    ),
-)
-async def test_split_storage_handoff_reconciles_prepared_checkpoint_after_restart(
-    tmp_path: Path,
-    phase: str,
-    expected_status: ExecutionStatus,
-) -> None:
-    database = tmp_path / "handoff-restart.db"
-    effect_log = tmp_path / "handoff-effects.txt"
-    await _exit_at_boundary(database, effect_log, "split_sqlite", phase)
-    committed_effects = effect_log.read_text().splitlines()
-    assert len(committed_effects) == 1
-    execution_id = committed_effects[0]
+def _split_terminal_setup(root):
+    from linktools.ai.capability import StepPersistenceCapability
+    from linktools.ai.persistence import PersistencePlan
+    from linktools.ai.storage import StorageRoute
 
-    inspection = _split_sqlite_storage(database)
-    inspection = Persistence(inspection)
-    await inspection.initialize(
-        namespace="session-tool-crash",
-        tenant_id="default",
-    )
-    current = await inspection.execution.executions.get(
-        execution_id,
-        tenant_id="default",
-    )
-    checkpoint = await inspection.execution.executions.get(
-        execution_id,
-        tenant_id="default",
-    )
-    assert current is not None
-    assert current.status is expected_status
-    assert checkpoint is not None
-    assert checkpoint.recovery_state.value == "handoff"
-    assert checkpoint.recovery.handoff_phase.value == "prepared"
-    await inspection.close()
+    async def model(_messages, _info):
+        with (root / "provider.log").open("a") as output:
+            output.write("model\n")
+        return ModelResponse(parts=[TextPart("durable answer")])
 
-    state = _split_sqlite_storage(database)
-    calls: list[str] = []
-    application = _application(
-        calls,
-        effect_policy="non_replay_safe",
-        effect_log=effect_log,
+    step = StorageRoute.sqlite(root / "step.db")
+    storage = PersistenceStorage(PersistencePlan(
+        conversation=StorageRoute.sqlite(root / "conversation.db"), execution=step, checkpoint=step,
+    ))
+    features = RuntimeFeatures("application")
+    features.capability(StepPersistenceCapability(), scope="runtime")
+    features.agent("default", model="default", allow_tools=(), allow_subagents=())
+    return storage, model_features(_Models(_UsageFunctionModel(model)), features)
+
+
+async def _send_split_terminal(runtime):
+    return await runtime.sessions.start(
+        "session", "question", agent="default", principal=runtime.default_principal, idempotency_key="first",
     )
-    try:
-        application.capability(native_checkpoint(), scope="runtime")
-        application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('session-tool-crash', storage=state) as persistence_2161, Runtime.open(persistence=persistence_2161, features=model_features(_ToolModels(), application), auto_recover=True) as runtime:
-            session = runtime.agents.get("default").session("session")
-            execution = await session.start("inspect", idempotency_key="turn-1")
-            result = (await execution.wait(timeout_seconds=15)).result
-            assert execution.execution_id == execution_id
-            assert result.status is ExecutionStatus.SUCCEEDED
-            assert calls == []
-            assert effect_log.read_text().splitlines() == committed_effects
-            completed = await runtime._state.execution.executions.get(
-                execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert completed is not None
-            assert completed.recovery_state.value == "completed"
-            assert completed.recovery.handoff_phase.value == "completed"
-            session_record = await runtime._state.conversation.sessions.get(
-                "session",
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert session_record is not None
-            assert session_record.active_execution_id is None
-            history = await session.history()
-            assert _relevant_kinds(history.items) == [
-                "user",
-                "tool_call",
-                "tool_result",
-                "assistant",
-            ]
-    finally:
-        await runtime._state.close()
+
+
+def _crash_split_terminal(root, phase):
+    import os
+
+    from linktools.ai.persistence.turns import SqlSessionTurns
+
+    publish = SqlSessionTurns.publish_split_terminal
+
+    async def crashing_publish(store, key, **kwargs):
+        assert kwargs["source"].phase == "sealed" and kwargs["state"] == "succeeded"
+        (root / "turn-id").write_text(key.turn_id)
+        if phase == "target-committed":
+            assert await publish(store, key, **kwargs)
+        os._exit(91)
+
+    SqlSessionTurns.publish_split_terminal = crashing_publish
+
+    async def main():
+        storage, features = _split_terminal_setup(root)
+        async with (
+            Persistence.open("split-terminal", storage=storage) as state,
+            Runtime.open(persistence=state, features=features, authorization=_NativeSessionPolicy()) as runtime,
+        ):
+            await runtime.sessions.create_turn_session("session", principal=runtime.default_principal)
+            turn = await _send_split_terminal(runtime)
+            await turn.wait_final(timeout_seconds=10)
+        raise AssertionError("expected subprocess exit")
+
+    asyncio.run(main())
 
 
 @pytest.mark.asyncio
-async def test_split_storage_success_handoff_wins_cancel_race(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    state = _split_sqlite_storage(tmp_path / "handoff-cancel-race.db")
-    calls: list[str] = []
-    handoff_started = asyncio.Event()
-    release_handoff = asyncio.Event()
-    application = _application(calls)
-    original_resolve = LocalExecutionBackend._resolve_handoff_conversation
+@pytest.mark.parametrize("phase", ("source-sealed", "target-committed"))
+async def test_split_storage_handoff_reconciles_prepared_checkpoint_after_restart(tmp_path: Path, phase: str) -> None:
+    from linktools.ai.persistence.turns import SessionTurnKey
 
-    async def pause_handoff(
-        backend: LocalExecutionBackend,
-        checkpoint: Any,
-        handoff: Any,
-    ) -> None:
-        handoff_started.set()
-        await release_handoff.wait()
-        await original_resolve(backend, checkpoint, handoff)
+    from .test_session_tool_process_recovery import _expire, _run_until_crash
 
-    monkeypatch.setattr(
-        LocalExecutionBackend,
-        "_resolve_handoff_conversation",
-        pause_handoff,
-    )
-    try:
-        application.capability(native_checkpoint(), scope="runtime")
-        application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('split-storage-handoff-cancel-race', storage=state) as persistence_2226, Runtime.open(persistence=persistence_2226, features=model_features(_ToolModels(), application)) as runtime:
-            assert (
-                runtime._state.execution.executions.state_store.storage_group
-                is runtime._state.execution.executions.state_store.storage_group
-            )
-            assert (
-                runtime._state.execution.executions.state_store.storage_group
-                is not runtime._state.conversation.sessions.state_store.storage_group
-            )
-            await runtime.agents.get("default").create_session("session")
-            session = runtime.agents.get("default").session("session")
-            execution = await session.start("inspect", idempotency_key="turn-1")
-            await asyncio.wait_for(handoff_started.wait(), timeout=10)
+    await _run_until_crash(_crash_split_terminal, tmp_path, phase)
+    key = SessionTurnKey("session", (tmp_path / "turn-id").read_text())
+    storage, features = _split_terminal_setup(tmp_path)
+    async with (
+        Persistence.open("split-terminal", storage=storage) as state,
+        Runtime.open(persistence=state, features=features, authorization=_NativeSessionPolicy()) as runtime,
+    ):
+        principal = runtime.default_principal
+        turns = state.session_turns
+        source = await runtime.sessions._turn_runner._split_recovery_source()
+        sealed = await source._read_pin(source._identity(key, 1))
+        assert sealed.phase == "sealed" and sealed.pin.terminal_state == "succeeded"
+        row = await turns.get_turn(key)
+        if phase == "source-sealed":
+            assert row["state"] == "accepted" and row["split_source_receipt"] is None
+            assert (await turns.get_session("session"))["active_turn_id"] == key.turn_id.encode()
+            await _expire(turns, key, generation=1)
+            assert await runtime.sessions.recover_turn("session", key.turn_id, principal=principal)
+            published = await source._read_pin(source._identity(key, 1))
+            assert published.phase == "published" and published.pin == sealed.pin
+        else:
+            assert (row["state"], row["split_source_receipt"]) == ("succeeded", sealed.pin.receipt_id.encode())
+        assert not await runtime.sessions.recover_turn("session", key.turn_id, principal=principal)
+        replay = await _send_split_terminal(runtime)
+        assert replay.key == key
+        terminal = await replay.wait_final(timeout_seconds=10)
+        assert terminal.status is ExecutionStatus.SUCCEEDED
+        assert terminal.view["output"] == {"text": "durable answer"}
+        row = await turns.get_turn(key)
+        assert (row["state"], row["generation"]) == ("succeeded", 1)
+        assert row["split_source_receipt"] == sealed.pin.receipt_id.encode()
+        assert row["result_json"]["transcript"] == sealed.pin.transcript.to_json()
+        page = await runtime.history.turn_session("session", principal=principal)
+        assert page["session"]["active_turn_id"] is None and page["timeline"]["items"] == [terminal.view]
+    assert (tmp_path / "provider.log").read_text().splitlines() == ["model"]
 
-            prepared = await runtime._state.execution.executions.get(
-                execution.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert prepared is not None
-            assert prepared.recovery.handoff_phase.value == "prepared"
-            current = await runtime._state.execution.executions.get(
-                execution.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert current is not None
-            assert current.status is ExecutionStatus.FINALIZING
 
-            first_cancel = await execution.cancel(
-                idempotency_key="cancel-during-success-handoff"
-            )
-            assert first_cancel.cancelled is False
-            replayed_cancel = await execution.cancel(
-                idempotency_key="cancel-during-success-handoff"
-            )
-            assert replayed_cancel.cancelled is False
+@pytest.mark.asyncio
+async def test_split_storage_success_handoff_wins_cancel_race(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from linktools.ai.persistence._split_step_source import SqlSplitStepSource
 
-            release_handoff.set()
-            result = (await execution.wait(timeout_seconds=15)).result
-            assert result.status is ExecutionStatus.SUCCEEDED
-            final_execution = await runtime._state.execution.executions.get(
-                execution.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
+    target_committed = asyncio.Event()
+    release = asyncio.Event()
+    reconcile = SqlSplitStepSource.reconcile
+
+    async def paused(source, connection, **kwargs):
+        target_committed.set()
+        await release.wait()
+        return await reconcile(source, connection, **kwargs)
+
+    monkeypatch.setattr(SqlSplitStepSource, "reconcile", paused)
+    storage, features = _split_terminal_setup(tmp_path)
+    async with (
+        Persistence.open("split-terminal", storage=storage) as state,
+        Runtime.open(persistence=state, features=features, authorization=_NativeSessionPolicy()) as runtime,
+    ):
+        principal = runtime.default_principal
+        await runtime.sessions.create_turn_session("session", principal=principal)
+        turn = await _send_split_terminal(runtime)
+        try:
+            await asyncio.wait_for(target_committed.wait(), 10)
+            source = await runtime.sessions._turn_runner._split_recovery_source()
+            sealed = await source._read_pin(source._identity(turn.key, 1))
+            assert sealed.phase == "sealed"
+            row = await state.session_turns.get_turn(turn.key)
+            assert (row["state"], row["generation"], row["split_source_receipt"]) == (
+                "succeeded", 1, sealed.pin.receipt_id.encode(),
             )
-            assert final_execution is not None
-            assert final_execution.status is ExecutionStatus.SUCCEEDED
-            completed = await runtime._state.execution.executions.get(
-                execution.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert completed is not None
-            assert completed.recovery_state.value == "completed"
-            assert completed.recovery.handoff_phase.value == "completed"
-            events = await execution.list_events(limit=100)
-            terminal_types = [
-                item.event_type
-                for item in events.items
-                if item.event_type
-                in {
-                    ExecutionEventType.EXECUTION_SUCCEEDED,
-                    ExecutionEventType.EXECUTION_FAILED,
-                    ExecutionEventType.EXECUTION_CANCELLED,
-                }
-            ]
-            assert terminal_types == [ExecutionEventType.EXECUTION_SUCCEEDED]
-            session_record = await runtime._state.conversation.sessions.get(
-                "session",
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert session_record is not None
-            assert session_record.active_execution_id is None
-            assert session_record.continuation is not None
-            history = await session.history()
-            assert _relevant_kinds(history.items) == [
-                "user",
-                "tool_call",
-                "tool_result",
-                "assistant",
-            ]
-            assert calls == ["lookup"]
-    finally:
-        release_handoff.set()
-        await runtime._state.close()
+            assert not await turn.cancel()
+            assert not await turn.cancel()
+        finally:
+            release.set()
+        terminal = await turn.wait_final(timeout_seconds=10)
+        published = await source._read_pin(source._identity(turn.key, 1))
+        assert published.phase == "published" and published.pin == sealed.pin
+        assert terminal.status is ExecutionStatus.SUCCEEDED
+        assert terminal.view["output"] == {"text": "durable answer"}
+        page = await runtime.history.turn_session("session", principal=principal)
+        assert page["session"]["active_turn_id"] is None and page["timeline"]["items"] == [terminal.view]
+    assert (tmp_path / "provider.log").read_text().splitlines() == ["model"]
 
 
 @pytest.mark.asyncio
@@ -2563,6 +2216,61 @@ async def test_conversation_rebases_cumulative_native_tool_checkpoint() -> None:
         await state.close()
 
 
+def _crash_session_bootstrap(root, phase, turn_id=None):
+    import os
+
+    from linktools.ai.persistence.turns import SessionTurnKey, SqlSessionTurns
+    from linktools.ai.runtime._regenerable_turn import _RegenerableTurnRunner
+    from linktools.ai.runtime._step_store import RuntimeStepStore
+
+    from .test_session_tool_process_recovery import _NAME, _SESSION, _expire, _features, _send
+
+    original_accept = SqlSessionTurns.accept
+    original_step = RuntimeStepStore.commit_step
+
+    async def accept(store, key, **kwargs):
+        accepted = await original_accept(store, key, **kwargs)
+        assert accepted
+        (root / "turn-id").write_text(key.turn_id)
+        if phase == "activated":
+            os._exit(91)
+        return accepted
+
+    async def commit_step(store, **kwargs):
+        await original_step(store, **kwargs)
+        snapshot = kwargs.get("snapshot")
+        if (phase == "request_checkpoint" and snapshot is not None and snapshot.messages
+                and not any(isinstance(message, ModelResponse) for message in snapshot.messages)):
+            os._exit(91)
+
+    async def finish(runner, turn, **kwargs):
+        assert phase == "recovered_before_terminal"
+        assert kwargs["state"] == "succeeded" and turn.generation == 2
+        os._exit(91)
+
+    if phase == "recovered_before_terminal":
+        _RegenerableTurnRunner._finish_retained_turn = finish
+    else:
+        SqlSessionTurns.accept = accept
+        RuntimeStepStore.commit_step = commit_step
+
+    async def run():
+        async with (
+            Persistence.open(_NAME, storage=PersistenceStorage.from_root(root / "runtime")) as state,
+            Runtime.open(persistence=state, features=_features(root), authorization=_NativeSessionPolicy()) as runtime,
+        ):
+            if phase == "recovered_before_terminal":
+                await _expire(state.session_turns, SessionTurnKey(_SESSION, turn_id), generation=1)
+                assert await runtime.sessions.recover_turn(_SESSION, turn_id, principal=runtime.default_principal)
+            else:
+                await runtime.agents.get().create_session(_SESSION)
+                turn = await _send(runtime)
+                await turn.wait_final(timeout_seconds=10)
+        raise AssertionError("bootstrap boundary was not reached")
+
+    asyncio.run(run())
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "phase", (
@@ -2572,77 +2280,114 @@ async def test_conversation_rebases_cumulative_native_tool_checkpoint() -> None:
         "effect_unconfirmed",
     )
 )
-async def test_recovery_preserves_bootstrap_and_effect_confirmation_boundaries(
-    tmp_path: Path, phase: str
-) -> None:
-    database = tmp_path / "runtime.db"
-    effect_log = tmp_path / "effects.txt"
-    if phase == "recovered_before_terminal":
-        await _exit_at_boundary(database, effect_log, "sqlite", "tool_completed")
-    await _exit_at_boundary(database, effect_log, "sqlite", phase)
-    calls: list[str] = []
-    application = _application(calls, effect_policy="non_replay_safe", effect_log=effect_log)
-    application.capability(native_checkpoint(), scope="runtime")
-    application.capability(TraceCapability(), scope="runtime")
-    async with Persistence.open('session-tool-crash', storage=PersistenceStorage.sqlite(database)) as persistence_2549, Runtime.open(persistence=persistence_2549, features=model_features(_ToolModels(), application)) as runtime:
-        session = runtime.agents.get("default").session("session")
-        if phase == "effect_unconfirmed":
-            with pytest.raises(AIError) as raised:
-                same = await session.start("inspect", idempotency_key="turn-1")
-                await same.recover()
-                await same.wait(timeout_seconds=10)
-            assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
-            assert calls == []
+async def test_recovery_preserves_bootstrap_and_effect_confirmation_boundaries(tmp_path: Path, phase: str) -> None:
+    from linktools.ai.persistence.turns import SessionTurnKey
+
+    from .test_session_tool_process_recovery import (
+        _NAME, _SESSION, _crash_native_process, _expire, _features, _run_until_crash, _send,
+    )
+
+    effect_log = tmp_path / "effects.log"
+    provider_log = tmp_path / "provider.log"
+    interrupted = phase == "effect_unconfirmed"
+    if phase in ("activated", "request_checkpoint"):
+        await _run_until_crash(_crash_session_bootstrap, tmp_path, phase)
+        turn_id = (tmp_path / "turn-id").read_text()
+        assert not effect_log.exists() and not provider_log.exists()
+    else:
+        await _run_until_crash(
+            _crash_native_process, str(tmp_path), "tool_interrupted" if interrupted else "tool_completed",
+        )
+        [turn_id] = effect_log.read_text().splitlines()
+        if not interrupted:
+            await _run_until_crash(_crash_session_bootstrap, tmp_path, phase, turn_id)
+
+    predecessor = 2 if phase == "recovered_before_terminal" else 1
+    key = SessionTurnKey(_SESSION, turn_id)
+    async with (
+        Persistence.open(_NAME, storage=PersistenceStorage.from_root(tmp_path / "runtime")) as state,
+        Runtime.open(persistence=state, features=_features(tmp_path, interrupted=interrupted),
+                     authorization=_NativeSessionPolicy()) as runtime,
+    ):
+        turns = state.session_turns
+        principal = runtime.default_principal
+        assert (await turns.get_turn(key))["generation"] == predecessor
+        before = await state.checkpoint.tools.list_by_execution(turn_id, tenant_id=runtime.tenant_id)
+        if phase in ("activated", "request_checkpoint"):
+            assert not before
         else:
-            same = await session.start("inspect", idempotency_key="turn-1")
-            await same.recover()
-            result = (await same.wait(timeout_seconds=10)).result
-            assert result.status is ExecutionStatus.SUCCEEDED, result
-            assert calls == (["lookup"] if phase in {"activated", "request_checkpoint"} else [])
-            history = await session.history()
-            assert _relevant_kinds(history.items) == [
-                "user",
-                "tool_call",
-                "tool_result",
-                "assistant",
-            ]
-        assert len(effect_log.read_text().splitlines()) == 1
+            [original] = before
+            assert original.tool_call_id == "stable-call"
+            assert original.status is (ToolOperationStatus.CLAIMED if interrupted else ToolOperationStatus.COMPLETED)
+        await _expire(turns, key, generation=predecessor)
+        if phase == "activated":
+            # An absent checkpoint cannot prove that the previous host never
+            # dispatched. Refuse recovery without advancing its expired lease.
+            expired = await turns.get_turn(key)
+            for _ in range(2):
+                with pytest.raises(AIError) as unavailable:
+                    await runtime.sessions.recover_turn(_SESSION, turn_id, principal=principal)
+                assert unavailable.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+                assert await turns.get_turn(key) == expired
+            assert (await turns.get_session(_SESSION))["active_turn_id"] == key.turn_id.encode()
+            assert not provider_log.exists() and not effect_log.exists()
+            return
+
+        assert await runtime.sessions.recover_turn(_SESSION, turn_id, principal=principal)
+        recovered = await _send(runtime)
+        assert recovered.key == key
+        terminal = await recovered.wait_final(timeout_seconds=10)
+        assert terminal.status is ExecutionStatus.SUCCEEDED
+        assert terminal.view["output"] == {"text": "done"}
+        assert terminal.view["conversation_committed"] is True
+        page = await runtime.history.turn_session(_SESSION, principal=principal)
+        assert page["session"]["active_turn_id"] is None
+        assert page["timeline"]["items"] == [terminal.view]
+        receipts = await state.checkpoint.tools.list_by_execution(turn_id, tenant_id=runtime.tenant_id)
+        if before:
+            [original] = before
+            [matching] = [item for item in receipts if item.tool_operation_id == original.tool_operation_id]
+            assert matching == original
+        else:
+            [receipt] = receipts
+            assert receipt.status is ToolOperationStatus.COMPLETED
+    assert effect_log.read_text().splitlines() == [turn_id]
 
 
 @pytest.mark.asyncio
-async def test_tool_effect_waits_for_durable_response_checkpoint(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    checkpoint = native_checkpoint()
-    original = checkpoint.store.save_snapshot
-    calls: list[str] = []
-    rejected = False
+async def test_tool_effect_waits_for_durable_response_checkpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from linktools.ai.persistence import SqlStepStore
 
-    async def reject_response(snapshot) -> None:
-        nonlocal rejected
-        if any(isinstance(message, ModelResponse)
-               and any(isinstance(part, ToolCallPart) for part in message.parts)
-               for message in snapshot.messages):
-            rejected = True
+    from .test_session_tool_process_recovery import _NAME, _SESSION, _features, _send
+
+    original = SqlStepStore.write_prepared_step
+    rejected = asyncio.Event()
+
+    async def reject_response(store, transaction, prepared, **kwargs):
+        snapshot = prepared.snapshot
+        if snapshot is not None and any(
+            isinstance(part, ToolCallPart) and part.tool_name == "effect"
+            for message in snapshot.messages if isinstance(message, ModelResponse)
+            for part in message.parts
+        ):
+            rejected.set()
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
-        await original(snapshot)
+        return await original(store, transaction, prepared, **kwargs)
 
-    monkeypatch.setattr(checkpoint.store, "save_snapshot", reject_response)
-    with pytest.raises(AIError) as raised:
-        application = _application(calls)
-        application.capability(checkpoint, scope="runtime")
-        application.capability(TraceCapability(), scope="runtime")
-        async with Persistence.open('pre-effect-checkpoint', storage=PersistenceStorage.in_memory()) as persistence_2611, Runtime.open(persistence=persistence_2611, features=model_features(_ToolModels(), application)) as runtime:
-            await runtime.agents.get("default").create_session("session")
-            execution = (
-                await runtime.agents.get("default")
-                .session("session")
-                .start("inspect", idempotency_key="turn-1")
-            )
-            await execution.wait(timeout_seconds=10)
-    assert raised.value.code is ErrorCode.STORAGE_UNAVAILABLE
-    assert rejected
-    assert calls == []
+    monkeypatch.setattr(SqlStepStore, "write_prepared_step", reject_response)
+    async with (
+        Persistence.open(_NAME, storage=PersistenceStorage.from_root(tmp_path / "runtime")) as state,
+        Runtime.open(persistence=state, features=_features(tmp_path), authorization=_NativeSessionPolicy()) as runtime,
+    ):
+        await runtime.agents.get().create_session(_SESSION)
+        turn = await _send(runtime)
+        await asyncio.wait_for(rejected.wait(), 10)
+        terminal = await turn.wait_final(timeout_seconds=10)
+        assert terminal.status is ExecutionStatus.FAILED
+        assert terminal.view["error_code"] == ErrorCode.STORAGE_UNAVAILABLE.value
+        assert not await state.checkpoint.tools.list_by_execution(turn.key.turn_id, tenant_id=runtime.tenant_id)
+    assert (tmp_path / "provider.log").read_text().splitlines() == ["initial"]
+    assert not (tmp_path / "effects.log").exists()
 
 
 @pytest.mark.asyncio
@@ -2650,6 +2395,83 @@ async def test_tool_effect_waits_for_durable_response_checkpoint(
 async def test_terminal_transaction_rollback_keeps_session_cursor_unchanged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
 ) -> None:
+    if backend == "sqlite":
+        from linktools.ai.runtime._regenerable_turn import _RegenerableTurnRunner
+
+        storage = PersistenceStorage.sqlite(tmp_path / "session-terminal-rollback.db")
+        calls: list[str] = []
+        prompts = []
+
+        async def model(messages, _info):
+            if any(isinstance(part, ToolReturnPart) for part in messages[-1].parts):
+                return ModelResponse(parts=[TextPart("done")])
+            assert not any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts)
+            prompts.append([part.content for message in messages if isinstance(message, ModelRequest)
+                            for part in message.parts if isinstance(part, UserPromptPart)])
+            return ModelResponse(parts=[ToolCallPart("lookup", {}, tool_call_id=f"lookup-{len(prompts)}")])
+
+        features = _application(calls)
+        features.capability(SessionCapability(checkpoints=True), scope="runtime")
+        stopped = asyncio.Event()
+        notify_stopped = _RegenerableTurnRunner._producer_stopped
+
+        def producer_stopped(runner, turn):
+            notify_stopped(runner, turn)
+            stopped.set()
+
+        async with (
+            Persistence.open("session-atomic-terminal", storage=storage) as state,
+            Runtime.open(persistence=state, features=model_features(_Models(_UsageFunctionModel(model)), features),
+                         authorization=_NativeSessionPolicy()) as runtime,
+        ):
+            principal = runtime.default_principal
+            sessions, store = runtime.sessions, state.session_turns
+            await sessions.create_turn_session("session", principal=principal)
+            before = await runtime.history.turn_session_state("session", principal=principal)
+            finish = store._finish_in_group
+            injected = []
+
+            async def rollback(transaction, prepared):
+                assert await finish(transaction, prepared)
+                injected.append(True)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+            with monkeypatch.context() as fault:
+                fault.setattr(store, "_finish_in_group", rollback)
+                fault.setattr(_RegenerableTurnRunner, "_producer_stopped", producer_stopped)
+                turn = await sessions.start("session", "inspect", agent="default", principal=principal,
+                                            idempotency_key="turn-1")
+                await asyncio.wait_for(stopped.wait(), timeout=10)
+
+            assert injected == [True] and calls == ["lookup"]
+            active = await runtime.history.turn_session("session", principal=principal)
+            assert active["session"]["last_turn_no"] == before["last_turn_no"]
+            assert active["session"]["active_turn_id"] == turn.key.turn_id
+            assert active["timeline"]["items"] == []
+            row = await store.get_turn(turn.key)
+            assert row["state"] == "accepted" and row["result_json"] is None
+
+            replay = await sessions.start("session", "inspect", agent="default", principal=principal,
+                                          idempotency_key="turn-1")
+            assert replay.key == turn.key and calls == ["lookup"]
+            async with store._context.engine.begin() as connection:
+                expired = await connection.execute(store._turns.update().filter_by(
+                    **store._turn_values(turn.key), generation=row["generation"],
+                ).values(lease_until=0))
+                assert expired.rowcount == 1
+            assert await sessions.abandon_turn("session", turn.key.turn_id,
+                                               expected_generation=row["generation"], principal=principal)
+            failed = await replay.result()
+            assert failed.status is ExecutionStatus.FAILED
+            assert failed.view["conversation_committed"] and failed.view["items"] == []
+            assert calls == ["lookup"]
+            following = await sessions.start("session", "next", agent="default", principal=principal,
+                                             idempotency_key="turn-2")
+            assert (await following.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
+            assert calls == ["lookup", "lookup"]
+            assert prompts == [["inspect"], ["inspect", "next"]]
+            return
+
     from linktools.ai.persistence._conversation_repositories import (
         SessionRepositoryImpl,
     )

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Durable Task event projection helpers."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from ..core import TaskStatus
@@ -42,6 +42,7 @@ class _TaskEventState:
     graph: TaskGraphView
     node_states: tuple[TaskNodeView, ...]
     graph_storage_revision: int | None = None
+    event_head: int = 0
 
 
 def _task_event_stream(
@@ -106,29 +107,6 @@ def _task_graph_event_drafts(
     )
 
 
-def _task_event_drafts(
-    before: "_TaskEventState | None",
-    after: _TaskEventState,
-) -> tuple[_TaskEventDraft, ...]:
-    if before is None:
-        return (_TaskEventDraft(TaskEventType.GRAPH_ADMITTED, after.graph.status),)
-    if before.graph.graph_id != after.graph.graph_id:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    before_nodes = {node.node_id: node for node in before.node_states}
-    if len(before_nodes) != len(before.node_states):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    values: list[_TaskEventDraft] = []
-    for node in after.node_states:
-        previous = before_nodes.get(node.node_id)
-        if previous is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        values.extend(_task_node_event_drafts(previous, node))
-    if len(before_nodes) != len(after.node_states):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    values.extend(_task_graph_event_drafts(before.graph, after.graph))
-    return tuple(values)
-
-
 def _task_completion_event_drafts(
     before: _TaskEventState,
     after: _TaskEventState,
@@ -187,22 +165,15 @@ def _task_event_payload(
     }
 
 
-async def _guard_task_event_owner(
-    transaction: StateTransaction,
-    graph_key: bytes,
-    *,
-    missing_code: ErrorCode = ErrorCode.STORAGE_INTEGRITY_ERROR,
-) -> StoredRecord:
-    graph_record = await transaction.get_record(graph_key)
-    if graph_record is None:
-        raise AIError(missing_code)
-    guarded = await transaction.guard_record(
-        graph_key,
-        expected_storage_revision=graph_record.storage_revision,
-    )
-    if guarded is None:
-        raise _TaskEventAppendConflict
-    return guarded
+def _task_event_head(record: StoredRecord) -> int:
+    sequence = record.data.get("task_event_head")
+    if type(sequence) is not int or sequence < 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return sequence
+
+
+def _with_task_event_head(record: StoredRecord, sequence: int) -> StoredRecord:
+    return replace(record, data={**record.data, "task_event_head": sequence})
 
 
 async def _append_task_events(
@@ -214,18 +185,12 @@ async def _append_task_events(
     graph_id: str,
     graph_key: bytes,
     drafts: tuple[_TaskEventDraft, ...],
-    owner_guarded: bool = False,
+    previous_sequence: int,
 ) -> None:
     if not drafts:
         return
-    if not owner_guarded:
-        await _guard_task_event_owner(transaction, graph_key)
     stream = _task_event_stream(namespace, tenant_id, domain, graph_id)
-    final_sequence = await transaction.reserve_sequence(
-        stream,
-        len(drafts),
-    )
-    first_sequence = final_sequence - len(drafts) + 1
+    first_sequence = previous_sequence + 1
     occurred_at = await transaction.now()
     events = tuple(
         TaskEvent(
@@ -261,27 +226,6 @@ async def _append_task_events(
         for event, draft in zip(events, drafts, strict=True)
     )
     await transaction.insert_facts(facts)
-
-
-async def _append_task_state_events(
-    transaction: StateTransaction,
-    *,
-    namespace: str,
-    tenant_id: str,
-    domain: str,
-    graph_key: bytes,
-    before: "_TaskEventState | None",
-    after: _TaskEventState,
-) -> None:
-    await _append_task_events(
-        transaction,
-        namespace=namespace,
-        tenant_id=tenant_id,
-        domain=domain,
-        graph_id=after.graph.graph_id,
-        graph_key=graph_key,
-        drafts=_task_event_drafts(before, after),
-    )
 
 
 def _decode_task_event(graph_id: str, fact: StoredFact) -> TaskEvent:

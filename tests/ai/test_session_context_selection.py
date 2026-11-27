@@ -2,17 +2,17 @@
 # -*- coding: utf-8 -*-
 """Session model context is selected before old message bodies are loaded."""
 
-from contextvars import ContextVar
+import asyncio
+from contextlib import AsyncExitStack
 
 import pytest
-from pydantic_ai.messages import ModelResponse, TextPart
-from sqlalchemy import event
+from pydantic_ai.messages import ModelResponse, TextPart, UserPromptPart
 
 from linktools.ai.capability import ExecutionCapability
-from linktools.ai.persistence.runs import ContentArchive
+from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence import Persistence, PersistenceStorage, SqlStepStore
-from linktools.ai.persistence._conversation_persistence import ConversationPersistence
+from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.persistence._session_turn_sql import SessionTurnKey, SqlSessionTurnReader
 from linktools.ai.runtime import Runtime
 
 from .test_runtime_session_start_preparation import _features as _base_features
@@ -26,99 +26,122 @@ def _features(model):
 pytestmark = pytest.mark.asyncio
 
 
+class _SessionAuthorization(TenantAuthorizationPolicy):
+    """Authorize sessions in the fixture's isolated namespace."""
+
+
+@pytest.mark.parametrize("state", ("cancelled", "failed"))
+@pytest.mark.parametrize("reopen", (False, True))
+async def test_interrupted_turn_retains_the_request_for_continue(tmp_path, state, reopen):
+    entered = asyncio.Event()
+    attempts = []
+
+    async def model(messages, info):
+        prompts = [part for message in messages for part in message.parts if isinstance(part, UserPromptPart)]
+        attempts.append([part.content for part in prompts])
+        if len(attempts) == 1:
+            if state == "failed":
+                raise RuntimeError("synthetic provider failure")
+            entered.set()
+            await asyncio.Future()
+        assert attempts[-1] == ["Inspect my files", "Continue"]
+        assert "The previous turn was interrupted." in (info.instructions or "")
+        return ModelResponse(parts=[TextPart("Continuing file inspection")])
+
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db")
+
+    async def open_runtime(stack):
+        persistence = await stack.enter_async_context(Persistence.open("interrupted-context", storage=storage))
+        return await stack.enter_async_context(Runtime.open(
+            persistence=persistence, features=_features(model), authorization=_SessionAuthorization(),
+        ))
+
+    async with AsyncExitStack() as stack:
+        runtime = await open_runtime(stack)
+        principal = runtime.default_principal
+        await runtime.sessions.create_turn_session("session", principal=principal)
+        first = await runtime.sessions.start(
+            "session", "Inspect my files", agent="default", principal=principal, idempotency_key="inspect",
+        )
+        if state == "cancelled":
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            assert await first.cancel()
+        assert (await first.wait_final(timeout_seconds=5)).status is (
+            ExecutionStatus.CANCELLED if state == "cancelled" else ExecutionStatus.FAILED
+        )
+        if reopen:
+            await stack.aclose()
+            runtime = await open_runtime(stack)
+            principal = runtime.default_principal
+        second = await runtime.sessions.start(
+            "session", "Continue", agent="default", principal=principal, idempotency_key="continue",
+        )
+        result = await second.wait_final(timeout_seconds=5)
+        assert result.view["output"] == {"text": "Continuing file inspection"}
+
+
 @pytest.mark.parametrize("selection,expected_messages", (("all", 3), ("current_turn", 1)))
 async def test_session_selects_context_before_prior_body_read_and_preserves_timeline(
     tmp_path, monkeypatch, selection, expected_messages,
 ):
     seen = []
-    calls = []
-    sql = []
-    bodies = []
-    active = ContextVar("conversation_context_read", default=False)
+    ranges = []
 
     async def model(messages, info):
         seen.append(tuple(messages))
         return ModelResponse(parts=[TextPart("answer")])
 
-    original_read = ContentArchive._read_content
+    original = SqlSessionTurnReader.read_context_range
 
-    async def read_content(self, content):
-        result = await original_read(self, content)
-        if active.get():
-            bodies.append(len(result))
+    async def read_context_range(self, session_id, **kwargs):
+        result = await original(self, session_id, **kwargs)
+        ranges.append((kwargs["after"], kwargs["through"], sum(len(turn.messages) for turn in result)))
         return result
 
-    monkeypatch.setattr(ContentArchive, "_read_content", read_content)
-    original_native_capture = SqlStepStore.capture_message_roots
-
-    async def capture_native(self, roots, **kwargs):
-        load = await original_native_capture(self, roots, **kwargs)
-
-        async def read_native():
-            result = await load()
-            if active.get():
-                bodies.extend(len(body) for group in result for body in group)
-            return result
-
-        return read_native
-
-    monkeypatch.setattr(SqlStepStore, "capture_message_roots", capture_native)
-    original = ConversationPersistence.load_committed_conversation_context
-
-    async def load(self, **kwargs):
-        token = active.set(True)
-        try:
-            result = await original(self, **kwargs)
-            calls.append((kwargs.get("include_content", True), len(result.messages)))
-            return result
-        finally:
-            active.reset(token)
-
-    monkeypatch.setattr(ConversationPersistence, "load_committed_conversation_context", load)
+    monkeypatch.setattr(SqlSessionTurnReader, "read_context_range", read_context_range)
     storage = PersistenceStorage.sqlite(tmp_path / "state.db")
-    async with Persistence.open("session-start-preparation", storage=storage) as state:
-        engine = state.conversation.sessions.state_store.storage_group.context.engine.sync_engine
 
-        def capture(_connection, _cursor, statement, *_args):
-            if active.get() and statement.lstrip().upper().startswith(("SELECT", "WITH")):
-                sql.append(statement)
+    def open_runtime(state):
+        return Runtime.open(
+            persistence=state, features=_features(model), metrics=None, authorization=_SessionAuthorization(),
+        )
 
-        event.listen(engine, "before_cursor_execute", capture)
-        try:
-            async with Runtime.open(persistence=state, features=_features(model), metrics=None) as runtime:
-                session = runtime.agents.get().session("session")
-                first = await session.start("old question", idempotency_key="old")
-                assert (await first.wait(timeout_seconds=5)).result.output == {"text": "answer"}
-                calls.clear()
-                sql.clear()
-                bodies.clear()
-                second = await session.start("new question", session_context=selection, idempotency_key="new")
-                assert (await second.wait(timeout_seconds=5)).result.output == {"text": "answer"}
-                assert len(seen[-1]) == expected_messages
-                assert calls == [(selection == "all", expected_messages - 1)]
-                if selection == "current_turn":
-                    assert bodies == []
-                else:
-                    assert bodies
-                print("session context source reads", selection, {"selects": len(sql), "bodies": len(bodies), "bytes": sum(bodies)})
-                timeline = await session.timeline()
-                assert len(timeline.items) == 2
-                assert {turn.execution_id for turn in timeline.items} == {first.execution_id, second.execution_id}
-                assert {turn.user_input["prompt"]["text"] for turn in timeline.items} == {"old question", "new question"}
-                again = await session.start("new question", session_context=selection, idempotency_key="new")
-                assert again.execution_id == second.execution_id
-                with pytest.raises(AIError) as error:
-                    await session.start("new question", session_context="current_turn" if selection == "all" else "all", idempotency_key="new")
-                assert error.value.code == ErrorCode.IDEMPOTENCY_CONFLICT
-        finally:
-            event.remove(engine, "before_cursor_execute", capture)
-    # Same-version reopen keeps both authoritative turns and the admitted policy.
-    async with Persistence.open("session-start-preparation", storage=storage) as state:
-        async with Runtime.open(persistence=state, features=_features(model), metrics=None) as runtime:
-            record = await state.execution.executions.get(second.execution_id, tenant_id=runtime.default_principal.tenant_id)
-            assert record.session_context == selection
-            timeline = await runtime.agents.get().session("session").timeline()
-            assert len(timeline.items) == 2
+    async with Persistence.open("session-start-preparation", storage=storage) as state, open_runtime(state) as runtime:
+        principal = runtime.default_principal
+        await runtime.sessions.create_turn_session("session", principal=principal)
+        first = await runtime.agents.get().start("old question", session_id="session", idempotency_key="old")
+        assert (await first.wait_final(timeout_seconds=5)).view["output"] == {"text": "answer"}
+
+    ranges.clear()
+    async with Persistence.open("session-start-preparation", storage=storage) as state, open_runtime(state) as runtime:
+        agent = runtime.agents.get()
+        principal = runtime.default_principal
+        second = await agent.start(
+            "new question", session_id="session", session_context=selection, idempotency_key="new",
+        )
+        assert (await second.wait_final(timeout_seconds=5)).view["output"] == {"text": "answer"}
+        assert len(seen[-1]) == expected_messages
+        assert ranges == ([] if selection == "current_turn" else [(0, 1, 2)])
+        page = await runtime.history.turn_session("session", principal=principal)
+        turns = page["timeline"]["items"]
+        assert {turn["turn_id"] for turn in turns} == {first.key.turn_id, second.key.turn_id}
+        assert {turn["user_input"]["prompt"] for turn in turns} == {"old question", "new question"}
+        again = await agent.start(
+            "new question", session_id="session", session_context=selection, idempotency_key="new",
+        )
+        assert again.key == second.key
+        with pytest.raises(AIError) as error:
+            await agent.start(
+                "new question", session_id="session", idempotency_key="new",
+                session_context="current_turn" if selection == "all" else "all",
+            )
+        assert error.value.code == ErrorCode.IDEMPOTENCY_CONFLICT
+
+    async with Persistence.open("session-start-preparation", storage=storage) as state, open_runtime(state) as runtime:
+        record = await state.session_turn_reader.get_turn(SessionTurnKey("session", second.key.turn_id))
+        assert record["request_json"].get("session_context", "all") == selection
+        page = await runtime.history.turn_session("session", principal=runtime.default_principal)
+        assert len(page["timeline"]["items"]) == 2
 
 
 async def test_current_turn_requires_a_session_and_rejects_unknown_selection(tmp_path):
@@ -126,7 +149,9 @@ async def test_current_turn_requires_a_session_and_rejects_unknown_selection(tmp
         raise AssertionError("invalid context selection must fail before the model")
 
     async with Persistence.open("session-start-preparation", storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as state:
-        async with Runtime.open(persistence=state, features=_features(model), metrics=None) as runtime:
+        async with Runtime.open(
+            persistence=state, features=_features(model), metrics=None, authorization=_SessionAuthorization(),
+        ) as runtime:
             for kwargs in ({"session_context": "current_turn"}, {"session_id": "session", "session_context": "unknown"}):
                 with pytest.raises(AIError) as error:
                     await runtime.agents.get().start("question", **kwargs)

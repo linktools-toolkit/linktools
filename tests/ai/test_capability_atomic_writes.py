@@ -431,8 +431,9 @@ async def test_submission_keys_are_idempotent_and_payloads_are_frozen(tmp_path: 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite", "sql", "separate-conversation", "pending-turn"))
 async def test_terminal_custom_writes_join_the_existing_execution_transaction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
+    storage_backend = {"separate-conversation": "sqlite", "pending-turn": "memory"}.get(backend, backend)
     async with _opened(
-        tmp_path, monkeypatch, backend="sqlite" if backend in {"separate-conversation", "pending-turn"} else backend,
+        tmp_path, monkeypatch, backend=storage_backend,
         policies=(CommitPolicy.terminal(), _IndependentTerminalPolicy.terminal()), terminal=True,
         conversation_storage=StorageRoute.sqlite(tmp_path / "conversation.db") if backend == "separate-conversation" else None,
         trace=backend == "separate-conversation",

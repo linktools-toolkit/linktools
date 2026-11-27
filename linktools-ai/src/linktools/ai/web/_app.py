@@ -5,8 +5,9 @@
 import asyncio
 import base64
 import json
+import mimetypes
 from collections.abc import AsyncGenerator, Mapping, Sequence
-from contextlib import aclosing, nullcontext, suppress
+from contextlib import ExitStack, aclosing, asynccontextmanager, nullcontext, suppress
 from dataclasses import asdict, fields, is_dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -16,13 +17,14 @@ from typing import TYPE_CHECKING, Protocol
 
 import anyio
 import httpx2
+from pydantic_ai.messages import BinaryContent
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from linktools.core import environ
-from ..core import Page, Principal, PrincipalKind
+from ..core import Page, Principal, PrincipalKind, PromptLimits
 from ..errors import AIError, ErrorCode, ErrorDiagnostics, ObservationError
 from ..model import ModelClientRequest, ModelClientResponse
 from ..observe import MetricAggregation, MetricQuery, Metrics, MetricWindow, RuntimeMetricsStatus
@@ -31,11 +33,13 @@ from ..execution import ExecutionTreeEvent, ListExecutionRequest, TaskModelProje
 from ..session import CreateSessionRequest, ListSessionRequest
 from ..execution.stream import local_execution_stream
 from ..runtime import Runtime
+from ..runtime.turn_clients import uses_turn_sessions
 from ..session import SessionTurn, ToolProcessItem, project_tool_process_event
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
     from ..execution import ExecutionObservationEvent
+    from ..runtime import TurnNoticeTransport
     from starlette.types import ASGIApp, Receive, Scope, Send
 
 _logger = environ.get_logger("ai.web")
@@ -53,6 +57,12 @@ _HEADERS = {
     "Referrer-Policy": "no-referrer",
     "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
 }
+_JSON_REQUEST_MAX_BYTES = 8 * 1024 * 1024
+# Transport bound, not the Runtime's canonical turn limit. Allow JSON escaping and the HTTP envelope.
+_TURN_JSON_REQUEST_MAX_BYTES = 512 * 1024
+_TURN_SSE_LIMIT = 128
+_TURN_SSE_BUFFER = 256 * 1024
+
 _SSE_HEADERS = {
     **_HEADERS,
     "Cache-Control": _HEADERS["Cache-Control"] + ", no-transform",
@@ -143,6 +153,8 @@ _CHAT_DELTA_EVENTS = {"ASSISTANT_TEXT_DELTA": "text", "ASSISTANT_THINKING_DELTA"
 _CHAT_PART_POSITION = ("agent_run_seq", "model_request_seq", "stream_attempt_seq", "part_index")
 
 _ExecutionFrame = tuple[str, dict[str, object], str | None]
+_MAX_CHAT_TURN_FRAME_BYTES = 256 * 1024
+_NATIVE_TURN_PREVIEWS = {"tool", "progress", "preview_reset", "thinking_completed"}
 
 
 def _chat_frame(item: ExecutionTreeEvent) -> _ExecutionFrame | None:
@@ -195,11 +207,12 @@ def _chat_frame(item: ExecutionTreeEvent) -> _ExecutionFrame | None:
     }}, cursor
 
 
-def _sse_frame(event: str, data: object, cursor: str | None = None) -> str:
+def _sse_frame(event: str, data: object, cursor: str | None = None, *, compact: bool = False) -> str:
     prefix = "" if cursor is None else f"id: {cursor}\n"
     if event != "message":
         prefix += f"event: {event}\n"
-    return prefix + "data: " + json.dumps(data, ensure_ascii=False) + "\n\n"
+    separators = (",", ":") if compact else None
+    return prefix + "data: " + json.dumps(data, ensure_ascii=False, separators=separators) + "\n\n"
 
 
 def _session_execution_cursor(value: str | None) -> tuple[str | None, str | None]:
@@ -229,6 +242,73 @@ def _response_display(response: ModelClientResponse) -> tuple[str | None, str | 
 
 def _json(value: object, status: int = 200) -> JSONResponse:
     return JSONResponse(_wire(value), status_code=status, headers=_HEADERS)
+
+
+def _ordinary_turn_wire(turn: Mapping[str, object]) -> Mapping[str, object]:
+    """Keep one copy of the final output when the Web timeline already displays it."""
+    items, output = turn.get("items"), turn.get("output")
+    if not isinstance(items, list):
+        return turn
+    for item in reversed(items):
+        if not isinstance(item, Mapping):
+            continue
+        kind, content = item.get("item_kind"), item.get("content")
+        if kind == "structured_output":
+            if content == output:
+                return {key: value for key, value in turn.items() if key != "output"}
+            break
+        if kind == "assistant":
+            if isinstance(content, str) and output == {"text": content}:
+                return {key: value for key, value in turn.items() if key != "output"}
+            break
+    return turn
+
+
+def _native_turn_event_wire(
+    value: Mapping[str, object], *, local_tool_feedback: bool = False,
+) -> Mapping[str, object] | None:
+    """Project native preview events to fields used by the browser."""
+    event_type = value.get("type")
+    if event_type == "output_preview":
+        fields = ("type", "turn_id", "generation", "model_key", "attempt", "field", "preview_seq", "text")
+        return {key: value[key] for key in fields}
+    if event_type == "delta":
+        fields = ("type", "turn_id", "generation", "delta_kind", "text", "model_key",
+                  "attempt", "part_index", "part_start", "stream_truncated")
+        return {key: value[key] for key in fields if key in value}
+    if event_type in _NATIVE_TURN_PREVIEWS:
+        if event_type == "tool":
+            frame = {key: item for key, item in value.items() if key in ("type", "turn_id", "generation", "order")}
+        else:
+            frame = {key: item for key, item in value.items() if key not in ("turn_no", "revision")}
+        if event_type in ("progress", "tool"):
+            item = value.get("item")
+            if not isinstance(item, Mapping):
+                return None
+            if event_type == "progress":
+                if item["status"] == "RUNNING":
+                    return None
+                fields = ("kind", "key", "status")
+            else:
+                fields = ("kind", "key", "tool_name", "status", "argument_preview", "elapsed_ms", "error_code")
+                if local_tool_feedback:
+                    fields += ("error_message",)
+            frame["item"] = {key: item[key] for key in fields if item.get(key) is not None}
+        return frame
+    attachments = value.get("attachments")
+    if isinstance(attachments, list):
+        safe_attachments = [
+            {key: item[key] for key in ("attachment_id", "source", "media_type", "size", "position", "display_name")
+             if key in item}
+            for item in attachments if isinstance(item, Mapping)
+        ]
+        value = ({**value, "attachments": safe_attachments} if safe_attachments
+                 else {key: item for key, item in value.items() if key != "attachments"})
+    if event_type == "terminal":
+        value = _ordinary_turn_wire(value)
+        if value.get("error_code") is None:
+            value = {key: item for key, item in value.items() if key != "error_code"}
+    return value
 
 
 def _text(payload: Mapping[str, object], key: str, default: str | None = None) -> str:
@@ -265,18 +345,68 @@ def _content(request: Request, field: str = "include_content") -> bool:
     return value == "true"
 
 
-async def _body(request: Request) -> dict[str, object]:
+class _RequestBodyTooLarge(ValueError):
+    pass
+
+
+async def _body(
+    request: Request, *, ordinary_turn: bool = False, upload: PromptLimits | None = None,
+) -> dict[str, object]:
     if request.headers.get("content-type", "").split(";", 1)[0] != "application/json":
         raise ValueError("application/json is required")
+    maximum = _TURN_JSON_REQUEST_MAX_BYTES if ordinary_turn else _JSON_REQUEST_MAX_BYTES
+    if upload is not None:
+        # Account for base64 expansion, per-file rounding, and the JSON envelope.
+        maximum += 4 * ((upload.max_binary_input_bytes + 2) // 3) + 2048 * upload.max_binary_input_parts
+    if ordinary_turn and int(request.headers.get("content-length", "0")) > maximum:
+        raise _RequestBodyTooLarge
     data = bytearray()
     async for chunk in request.stream():
+        if len(chunk) > maximum - len(data):
+            raise _RequestBodyTooLarge
         data.extend(chunk)
-        if len(data) > 8 * 1024 * 1024:
-            raise ValueError("request exceeds 8 MiB")
     payload = json.loads(data)
     if not isinstance(payload, dict):
         raise ValueError("request must be an object")
     return payload
+
+
+def _uploaded_prompt(
+    prompt: str, value: object, limits: PromptLimits,
+) -> tuple[str | tuple[str | BinaryContent, ...], tuple[str, ...]]:
+    """Convert browser bytes into the Runtime's existing ordered attachment input."""
+    def invalid(reason: str) -> AIError:
+        return AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "attachments", "reason": reason})
+
+    if not isinstance(value, list) or len(value) > limits.max_binary_input_parts:
+        raise invalid("attachment_count_invalid")
+    if not value:
+        return prompt, ()
+    parts: list[str | BinaryContent] = [prompt]
+    names: list[str] = []
+    remaining = limits.max_binary_input_bytes
+    for item in value:
+        if not isinstance(item, dict):
+            raise invalid("attachment_invalid")
+        name, media_type, encoded = item.get("name"), item.get("media_type"), item.get("data")
+        if (not isinstance(name, str) or not 0 < len(name) <= 255 or not name.isprintable()
+                or "/" in name or chr(92) in name or not isinstance(media_type, str)
+                or len(media_type) > 128 or (media_type and not media_type.isprintable())
+                or not isinstance(encoded, str) or not encoded):
+            raise invalid("attachment_invalid")
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except ValueError as error:
+            raise invalid("attachment_encoding_invalid") from error
+        if not data:
+            raise invalid("attachment_empty")
+        remaining -= len(data)
+        if remaining < 0:
+            raise _RequestBodyTooLarge
+        media_type = media_type or mimetypes.guess_type(name)[0] or "application/octet-stream"
+        parts.append(BinaryContent(data, media_type=media_type))
+        names.append(name)
+    return tuple(parts), tuple(names)
 
 
 class _LocalBoundary:
@@ -351,6 +481,7 @@ class _Console:
         self, runtime: Runtime | None, history: History | None, metrics: Metrics | None,
         status: Mapping[str, object], capabilities: Sequence[Mapping[str, object]],
         shutdown_event: asyncio.Event | None, session_notices: _SessionNoticeFeed | None,
+        local_workspace: bool, native_sessions: bool,
     ) -> None:
         self.runtime = runtime
         self.history = runtime.history if runtime is not None else history
@@ -359,6 +490,9 @@ class _Console:
         self.capabilities = tuple(capabilities)
         self._shutdown_event = shutdown_event
         self._session_notices = session_notices
+        self._local_workspace = local_workspace
+        self.turn_sessions = native_sessions
+        self._turn_subscribers = 0
         self.principal = runtime.default_principal if runtime is not None else Principal(
             "runtime", "default" if history is None else history.tenant_id, PrincipalKind.LOCAL_TRUSTED.value,
         )
@@ -373,11 +507,22 @@ class _Console:
             raise AIError(ErrorCode.EXECUTION_NOT_FOUND)
         return self.history
 
+    @property
+    def local_turn_workspace(self) -> bool:
+        return self._local_workspace and self.principal.kind == PrincipalKind.LOCAL_TRUSTED.value
+
     async def config(self, request: Request) -> Response:
+        upload = self.runtime.sessions.turn_attachment_limits if self.turn_sessions and self.runtime is not None else None
         return _json({
             **self.status,
             "runtime": self.runtime.status() if self.runtime is not None else None,
             "read_only": self.runtime is None,
+            "turn_sessions": self.turn_sessions,
+            **({"attachment_upload": {"max_files": upload.max_binary_input_parts,
+                                      "max_bytes": upload.max_binary_input_bytes}} if upload is not None else {}),
+            **({"turn_trace": True, "turn_model_messages": self.local_turn_workspace}
+               if self.turn_sessions and self.history is not None
+               and self.history.has_turn_trace else {}),
             "capabilities": self.capabilities,
             "metric_names": _SUMMARY_METRICS,
         })
@@ -387,13 +532,29 @@ class _Console:
             request.state.phase = "session.create" if request.method == "POST" else "session.list"
         if request.method == "POST":
             runtime = self.require_runtime()
-            payload = await _body(request)
+            payload = await _body(request, ordinary_turn=self.turn_sessions)
             request.state.operation_id = _text(payload, "request_id")
+            if self.turn_sessions:
+                cwd = payload.get("cwd")
+                if cwd is not None and not isinstance(cwd, str):
+                    raise ValueError("cwd must be a workspace-relative string or null")
+                view = await runtime.sessions.create_turn_session(
+                    _text(payload, "session_id"), principal=self.principal,
+                    idempotency_key=request.state.operation_id,
+                    metadata={"title": _text(payload, "title", "New conversation")}, cwd=cwd,
+                )
+                return _json(view, 201)
             view = await runtime.sessions.create_view(_text(payload, "agent_id", "default"), CreateSessionRequest(
                 self.principal, _text(payload, "session_id"), request.state.operation_id,
                 cwd=payload.get("cwd"), metadata={"title": _text(payload, "title", "New conversation")},
             ))
             return _json(view, 201)
+        if self.turn_sessions:
+            if not self.local_turn_workspace:
+                return _json({"items": [], "next_cursor": None, "scope_required": True})
+            return _json(await self.require_history().turn_sessions(
+                principal=self.principal, local_workspace=True, **_paging(request),
+            ))
         if self.runtime is not None:
             return _json(await self.runtime.sessions.list(ListSessionRequest(self.principal, **_paging(request))))
         # The read-only console lists the newest sessions by time, without pagination.
@@ -410,6 +571,52 @@ class _Console:
         include_timeline = request.query_params.get("include_timeline", "true")
         if include_timeline not in {"true", "false"}:
             raise ValueError("include_timeline must be true or false")
+        models = request.query_params.get("models")
+        if models is not None:
+            if (models != "true" or not self.turn_sessions or include_timeline != "true"
+                    or "execution_id" in request.query_params or "trace" in request.query_params):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Model interactions require an exact canonical turn")
+            sequence = request.query_params.get("model_request_seq")
+            return _json(await history.turn_model_interactions(
+                identity, _text(request.query_params, "turn_id"), principal=self.principal,
+                local_workspace=self.local_turn_workspace, include_content=_content(request),
+                model_request_seq=None if sequence is None else int(sequence), **_paging(request),
+            ))
+        trace = request.query_params.get("trace")
+        if trace is not None:
+            if (trace != "true" or not self.turn_sessions or include_timeline != "true"
+                    or "execution_id" in request.query_params):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Trace requires an exact canonical turn")
+            return _json(await history.turn_trace(
+                identity, _text(request.query_params, "turn_id"), principal=self.principal,
+                local_workspace=self.local_turn_workspace, **_paging(request),
+            ))
+        if self.turn_sessions:
+            if "execution_id" in request.query_params:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "Identify the conversation turn with turn_id")
+            if "turn_id" in request.query_params:
+                turn = await history.turn_result(
+                    identity, _text(request.query_params, "turn_id"), principal=self.principal,
+                    local_workspace=self.local_turn_workspace,
+                )
+                return _json(_ordinary_turn_wire(turn))
+            if include_timeline == "false":
+                session = await history.turn_session_state(
+                    identity, principal=self.principal, local_workspace=self.local_turn_workspace,
+                )
+                return _json({"session": session, "timeline": None})
+            page = await history.turn_session(
+                identity, principal=self.principal, local_workspace=self.local_turn_workspace, **_paging(request),
+            )
+            timeline = page["timeline"]
+            if isinstance(timeline, Mapping) and isinstance(items := timeline.get("items"), list):
+                return _json({
+                    **page,
+                    "timeline": {**timeline, "items": [
+                        _ordinary_turn_wire(turn) if isinstance(turn, Mapping) else turn for turn in items
+                    ]},
+                })
+            return _json(page)
         if "execution_id" in request.query_params:
             execution_id = _text(request.query_params, "execution_id")
             turn_state = request.query_params.get("turn_state", "committed")
@@ -440,19 +647,90 @@ class _Console:
         if environ.debug:
             request.state.phase = "session.get"
         runtime = self.require_runtime()
-        session = await runtime.sessions.get(_text(request.query_params, "session_id"), principal=self.principal)
-        payload = await _body(request)
-        request_id = _text(payload, "request_id")
+        session_id = _text(request.query_params, "session_id")
         action = request.path_params["action"]
+        upload = runtime.sessions.turn_attachment_limits if self.turn_sessions and action == "messages" else None
+        payload = await _body(request, ordinary_turn=self.turn_sessions, upload=upload)
+        request_id = _text(payload, "request_id")
         request.state.operation_id = request_id
         if environ.debug:
             request.state.phase = f"session.{action}"
+        if action == "messages" and "files" in payload:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={
+                "field": "files", "reason": "use_attachment_upload",
+            })
+        if self.turn_sessions:
+            if action == "messages":
+                planning = payload.get("planning", False)
+                if type(planning) is not bool:
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "planning"})
+                if upload is None:
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                prompt, names = _uploaded_prompt(_text(payload, "prompt"), payload.get("attachments", []), upload)
+                turn_id = await runtime.sessions.start_turn(
+                    session_id, prompt, agent="default",
+                    principal=self.principal, idempotency_key=request_id, thinking=payload.get("thinking"),
+                    planning=planning, attachment_display_names=names,
+                )
+                return _json({"turn_id": turn_id}, 202)
+            if action == "abandon":
+                accepted = await runtime.sessions.abandon_turn(
+                    session_id, _text(payload, "turn_id"), expected_generation=payload.get("expected_generation"),
+                    principal=self.principal,
+                )
+                return _json({"accepted": accepted})
+            if action in {"cancel", "recover"}:
+                operation = runtime.sessions.cancel_turn if action == "cancel" else runtime.sessions.recover_turn
+                accepted = await operation(session_id, _text(payload, "turn_id"), principal=self.principal)
+                return _json({"accepted": accepted})
+            if action in {"update", "close", "fork"}:
+                revision = payload.get("expected_revision")
+                if type(revision) is not int or revision < 0:
+                    raise ValueError("expected_revision must be a nonnegative integer")
+                if action == "fork":
+                    target_id = _text(payload, "new_session_id")
+                    created = await runtime.sessions.fork_turn_session(
+                        session_id, target_id, principal=self.principal,
+                        expected_revision=revision, idempotency_key=request_id,
+                    )
+                    if not created:
+                        raise AIError(ErrorCode.SESSION_CONFLICT, "The source conversation changed")
+                    return _json({"session_id": target_id}, 201)
+                receipt: dict[str, object] = {"session_id": session_id, "revision": revision + 1}
+                if action == "update":
+                    metadata = payload.get("metadata")
+                    if not isinstance(metadata, dict):
+                        raise ValueError("metadata must be an object")
+                    cwd = payload.get("cwd")
+                    if cwd is not None and not isinstance(cwd, str):
+                        raise ValueError("cwd must be a workspace-relative string or null")
+                    changed = await runtime.sessions.update_turn_session(
+                        session_id, principal=self.principal, expected_revision=revision, metadata=metadata,
+                        cwd=cwd, replace_cwd="cwd" in payload,
+                    )
+                    receipt["metadata"] = metadata
+                else:
+                    changed = await runtime.sessions.close_turn_session(
+                        session_id, principal=self.principal, expected_revision=revision,
+                    )
+                    receipt["status"] = "CLOSED"
+                    receipt["active_turn_id"] = None
+                if not changed:
+                    raise AIError(ErrorCode.SESSION_CONFLICT, "The conversation changed or has an active turn")
+                return _json(receipt)
+            return _json({"error_code": "ACTION_NOT_FOUND"}, 404)
         if action == "messages":
-            execution = await session.start(
-                _text(payload, "prompt"), files=payload.get("files", ()), idempotency_key=request_id,
+            if "attachments" in payload:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={
+                    "field": "attachments", "reason": "sql_turn_required",
+                })
+            execution = await runtime.sessions.start(
+                session_id, _text(payload, "prompt"), principal=self.principal,
+                idempotency_key=request_id,
                 planning=payload.get("planning", False), thinking=payload.get("thinking"),
             )
             return _json({"execution_id": execution.execution_id}, 202)
+        session = await runtime.sessions.get(session_id, principal=self.principal)
         if action == "close":
             return _json(await session.close(idempotency_key=request_id))
         if action == "fork":
@@ -465,9 +743,74 @@ class _Console:
             ))
         return _json({"error_code": "ACTION_NOT_FOUND"}, 404)
 
+    def _turn_events(self, request: Request, identity: str, runtime: Runtime) -> Response:
+        async def stream() -> AsyncGenerator[str, None]:
+            if self._turn_subscribers >= _TURN_SSE_LIMIT:
+                yield _sse_frame("session_error", {"error_code": "EXECUTION_CONCURRENCY_LIMIT_EXCEEDED"})
+                return
+            self._turn_subscribers += 1
+            queue: asyncio.Queue[tuple[str, int]] = asyncio.Queue(maxsize=_TURN_SSE_LIMIT)
+            buffered = 0
+            overflow = False
+            unsubscribe = None
+
+            def receive(value: Mapping[str, object]) -> None:
+                nonlocal buffered, overflow
+                if overflow:
+                    return
+                wire = _native_turn_event_wire(value, local_tool_feedback=self.local_turn_workspace)
+                if wire is None:
+                    return
+                revision = wire.get("revision")
+                frame = _sse_frame("turn", wire, str(revision) if isinstance(revision, int) else None, compact=True)
+                size = len(frame.encode("utf-8"))
+                if queue.full() or buffered + size > _TURN_SSE_BUFFER:
+                    overflow = True
+                    while not queue.empty():
+                        queue.get_nowait()
+                    buffered = 0
+                    queue.put_nowait(("", 0))
+                else:
+                    queue.put_nowait((frame, size))
+                    buffered += size
+
+            try:
+                # Subscribe before taking the authorized snapshot so an
+                # admission/commit racing the initial read cannot disappear.
+                unsubscribe = runtime.sessions.observe_turn_session(
+                    identity, receive, local_tool_feedback=self.local_turn_workspace,
+                )
+                snapshot = await self.require_history().turn_session_state(
+                    identity, principal=self.principal, local_workspace=self.local_turn_workspace,
+                )
+                yield _sse_frame("turn", {"type": "snapshot", "session": snapshot}, str(snapshot["revision"]), compact=True)
+                while True:
+                    try:
+                        async with asyncio.timeout(15):
+                            frame, size = await queue.get()
+                    except TimeoutError:
+                        yield ": heartbeat\n\n"
+                        continue
+                    buffered -= size
+                    if overflow:
+                        yield _sse_frame("turn", {"type": "gap"})
+                        return
+                    yield frame
+            except AIError as error:
+                _debug_error(request, error)
+                yield _sse_frame("session_error", {"error_code": error.code.value})
+            finally:
+                if unsubscribe is not None:
+                    unsubscribe()
+                self._turn_subscribers -= 1
+
+        return _SSEStream(stream(), self._shutdown_event)
+
     async def session_events(self, request: Request) -> Response:
         runtime = self.require_runtime()
         identity = _text(request.query_params, "session_id")
+        if self.turn_sessions:
+            return self._turn_events(request, identity, runtime)
         chat = request.query_params.get("view") == "chat"
         resume_id, resume_cursor = _session_execution_cursor(request.headers.get("last-event-id") if chat else None)
 
@@ -521,6 +864,23 @@ class _Console:
             last_active = last_local = watching = None
             ended_while_started = False
             occupancy: dict[str, object] | None = None
+            publication = ExitStack()
+            read_publication = None
+
+            async def committed_turn_frame() -> str | None:
+                nonlocal read_publication
+                if read_publication is None:
+                    return None
+                captured = await read_publication()
+                if captured is None:
+                    return None
+                read_publication = None
+                publication.close()
+                turn, = _chat_timeline(Page((captured.turn,), None)).items
+                frame = _sse_frame("session_turn", {
+                    "turn": _wire(turn), "revision": captured.session_revision,
+                })
+                return frame if len(frame.encode("utf-8")) <= _MAX_CHAT_TURN_FRAME_BYTES else None
 
             def finish_retiring(task: asyncio.Task) -> None:
                 retiring.discard(task)
@@ -528,7 +888,9 @@ class _Console:
                     task.exception()
 
             def stop_execution() -> None:
-                nonlocal producer, frame_task, watching
+                nonlocal producer, frame_task, watching, read_publication
+                publication.close()
+                read_publication = None
                 for task in (producer, frame_task):
                     if task is not None:
                         retiring.add(task)
@@ -556,6 +918,9 @@ class _Console:
                                 data.pop("cursor", None)
                             if event == "snapshot":
                                 ended_while_started = isinstance(data, Mapping) and data.get("status") == "STARTED"
+                                committed = await committed_turn_frame()
+                                if committed is not None:
+                                    yield committed
                             event_id = None if cursor is None else json.dumps((watching, cursor), separators=(",", ":"))
                             if event in ("text", "thinking"):
                                 yield _sse_frame(event, data, event_id)
@@ -596,8 +961,14 @@ class _Console:
                         authorized_execution = None
                     last_active, last_local = active, local_execution
                     if watching is not None and (active != watching or not local_execution):
+                        committed = await committed_turn_frame()
+                        if committed is not None:
+                            yield committed
                         stop_execution()
                     if chat and local_execution and active != watching:
+                        read_publication = publication.enter_context(runtime.sessions.capture_published_turn(
+                            identity, active, principal=self.principal,
+                        ))
                         watching = active
                         ended_while_started = False
                         execution_frames = asyncio.Queue(maxsize=1)
@@ -616,6 +987,7 @@ class _Console:
                 _debug_error(request, error)
                 yield _sse_frame("session_error", {"error_code": error.code.value})
             finally:
+                publication.close()
                 if unsubscribe is not None:
                     unsubscribe()
                 tasks = tuple(task for task in (state_task, tool_task, frame_task, producer) if task is not None)
@@ -625,6 +997,18 @@ class _Console:
                 await watch.aclose()
 
         return _SSEStream(stream(), self._shutdown_event)
+
+    async def start_plan(self, request: Request) -> Response:
+        runtime = self.require_runtime()
+        payload = await _body(request)
+        request_id = _text(payload, "request_id")
+        request.state.operation_id = request_id
+        if environ.debug:
+            request.state.phase = "execution.plan"
+        execution = await runtime.agents.get(_text(payload, "agent_id", "default")).start_plan(
+            _text(payload, "prompt"), principal=self.principal, idempotency_key=request_id,
+        )
+        return _json({"execution_id": execution.execution_id}, 202)
 
     async def executions(self, request: Request) -> Response:
         if environ.debug:
@@ -832,8 +1216,9 @@ def _debug_error(request: Request, error: AIError) -> None:
     if environ.debug:
         state = request.scope.get("state", {})
         _logger.debug(
-            "Web request failed: path=%s phase=%s code=%s operation_id=%s wire_type=%s missing_fields=%s",
+            "Web request failed: path=%s phase=%s code=%s operation_id=%s field=%r reason=%r wire_type=%s missing_fields=%s",
             request.url.path, state.get("phase", "request"), error.code.value, _operation_id(request, error),
+            error.safe_details.get("field"), error.safe_details.get("reason"),
             error.safe_details.get("wire_type"), error.safe_details.get("missing_fields"),
         )
 
@@ -849,6 +1234,8 @@ async def _error(request: Request, error: Exception) -> Response:
             )
         )
         return _json(asdict(error.to_safe_error(operation_id=_operation_id(request, error))), status)
+    if isinstance(error, _RequestBodyTooLarge):
+        return _json({"code": "REQUEST_BODY_TOO_LARGE", "message": "The request exceeds the upload limit"}, 413)
     if isinstance(error, (TypeError, ValueError, KeyError)):
         return _json({"error_code": "REQUEST_FIELD_INVALID", "message": "Check the request fields and paging parameters"}, 400)
     _logger.error("Web request failed: path=%s error_type=%s", request.url.path, type(error).__name__)
@@ -868,16 +1255,39 @@ def create_app(
     capabilities: Sequence[Mapping[str, object]] = (),
     shutdown_event: asyncio.Event | None = None,
     session_notices: _SessionNoticeFeed | None = None,
+    local_workspace: bool = False,
+    turn_notice_transport: "TurnNoticeTransport | None" = None,
 ) -> "ASGIApp":
     """Build a loopback-only console; the caller owns and closes injected resources.
 
     Set shutdown_event before draining HTTP connections to close live observers
     without shutting down their Runtime. With no Runtime, mutations and live watches are disabled. Historical reads
-    remain available without model credentials. Host/Origin headers are not
+    remain available without model credentials. Only an explicitly trusted local workspace can list ordinary sessions.
+    The configured Conversation storage selects the implementation, not Runtime capabilities.
+    An optional host-owned ordinary turn notice transport is attached during ASGI lifespan.
+    Host/Origin headers are not
     restricted; a reverse proxy must enforce authentication and access control.
     The console itself does not authenticate remote users.
     """
-    console = _Console(runtime, history, metrics, status or {}, capabilities, shutdown_event, session_notices)
+    enabled = uses_turn_sessions(runtime) if runtime is not None else (
+        history is not None and history.has_turn_sessions
+    )
+    lifespan = None
+    if turn_notice_transport is not None:
+        if runtime is None or not enabled:
+            raise ValueError("turn_notice_transport requires a Runtime with ordinary turn sessions")
+        bridge = runtime.sessions.bridge_turn_notices
+
+        @asynccontextmanager
+        async def turn_notice_lifespan(_app: Starlette) -> AsyncGenerator[None, None]:
+            async with bridge(turn_notice_transport):
+                yield
+
+        lifespan = turn_notice_lifespan
+
+    console = _Console(
+        runtime, history, metrics, status or {}, capabilities, shutdown_event, session_notices, local_workspace, enabled,
+    )
     app = Starlette(routes=[
         Route("/", _asset), Route("/assets/{name}", _asset),
         Route("/api/config", console.config),
@@ -886,11 +1296,12 @@ def create_app(
         Route("/api/session/events", console.session_events),
         Route("/api/session/{action}", console.session_action, methods=["POST"]),
         Route("/api/executions", console.executions),
+        Route("/api/executions/plan", console.start_plan, methods=["POST"]),
         Route("/api/executions/{execution_id}", console.execution),
         Route("/api/executions/{execution_id}/events", console.events),
         Route("/api/executions/{execution_id}/models-exact", console.model_batch),
         Route("/api/executions/{execution_id}/{kind}", console.detail),
         Route("/api/executions/{execution_id}/{action}", console.execution_action, methods=["POST"]),
         Route("/api/metrics", console.metric_query),
-    ], exception_handlers={AIError: _error, ValueError: _error, TypeError: _error, KeyError: _error, Exception: _error})
+    ], lifespan=lifespan, exception_handlers={AIError: _error, ValueError: _error, TypeError: _error, KeyError: _error, Exception: _error})
     return _LocalBoundary(app)

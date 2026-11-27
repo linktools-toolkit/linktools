@@ -3,6 +3,8 @@
 """Initial standalone turns commit their outcome and canonical fork context together."""
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -27,9 +29,27 @@ from tests.ai.test_pending_turn_commit import (
     _runtime_commands,
     _snapshot,
     _storage,
+    _session,
     _turn_state,
 )
 pytestmark = pytest.mark.asyncio
+
+
+@asynccontextmanager
+async def _sessionless_state(backend: str, path: Path) -> AsyncIterator[_TurnState]:
+    if backend == "memory":
+        async with _turn_state(backend, path) as state:
+            yield state
+        return
+    async with Persistence.open(_NAMESPACE, storage=_storage(backend, path), tenant_id="tenant") as storage:
+        # Create an unrelated canonical Session to detect unintended writes;
+        # the pending Execution does not depend on any Session owner.
+        await storage.session_turns.create("session", config={})
+        group = storage.execution.executions.state_store.storage_group
+        # Initialize the archive outside terminal-write and lost-ack measurement.
+        await group.open_archive(create=True)
+        unrelated = replace(_session(), history_id="history", agent_id="default", owner_principal_id="principal")
+        yield _TurnState(storage, _runtime_commands(storage, _NAMESPACE), unrelated)
 
 
 def _standalone(state, **kwargs):
@@ -62,6 +82,8 @@ async def _commit(state, turn, **kwargs):
 
 
 async def _conversation(state):
+    if state.storage.session_turns is not None:
+        return dict(await state.storage.session_turns.get_session(state.session.session_id))
     session = await state.storage.conversation.sessions.get(state.session.session_id, tenant_id="tenant")
     history = await state.storage.conversation.histories.get(state.session.history_id, tenant_id="tenant")
     sequence = await state.storage.conversation.sessions.timeline_head(state.session.session_id, tenant_id="tenant")
@@ -73,7 +95,7 @@ async def _conversation(state):
 
 @pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_sessionless_pending_commit_replay_and_unique_result(tmp_path: Path, backend: str):
-    async with _turn_state(backend, tmp_path) as state:
+    async with _sessionless_state(backend, tmp_path) as state:
         turn = _standalone(state)
         before = await _conversation(state)
         transactions = set()
@@ -111,7 +133,7 @@ async def test_sessionless_pending_commit_replay_and_unique_result(tmp_path: Pat
 @pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("invalid", ("session", "cursor", "run", "checkpoint", "previous", "fork", "root", "execution_session"))
 async def test_sessionless_pending_rejects_partial_context_and_lineage(tmp_path: Path, backend: str, invalid: str):
-    async with _turn_state(backend, tmp_path) as state:
+    async with _sessionless_state(backend, tmp_path) as state:
         turn = _standalone(state)
         kwargs = {}
         if invalid in {"session", "cursor", "run", "checkpoint"}:
@@ -129,13 +151,15 @@ async def test_sessionless_pending_rejects_partial_context_and_lineage(tmp_path:
         before = await _snapshot(state)
         with pytest.raises(AIError) as raised:
             await _commit(state, turn, **kwargs)
-        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        expected = (ErrorCode.RUNTIME_DEPENDENCY_NOT_READY if backend == "sqlite" and invalid == "session"
+                    else ErrorCode.STORAGE_INTEGRITY_ERROR)
+        assert raised.value.code is expected
         assert await _snapshot(state) == before
 
 
 @pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_sessionless_pending_failure_rolls_back_every_domain(tmp_path: Path, backend: str, monkeypatch):
-    async with _turn_state(backend, tmp_path) as state:
+    async with _sessionless_state(backend, tmp_path) as state:
         turn = _standalone(state)
         before = await _snapshot(state)
         repository = state.storage.execution.executions
@@ -158,7 +182,7 @@ async def test_sessionless_pending_failure_rolls_back_every_domain(tmp_path: Pat
 @pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("readable", (True, False))
 async def test_sessionless_pending_lost_ack_requires_strong_confirmation(tmp_path: Path, backend: str, readable: bool, monkeypatch):
-    async with _turn_state(backend, tmp_path) as state:
+    async with _sessionless_state(backend, tmp_path) as state:
         turn = _standalone(state)
         store = state.storage.execution.executions.state_store
         group = store.storage_group
@@ -193,7 +217,7 @@ async def test_sessionless_pending_lost_ack_requires_strong_confirmation(tmp_pat
 @pytest.mark.parametrize("backend", ("memory", "sqlite",))
 @pytest.mark.parametrize("prepared", (False, True))
 async def test_sessionless_pending_promotes_before_effects(tmp_path: Path, backend: str, prepared: bool):
-    async with _turn_state(backend, tmp_path) as state:
+    async with _sessionless_state(backend, tmp_path) as state:
         turn = _standalone(state)
         before = await _conversation(state)
         context = RuntimePayloadRef(StoredPayload.inline_bytes(b"[]"), PersistenceDomain.EXECUTION) if prepared else None
@@ -210,7 +234,7 @@ async def test_sessionless_pending_promotes_before_effects(tmp_path: Path, backe
 async def test_sessionless_pending_independent_connections_obey_request_identity(
     tmp_path: Path, monkeypatch, identity: str,
 ):
-    async with _turn_state("sqlite", tmp_path) as first:
+    async with _sessionless_state("sqlite", tmp_path) as first:
         other = Persistence(_storage("sqlite", tmp_path))
         await other.initialize(namespace=_NAMESPACE, tenant_id="tenant")
         try:

@@ -160,7 +160,7 @@ async def test_observed_retention_reads_clock_and_root_evidence_together(
             before = await store.read(lambda tx: tx.get_record(key))
         engine = store.storage_group.context.engine
         if case != "present":
-            sequences = store.storage_group.metadata.tables["ai_step_sequences"]
+            sequences = store.storage_group.metadata.tables["ai_message_sequences"]
             async with engine.begin() as connection:
                 removed = await connection.execute(delete(sequences).where(
                     sequences.c.store_locator == native_store_locator(target.store_key),
@@ -189,8 +189,8 @@ async def test_observed_retention_reads_clock_and_root_evidence_together(
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", observe)
 
-        combined = tuple(sql for sql in reads if "observed_at" in sql and "ai_step_sequences" in sql)
-        rereads = tuple(sql for sql in reads if "observed_at" not in sql and "ai_step_sequences" in sql)
+        combined = tuple(sql for sql in reads if "observed_at" in sql and "ai_message_sequences" in sql)
+        rereads = tuple(sql for sql in reads if "observed_at" not in sql and "ai_message_sequences" in sql)
         assert len(combined) == 1
         if case == "present":
             assert reads == list(combined)

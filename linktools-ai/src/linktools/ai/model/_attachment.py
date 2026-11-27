@@ -34,7 +34,7 @@ from ..core import (
     normalize_json_value,
 )
 from ..errors import AIError, ErrorCode
-from . import ReferencedContent
+from ._referenced_content import ReferencedContent
 from ..workspace import validate_workspace_path
 
 _URL_TYPES = (ImageUrl, AudioUrl, DocumentUrl, VideoUrl)

@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Generic, Literal, Protocol, TypeVar, runtime_checkable
 
-from ..core import CorrelationData, ExecutionStatus, JsonValue, Principal
+from ..core import CorrelationData, ExecutionStatus, JsonValue, OperationLedgerRecord, Principal
 from ..errors import AIError, ErrorCode
 from ._capture import TaskInvocationInputRef
 from ._graph import TaskDependencyResult, TaskLease, TaskNode
@@ -96,6 +96,7 @@ class TaskNodeInvocation:
     dependency_states: "Mapping[str, TaskDependencyState]" = field(default_factory=dict)
     task_lease: "TaskLease | None" = None
     input_capture: "TaskInvocationInputRef | None" = None
+    cancel_authority: tuple[OperationLedgerRecord, Principal] | None = None
 
 
 class TaskNodeRunner(Protocol, Generic[AppT]):

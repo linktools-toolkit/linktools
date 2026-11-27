@@ -37,8 +37,8 @@ async def test_retained_terminal_replay_confirms_canonical_receipt(
     storage = (PersistenceStorage.from_plan(PersistencePlan(
         execution=execution_route,
         trace=execution_route,
-        conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
-    )) if split_release_ack else PersistenceStorage.sqlite(tmp_path / "state.db"))
+        conversation=StorageRoute.memory(),
+    )) if split_release_ack else PersistenceStorage.in_memory())
     original = StateCommands.commit_terminal_checkpoint
     confirmed: list[ExecutionTerminalCommitResult] = []
     errors: list[BaseException] = []

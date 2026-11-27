@@ -15,6 +15,8 @@ from ..storage import (
     sql_unique,
 )
 
+from .state import STORE_KEY_MAX_BYTES
+
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
 
@@ -33,7 +35,7 @@ def build_trace_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData
 
     events = Table(
         "ai_trace_events", metadata, sql_id_column(),
-        Column("store_key", binary(128), nullable=False,
+        Column("store_key", binary(STORE_KEY_MAX_BYTES), nullable=False,
                comment="Exact Trace store partition identity."),
         Column("run_id", binary(128), nullable=False,
                comment="Original UTF-8 agent run identifier."),
@@ -55,12 +57,12 @@ def build_trace_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData
                comment="Original agent graph step index."),
         Column("timestamp", String(64), nullable=False,
                comment="Original event timestamp encoded as ISO 8601."),
-        Column("order_key", binary(64), nullable=False,
+        Column("order_key", binary(16), nullable=False,
                comment="UTC event timestamp and sequence for stable chronological paging."),
         Column("request_identity", binary(128), nullable=True,
                comment="Original model request correlation string; leading zeros remain significant."),
-        Column("request_number", binary(128), nullable=True,
-               comment="Canonical decimal request number used only for numeric filtering."),
+        Column("request_number", binary(54), nullable=True,
+               comment="Unsigned binary request number used only for numeric filtering."),
         Column("message_identity", binary(128), nullable=True,
                comment="Successful response message identity; other message metadata remains in the body."),
         Column("tool_call_id", binary(128), nullable=True,

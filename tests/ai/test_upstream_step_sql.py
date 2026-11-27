@@ -27,8 +27,8 @@ from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.schema import CreateIndex, CreateTable
 
-from linktools.ai.core import RESOURCE_ID_MAX_BYTES, validate_resource_id
-from linktools.ai.errors import AIError
+from linktools.ai.core import AGENT_RUN_ID_MAX_BYTES, RESOURCE_ID_MAX_BYTES, validate_resource_id
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
 from linktools.ai.persistence._step_store import SqlStepStore
 
@@ -81,19 +81,20 @@ async def test_sql_lineage_filters_preserve_bounded_exact_identifiers_under_padd
     store = SqlStepStore(engine, namespace="steps", tenant_id="one")
     other = SqlStepStore(engine, namespace="steps", tenant_id="two")
     prefix = "共同前缀" + "x" * (RESOURCE_ID_MAX_BYTES - len("共同前缀".encode()) - 1)
+    parent = "界" * 21
     records = [
-        RunRecord(run_id="exact", conversation_id=prefix + "a", parent_run_id=prefix + "a"),
-        RunRecord(run_id="other-parent", conversation_id=prefix + "a", parent_run_id=prefix + "b"),
-        RunRecord(run_id="other-conversation", conversation_id=prefix + "b", parent_run_id=prefix + "a"),
+        RunRecord(run_id="exact", conversation_id=prefix + "a", parent_run_id=parent + "a"),
+        RunRecord(run_id="other-parent", conversation_id=prefix + "a", parent_run_id=parent + "b"),
+        RunRecord(run_id="other-conversation", conversation_id=prefix + "b", parent_run_id=parent + "a"),
         RunRecord(run_id="missing"),
     ]
     try:
         for record in records:
             await store.register_run(record)
         await other.register_run(records[0])
-        assert await store.list_runs(conversation_id=prefix + "a", parent_run_id=prefix + "a") == records[:1]
+        assert await store.list_runs(conversation_id=prefix + "a", parent_run_id=parent + "a") == records[:1]
         assert {record.run_id for record in await store.list_runs(conversation_id=prefix + "a")} == {"exact", "other-parent"}
-        assert {record.run_id for record in await store.list_runs(parent_run_id=prefix + "a")} == {"exact", "other-conversation"}
+        assert {record.run_id for record in await store.list_runs(parent_run_id=parent + "a")} == {"exact", "other-conversation"}
         assert await other.list_runs() == records[:1]
         assert len(await store.list_runs()) == len(records)
         for field in ("run_id", "conversation_id", "parent_run_id"):
@@ -177,7 +178,8 @@ async def test_snapshot_preserves_native_messages_and_official_continue_run(stor
 
 @pytest.mark.asyncio
 async def test_sql_partitions_isolate_run_and_message_keys(tmp_path: Path) -> None:
-    run_id = "run-" + "x" * (RESOURCE_ID_MAX_BYTES - 4)
+    run_id = "界" * 21 + "a"
+    assert len(run_id.encode()) == AGENT_RUN_ID_MAX_BYTES
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'scopes.db'}")
     stores = [SqlStepStore(engine, namespace=namespace, tenant_id=tenant, tool_effect_store=InMemoryStepStore())
               for namespace, tenant in [("one", "a"), ("one", "b"), ("two", "a")]]
@@ -203,6 +205,30 @@ async def test_sql_partitions_isolate_run_and_message_keys(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_sql_rejects_overlong_run_identity_before_initialization(tmp_path: Path, monkeypatch) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'bounds.db'}")
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one")
+
+    async def unexpected_initialization() -> None:
+        pytest.fail("invalid run identity must not reach storage")
+
+    too_long = "界" * 21 + "ab"
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(store, "initialize", unexpected_initialization)
+            with pytest.raises(AIError) as error:
+                await store.register_run(RunRecord(run_id=too_long))
+            assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
+            with pytest.raises(AIError) as error:
+                await store.save_snapshot(ContinuableSnapshot(run_id="run", parent_run_id=too_long,
+                                                               step_index=0, messages=[]))
+            assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
+    finally:
+        await store.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_sql_failed_reference_publication_rolls_back_snapshot_body_and_replay_key(tmp_path: Path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'atomic.db'}")
     store = SqlStepStore(engine, namespace="steps", tenant_id="one", tool_effect_store=InMemoryStepStore())
@@ -211,7 +237,7 @@ async def test_sql_failed_reference_publication_rolls_back_snapshot_body_and_rep
                                     messages=[ModelRequest(parts=[UserPromptPart("message")])])
 
     def fail_reference(connection, cursor, statement, parameters, context, many):
-        if statement.startswith("INSERT INTO ai_step_sequences"):
+        if statement.startswith("INSERT INTO ai_message_sequences"):
             raise RuntimeError("reference publication interrupted")
 
     try:
@@ -221,8 +247,8 @@ async def test_sql_failed_reference_publication_rolls_back_snapshot_body_and_rep
         event.remove(engine.sync_engine, "before_cursor_execute", fail_reference)
         assert await store.latest_snapshot(run_id="run") is None
         async with engine.connect() as connection:
-            for table in ("snapshots", "messages", "sequences"):
-                assert await connection.scalar(text(f"SELECT count(*) FROM ai_step_{table}")) == 0
+            for table in ("ai_step_snapshots", "ai_messages", "ai_message_sequences"):
+                assert await connection.scalar(text(f"SELECT count(*) FROM {table}")) == 0
         await store.save_snapshot(snapshot)
         assert await store.latest_snapshot(run_id="run") == snapshot
     finally:
@@ -249,7 +275,7 @@ async def test_snapshot_pruning_and_body_lookup_stay_in_their_partition(tmp_path
         assert await stores[1].latest_snapshot(run_id="run") == first
         await stores[1].save_snapshot(second)
         async with engine.begin() as connection:
-            await connection.execute(text("DELETE FROM ai_step_messages WHERE store_key = :scope"),
+            await connection.execute(text("DELETE FROM ai_messages WHERE store_key = :scope"),
                                      {"scope": stores[0]._store_key})
         with pytest.raises(ValueError, match="missing or corrupt"):
             await stores[0].latest_snapshot(run_id="run")
@@ -297,8 +323,8 @@ async def test_sql_large_message_round_trip_and_snapshot_deduplication(tmp_path:
         await store.save_snapshot(second)
         assert await store.latest_snapshot(run_id="run") == second
         async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == len(messages)
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == len(messages)
+            assert await connection.scalar(text("SELECT count(*) FROM ai_messages")) == len(messages)
+            assert await connection.scalar(text("SELECT count(*) FROM ai_message_sequences")) == len(messages)
     finally:
         await store.close()
         await engine.dispose()
@@ -322,12 +348,12 @@ async def test_sql_corrupt_or_missing_message_reference_fails_closed(tmp_path: P
         snapshot = ContinuableSnapshot(run_id="run", step_index=0, messages=[ModelResponse(parts=[TextPart("original")])])
         await store.save_snapshot(snapshot)
         async with engine.begin() as connection:
-            await connection.execute(text("UPDATE ai_step_messages SET message = :body"), {"body": "{}"})
+            await connection.execute(text("UPDATE ai_messages SET message = :body"), {"body": "{}"})
         with pytest.raises(ValueError, match="missing or corrupt"):
             await store.latest_snapshot(run_id="run")
         assert await store.list_snapshots(run_id="run") == []
         async with engine.begin() as connection:
-            await connection.execute(text("DELETE FROM ai_step_sequences"))
+            await connection.execute(text("DELETE FROM ai_message_sequences"))
         with pytest.raises(ValueError, match="incomplete"):
             await store.latest_snapshot(run_id="run")
         assert await store.list_snapshots(run_id="run") == []
@@ -462,8 +488,9 @@ def test_native_indexes_use_bounded_original_identifiers(dialect) -> None:
     for name, lookups in expected.items():
         table = metadata.tables["ai_step_" + name]
         for column in ("run_id", "conversation_id", "parent_run_id"):
-            assert table.c[column].type.length == RESOURCE_ID_MAX_BYTES
-            assert "VARCHAR(128)" in str(table.c[column].type.compile(dialect=dialect))
+            width = RESOURCE_ID_MAX_BYTES if column == "conversation_id" else AGENT_RUN_ID_MAX_BYTES
+            assert table.c[column].type.length == width
+            assert f"VARCHAR({width})" in str(table.c[column].type.compile(dialect=dialect))
         indexes = {tuple(column.name for column in index.columns): index for index in table.indexes
                    if index.info.get("ddl_dialect") == kind}
         for columns, unique in lookups.items():
@@ -483,7 +510,13 @@ def test_native_indexes_use_bounded_original_identifiers(dialect) -> None:
                 key_bytes = sum(column.type.length * (1 if isinstance(column.type, LargeBinary) else 4)
                                 if getattr(column.type, "length", None) else 1
                                 for column in (table.c[name] for name in columns))
-                assert key_bytes == (896 if "idempotency_key" in columns else 769 if "pruned" in columns else 768)
+                assert key_bytes == {
+                    ("store_locator", "run_id"): 512,
+                    ("store_locator", "conversation_id"): 768,
+                    ("store_locator", "parent_run_id"): 512,
+                    ("store_locator", "run_id", "idempotency_key"): 640,
+                    ("store_locator", "run_id", "pruned"): 513,
+                }[columns]
                 assert key_bytes <= 3072
 
 

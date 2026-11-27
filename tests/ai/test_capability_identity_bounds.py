@@ -182,7 +182,7 @@ async def test_maximum_capability_receipts_replay_only_within_their_exact_scope(
     await state.initialize(namespace="namespace", tenant_id="tenant")
     store = state.execution.executions.state_store
     persisted = []
-    original = ("界" * 42 + "ab", "界" * 42 + "ab", _CAPABILITY_ID, _REVISION, _RUN_ID, _WRITE_KEY)
+    original = ("界" * 21 + "a", "界" * 21 + "a", _CAPABILITY_ID, _REVISION, _RUN_ID, _WRITE_KEY)
     scopes = [original]
     for index in range(len(original)):
         scope = list(original)

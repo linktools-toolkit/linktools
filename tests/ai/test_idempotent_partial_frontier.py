@@ -63,7 +63,7 @@ def test_recovery_preserves_published_partial_tool_result(tmp_path: Path, rich: 
                 auto_recover=False, metrics=None,
             ) as runtime:
                 if mode == "create":
-                    handle = await (await runtime.agents.get().create_session("session")).start("do both")
+                    handle = await runtime.agents.get().start("do both")
                     await asyncio.wait_for(pending.wait(), 5)
                     trace = runtime._run_store.read_store(PersistenceDomain.TRACE)
                     checkpoints = runtime._run_store.read_store(PersistenceDomain.CHECKPOINT)

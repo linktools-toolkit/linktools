@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import asyncio
 from contextlib import AsyncExitStack
 from pathlib import Path
@@ -7,7 +10,8 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolRetu
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.capability import AgentContext, ExecutionCapability, StepPersistenceCapability, TraceCapability
-from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.core import TenantAuthorizationPolicy
+from linktools.ai.persistence.turns import SessionTurnKey
 from linktools.ai.session import CreateSessionRequest
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.persistence import PersistenceStorage, StateTurnResources
@@ -15,6 +19,10 @@ from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.session import SessionTurnNotice
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
+
+
+class _HostAuthorization(TenantAuthorizationPolicy):
+    pass
 
 
 @pytest.mark.asyncio
@@ -47,8 +55,45 @@ async def test_observe_turns_follows_owned_boundaries(tmp_path: Path, backend: s
             await provision_runtime_database(engine)
             coordination = StateTurnResources() if backend == "coordinated" else None
             storage = PersistenceStorage.sql(engine, coordination=coordination)
-        runtime = await resources.enter_async_context(Runtime.open("default", storage=storage, features=features))
+        runtime = await resources.enter_async_context(Runtime.open(
+            "default", storage=storage, features=features,
+            authorization=None if backend == "memory" else _HostAuthorization(),
+        ))
         principal = runtime.default_principal
+        if backend != "memory":
+            sessions = runtime.sessions
+            await sessions.create_turn_session("session", principal=principal)
+            lifecycle, frames = [], []
+
+            def fail(_notice):
+                raise RuntimeError("callback must not break the turn")
+
+            unsubscribe_failed = sessions.observe_turn_lifecycle(fail)
+            unsubscribe_lifecycle = sessions.observe_turn_lifecycle(lifecycle.append)
+            unsubscribe_frames = sessions.observe_turn_session("session", frames.append)
+            try:
+                turn = await sessions.start("session", "ask", agent="default", principal=principal, idempotency_key="turn")
+                result = await turn.wait_final(timeout_seconds=10)
+                assert result.view["output"] == {"text": "answer"}
+                replay = await sessions.start("session", "ask", agent="default", principal=principal, idempotency_key="turn")
+                assert replay.key == turn.key
+                assert [item["phase"] for item in lifecycle] == ["admitted", "terminal"]
+                assert {item["turn_id"] for item in lifecycle} == {turn.key.turn_id}
+                milestones = [item for item in frames if item["type"] in {"admitted", "tool", "terminal"}]
+                assert [item["type"] for item in milestones] == ["admitted", "tool", "tool", "terminal"]
+                assert {item["turn_id"] for item in milestones} == {turn.key.turn_id}
+                assert [(frame["item"]["key"], frame["item"]["tool_name"], frame["item"]["status"])
+                        for frame in milestones if frame["type"] == "tool"] == [
+                    ("tool:call", "lookup", "RUNNING"), ("tool:call", "lookup", "SUCCEEDED"),
+                ]
+                assert "not-for-notices" not in repr(milestones)
+                assert all(set(notice) == {"kind", "phase", "session_id", "turn_id", "revision"}
+                           for notice in lifecycle)
+            finally:
+                unsubscribe_frames()
+                unsubscribe_lifecycle()
+                unsubscribe_failed()
+            return
         await runtime.sessions.create("default", CreateSessionRequest(principal, "session", "create"))
 
         def fail(_notice):
@@ -93,20 +138,20 @@ async def test_explicit_same_id_recovery_notifies_terminal_once_without_new_admi
     async def answer(_messages, _info):
         return ModelResponse(parts=[TextPart("recovered answer")])
 
+    from .test_session_tool_process_recovery import _expire
+
     async with _open_local_runtime(workspace, model=_Models(_UsageFunctionModel(hold))) as initial:
-        actor = initial.runtime.default_principal
-        await initial.runtime.sessions.create("default", CreateSessionRequest(actor, "session", "create"))
-        turn = await initial.runtime.sessions.start("session", "ask", principal=actor, idempotency_key="turn")
+        runtime = initial.runtime
+        actor = runtime.default_principal
+        sessions = runtime.sessions
+        await sessions.create_turn_session("session", principal=actor)
+        turn = await sessions.start("session", "ask", agent="default", principal=actor, idempotency_key="turn")
         await asyncio.wait_for(entered.wait(), 10)
         rejected_notices = []
-        unsubscribe = initial.runtime.sessions.observe_turns(rejected_notices.append)
+        unsubscribe = sessions.observe_turn_lifecycle(rejected_notices.append)
         try:
-            with pytest.raises(AIError) as error:
-                await initial.runtime.executions.recover(
-                    turn.execution_id, principal=actor, idempotency_key="rejected",
-                )
-            assert error.value.code is ErrorCode.STORAGE_CONFLICT
-            await asyncio.wait_for(initial.runtime.handoff(), 10)
+            assert not await sessions.recover_turn("session", turn.key.turn_id, principal=actor)
+            await asyncio.wait_for(runtime.handoff(), 10)
             assert not rejected_notices
         finally:
             unsubscribe()
@@ -114,22 +159,32 @@ async def test_explicit_same_id_recovery_notifies_terminal_once_without_new_admi
     async with _open_local_runtime(workspace, model=_Models(_UsageFunctionModel(answer))) as successor:
         runtime = successor.runtime
         actor = runtime.default_principal
-        assert (await runtime.executions.inspect(turn.execution_id, principal=actor)).status.value == "STARTED"
-        notices = []
-        unsubscribe = runtime.sessions.observe_turns(notices.append)
+        sessions = runtime.sessions
+        assert (await runtime.history.turn_session_state("session", principal=actor))["active_turn_id"] == turn.key.turn_id
+        await _expire(runtime._state.session_turns, SessionTurnKey("session", turn.key.turn_id), generation=1)
+        notices, frames = [], []
+        unsubscribe = sessions.observe_turn_lifecycle(notices.append)
+        unsubscribe_frames = sessions.observe_turn_session("session", frames.append)
         try:
-            recovered = await runtime.executions.recover(turn.execution_id, principal=actor, idempotency_key="recover")
-            assert recovered.execution_id == turn.execution_id
-            result = await runtime.executions.wait(turn.execution_id, principal=actor, timeout_seconds=10)
-            assert result.result.output == {"text": "recovered answer"}
-            replay = await runtime.executions.recover(turn.execution_id, principal=actor, idempotency_key="recover")
-            assert replay.execution_id == turn.execution_id
-            detail = await runtime.history.session_detail("session", principal=actor)
-            assert detail.session.active_execution_id is None
-            saved, = detail.timeline.items
-            assert saved.conversation_committed and saved.execution_id == turn.execution_id
-            assert [(notice.kind, notice.session_id, notice.execution_id) for notice in notices] == [
-                ("terminal", "session", turn.execution_id),
+            assert await sessions.recover_turn("session", turn.key.turn_id, principal=actor)
+            replay = await sessions.start("session", "ask", agent="default", principal=actor, idempotency_key="turn")
+            assert replay.key == turn.key
+            result = await replay.wait_final(timeout_seconds=10)
+            assert result.view["output"] == {"text": "recovered answer"}
+            assert not await sessions.recover_turn("session", turn.key.turn_id, principal=actor)
+            current = await runtime.history.turn_session_state("session", principal=actor)
+            assert current["active_turn_id"] is None and current["last_turn_no"] == 1
+            saved = await runtime.history.turn_result("session", turn.key.turn_id, principal=actor)
+            assert saved["conversation_committed"] and saved["turn_id"] == turn.key.turn_id
+            assert [(notice["phase"], notice["session_id"], notice["turn_id"]) for notice in notices] == [
+                ("admitted", "session", turn.key.turn_id),
+                ("terminal", "session", turn.key.turn_id),
+            ]
+            assert [(frame["type"], frame["turn_id"], frame["turn_no"], frame["generation"])
+                    for frame in frames if frame["type"] in {"admitted", "terminal"}] == [
+                ("admitted", turn.key.turn_id, 1, 2),
+                ("terminal", turn.key.turn_id, 1, 2),
             ]
         finally:
+            unsubscribe_frames()
             unsubscribe()

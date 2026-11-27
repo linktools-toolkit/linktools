@@ -15,12 +15,12 @@ from ._runtime_process_test_helpers import _RuntimeProcess
     "active", pytest.param("admitted", marks=pytest.mark.merge), "pending",
 ))
 def test_sql_orphan_waits_for_explicit_recovery(tmp_path: Path, phase: str) -> None:
-    owner = _RuntimeProcess(tmp_path / "runtime.db", phase=phase)
+    owner = _RuntimeProcess(tmp_path / "runtime.db", mode="standalone", phase=phase)
     remote = None
     try:
         owner.crash()
         remote = _RuntimeProcess(
-            tmp_path / "runtime.db", phase=phase, execution_id=owner.initial["execution_id"],
+            tmp_path / "runtime.db", mode="standalone", phase=phase, execution_id=owner.initial["execution_id"],
         )
         assert remote.initial["generation"] == owner.initial["generation"]
         assert remote.initial["model_calls"] == 0
@@ -47,11 +47,11 @@ def test_sql_orphan_waits_for_explicit_recovery(tmp_path: Path, phase: str) -> N
 
 
 def test_explicit_recovery_finishes_orphaned_cancel_without_restarting_model(tmp_path: Path) -> None:
-    owner = _RuntimeProcess(tmp_path / "runtime.db")
+    owner = _RuntimeProcess(tmp_path / "runtime.db", mode="standalone")
     remote = None
     try:
         remote = _RuntimeProcess(
-            tmp_path / "runtime.db", execution_id=owner.initial["execution_id"],
+            tmp_path / "runtime.db", mode="standalone", execution_id=owner.initial["execution_id"],
         )
         # This scenario starts after the owner's pending observations are durable.
         # A projection racing cancellation has its own explicit-CAS retry contract.
@@ -78,11 +78,12 @@ def test_explicit_recovery_finishes_orphaned_cancel_without_restarting_model(tmp
 
 
 def test_sql_startup_completes_a_prepared_terminal_handoff(tmp_path: Path) -> None:
-    owner = _RuntimeProcess(tmp_path / "runtime.db", phase="handoff")
+    owner = _RuntimeProcess(tmp_path / "runtime.db", mode="standalone", phase="handoff")
     remote = None
     try:
+        assert owner.initial["handoff_phase"] == "prepared"
         remote = _RuntimeProcess(
-            tmp_path / "runtime.db", phase="handoff", execution_id=owner.initial["execution_id"],
+            tmp_path / "runtime.db", mode="standalone", phase="handoff", execution_id=owner.initial["execution_id"],
         )
         assert owner.process.is_alive()
         assert remote.initial["status"] == "SUCCEEDED"
@@ -101,12 +102,12 @@ def test_sql_startup_completes_a_prepared_terminal_handoff(tmp_path: Path) -> No
 
 @pytest.mark.parametrize("phase", ("local_sqlite",))
 def test_exclusive_execution_route_preserves_automatic_crash_recovery(tmp_path: Path, phase: str) -> None:
-    owner = _RuntimeProcess(tmp_path / "runtime.db", phase=phase)
+    owner = _RuntimeProcess(tmp_path / "runtime.db", mode="standalone", phase=phase)
     remote = None
     try:
         owner.crash()
         remote = _RuntimeProcess(
-            tmp_path / "runtime.db", phase=phase, execution_id=owner.initial["execution_id"],
+            tmp_path / "runtime.db", mode="standalone", phase=phase, execution_id=owner.initial["execution_id"],
         )
         assert remote.initial["generation"] > owner.initial["generation"]
         assert remote.request("await_model")["model_calls"] == 1
@@ -119,10 +120,10 @@ def test_exclusive_execution_route_preserves_automatic_crash_recovery(tmp_path: 
 
 
 def test_split_local_sqlite_execution_rejects_a_second_live_process(tmp_path: Path) -> None:
-    owner = _RuntimeProcess(tmp_path / "runtime.db", phase="local_sqlite")
+    owner = _RuntimeProcess(tmp_path / "runtime.db", mode="standalone", phase="local_sqlite")
     try:
         with pytest.raises(AssertionError) as rejected:
-            _RuntimeProcess(tmp_path / "runtime.db", phase="local_sqlite",
+            _RuntimeProcess(tmp_path / "runtime.db", mode="standalone", phase="local_sqlite",
                             execution_id=owner.initial["execution_id"])
         failure = rejected.value.args[0]
         assert failure["error"] == "AIError"
@@ -138,14 +139,14 @@ def test_split_local_sqlite_execution_rejects_a_second_live_process(tmp_path: Pa
 
 
 def test_reserved_orphan_resumes_only_after_explicit_start_replay(tmp_path: Path) -> None:
-    owner = _RuntimeProcess(tmp_path / "runtime.db", phase="reserved")
+    owner = _RuntimeProcess(tmp_path / "runtime.db", mode="standalone", phase="reserved")
     remote = None
     try:
         assert owner.initial["status"] == "PENDING_START"
         assert owner.initial["model_calls"] == 0
         owner.crash()
         remote = _RuntimeProcess(
-            tmp_path / "runtime.db", phase="reserved", execution_id=owner.initial["execution_id"],
+            tmp_path / "runtime.db", mode="standalone", phase="reserved", execution_id=owner.initial["execution_id"],
         )
         assert remote.initial["status"] == "PENDING_START"
         assert remote.initial["model_calls"] == 0

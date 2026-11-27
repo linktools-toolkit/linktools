@@ -21,17 +21,17 @@ from linktools.ai.inputs import TaskGraphBindingCaptureStore
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from ._runtime_test_helpers import model_features
 from .test_evaluation_consumers import FixtureModels
-from .test_task_structured_identity import _request, _seed_legacy, _service
+from .test_task_structured_identity import _request, _service
 
 
 _LIMITS = SnapshotLimits(max_entries=1000, max_bytes=1024 * 1024)
 
 
 async def _snapshot(
-    root: Path, objects: InMemoryObjectStore, *, version: int, phase: str,
+    root: Path, objects: InMemoryObjectStore, *, phase: str,
 ) -> tuple[ObjectRef, TaskGraphSubmission]:
     async with Persistence.open("structured-identity", storage=PersistenceStorage.from_root(root), tenant_id="tenant") as state:
-        submission = await _seed_legacy(state) if version == 1 else await _service(state).prepare_submission(_request())
+        submission = await _service(state).prepare_submission(_request())
         features = RuntimeFeatures("snapshot-agent")
         features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
         async with Runtime.open(persistence=state, features=model_features(FixtureModels(), features)) as runtime:
@@ -47,13 +47,12 @@ async def _snapshot(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version", (1, 2))
 @pytest.mark.parametrize("phase", ("prepared", "admitted", "cancelled", "cancelled_admitted"))
 async def test_task_identity_snapshot_roundtrip_preserves_owner(
-    tmp_path: Path, version: int, phase: str,
+    tmp_path: Path, phase: str,
 ) -> None:
     objects = InMemoryObjectStore("snapshots")
-    reference, submission = await _snapshot(tmp_path / "source", objects, version=version, phase=phase)
+    reference, submission = await _snapshot(tmp_path / "source", objects, phase=phase)
     restored = tmp_path / "restored"
     await Persistence.restore_snapshot(reference, object_store=objects, root=restored, limits=_LIMITS)
     async with Persistence.open("structured-identity", storage=PersistenceStorage.from_root(restored), tenant_id="tenant") as state:
@@ -64,18 +63,18 @@ async def test_task_identity_snapshot_roundtrip_preserves_owner(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ("prepared", "admitted", "cancelled_admitted"))
-async def test_snapshot_restore_rejects_disagreeing_submission_version_before_writing(
+async def test_snapshot_restore_rejects_disagreeing_submission_digest_before_writing(
     tmp_path: Path, phase: str,
 ) -> None:
     objects = InMemoryObjectStore("snapshots")
-    reference, submission = await _snapshot(tmp_path / "source", objects, version=2, phase=phase)
+    reference, submission = await _snapshot(tmp_path / "source", objects, phase=phase)
     manifest = json.loads(await read_object(objects, reference.key, expected_digest=reference.digest,
                                           expected_size=reference.size))
     records = manifest["domains"]["task"]["records"]
     for index, item in enumerate(records):
         if item["kind"] == "task_submission":
             record = decode_record(item)
-            mismatched = replace(submission.ref, request_identity_version=1)
+            mismatched = replace(submission.ref, request_digest="f" * 64)
             data = encode_envelope({"type": "task_submission_ref", "payload": _encode_persisted_domain(mismatched)})
             records[index] = encode_record(replace(record, data=data))
             break

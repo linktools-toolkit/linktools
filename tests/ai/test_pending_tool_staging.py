@@ -23,14 +23,16 @@ from linktools.ai.inputs import AgentTaskInput
 from linktools.ai.model.messages import decode_model_messages, encode_model_messages
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.contracts import ToolOperationRecord
-from linktools.ai.runtime import Runtime, RuntimeFeatures, Session
+from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.storage import InMemoryCacheBackend, StoredPayload
 from linktools.ai.task import Task, TaskGraph, TaskNode
 from linktools.ai.task.engine import TaskEngine
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
-from .test_pending_turn_commit import _pending_turn, _snapshot, _turn_state
+from .test_pending_turn_commit import _snapshot
+from .test_pending_turn_sessionless import _standalone
+from .test_pending_turn_source_confirmation import _source_state
 
 
 def _assert_known_result(operation: ToolOperationRecord) -> None:
@@ -61,7 +63,6 @@ class _ToolGate:
 class _ToolRuntime:
     persistence: Persistence
     runtime: Runtime[None]
-    session: Session[None]
     gate: _ToolGate
 
     async def source(self, execution_id: str) -> ExecutionRecord | None:
@@ -76,8 +77,13 @@ class _ToolRuntime:
             execution_id, tenant_id=self.runtime.tenant_id,
         ))
 
+    async def start_or_join(self) -> Execution[None]:
+        execution = await self.runtime.agents.get().start("work", idempotency_key="request")
+        assert isinstance(execution, Execution)
+        return execution
+
     async def start(self) -> Execution[None]:
-        execution = await self.session.start("work", idempotency_key="request")
+        execution = await self.start_or_join()
         await asyncio.wait_for(self.gate.entered.wait(), 5)
         return execution
 
@@ -133,9 +139,8 @@ async def _tool_runtime(
         async with Runtime.open(persistence=persistence,
             features=model_features(_Models(_UsageFunctionModel(model)), features),
         ) as runtime:
-            session = await runtime.agents.get().create_session("session")
             try:
-                yield _ToolRuntime(persistence, runtime, session, gate)
+                yield _ToolRuntime(persistence, runtime, gate)
             finally:
                 gate.release.set()
                 gate.finish.set()
@@ -211,7 +216,7 @@ async def test_pending_replay_safe_tool_publishes_only_with_terminal_turn(
         assert operation.replay_safe and operation.fence > 0
         _assert_known_result(operation)
         assert observed and observed[-1] == (operation,)
-        replay = await case.session.start("work", idempotency_key="request")
+        replay = await case.start_or_join()
         assert replay.execution_id == execution.execution_id
         assert (await replay.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
         assert case.gate.effects == [execution.execution_id] and case.gate.model_calls == 2
@@ -241,7 +246,7 @@ async def test_pending_entered_tool_keeps_unknown_effect_after_live_failure(
         assert operations[0].result_payload is None
         assert operations[0].error_code == ErrorCode.TOOL_EFFECT_UNKNOWN.value
         assert case.gate.effects == [execution.execution_id] and case.gate.model_calls == 1
-        replay = await case.session.start("work", idempotency_key="request")
+        replay = await case.start_or_join()
         assert replay.execution_id == execution.execution_id
         with pytest.raises(AIError) as repeated:
             await replay.wait(timeout_seconds=5)
@@ -378,7 +383,7 @@ async def test_pending_tool_terminal_unknown_readback_keeps_one_effect_and_atomi
             assert await case.source(execution.execution_id) is None
             assert await case.operations(execution.execution_id) == ()
             with pytest.raises(AIError) as repeated:
-                await case.session.start("work", idempotency_key="request")
+                await case.start_or_join()
             assert repeated.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
             assert len(server_tasks) == 1
             assert case.gate.effects == [execution.execution_id] and case.gate.model_calls == 2
@@ -390,7 +395,7 @@ async def test_pending_tool_terminal_unknown_readback_keeps_one_effect_and_atomi
             operations = await case.operations(execution.execution_id)
             assert len(operations) == 1 and operations[0].status is ToolOperationStatus.COMPLETED
             _assert_known_result(operations[0])
-            replay = await case.session.start("work", idempotency_key="request")
+            replay = await case.start_or_join()
             assert replay.execution_id == execution.execution_id
             assert case.gate.effects == [execution.execution_id] and case.gate.model_calls == 2
         finally:
@@ -402,8 +407,8 @@ async def test_pending_tool_terminal_unknown_readback_keeps_one_effect_and_atomi
 async def test_pending_tool_terminal_rollback_leaves_no_partial_effect_fact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with _turn_state("sqlite", tmp_path) as state:
-        turn = _pending_turn(state)
+    async with _source_state("sqlite", tmp_path, standalone=True) as state:
+        turn = _standalone(state)
         execution = turn.commit.execution
         operation = ToolOperationRecord(
             tool_operation_id="operation", execution_id=execution.execution_id,
@@ -423,8 +428,8 @@ async def test_pending_tool_terminal_rollback_leaves_no_partial_effect_fact(
 
         async def commit() -> object:
             return await state.commands.commit_pending_turn(
-                turn.reservation, turn.commit, expected_session=state.session,
-                next_cursor=turn.cursor, conversation_agent_run=turn.run,
+                turn.reservation, turn.commit, expected_session=None,
+                conversation_agent_run=turn.run,
                 conversation_checkpoint=turn.checkpoint, audit_events=turn.audit_events,
                 tool_operations=(operation,),
             )
@@ -455,6 +460,6 @@ async def test_pending_tool_terminal_rollback_leaves_no_partial_effect_fact(
         await commit()
         assert await state.storage.checkpoint.tools.get_operation("operation", tenant_id="tenant") == operation
         confirmed = await state.commands.read_pending_turn(
-            turn.reservation, expected_session=state.session, tool_operations=(operation,),
+            turn.reservation, expected_session=None, tool_operations=(operation,),
         )
         assert confirmed is not None and confirmed.execution.status is ExecutionStatus.SUCCEEDED

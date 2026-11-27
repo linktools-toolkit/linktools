@@ -7,15 +7,12 @@ from datetime import datetime, timezone
 
 from ..errors import AIError, ErrorCode
 from ..storage import TurnScopeIdentity
-from ._turn_sql import ACTIVE_REQUEST, RETIRED_EXECUTION, SqlTurnProof, turn_hex, turn_session_address, turn_session_identity
-from ._turn_sql_schema import (
-    TURN_ADMISSION_TABLE, TURN_EXECUTION_MAX_BYTES, TURN_REQUEST_MAX_BYTES,
-    RUNTIME_TURN_SCOPE, TURN_SLOT_TABLE,
-)
+from ._turn_sql import SESSION, STANDALONE, SqlTurnProof, turn_hex, turn_session_address
+from ._turn_sql_schema import TURN_EXECUTION_MAX_BYTES, TURN_REQUEST_MAX_BYTES, RUNTIME_TURN_SCOPE, unoccupied_turn_route
 from .state import StoredRecord, record_key, scope_key
 
 
-TURN_SNAPSHOT_KINDS = frozenset({"turn_slot", "turn_admission"})
+TURN_SNAPSHOT_KINDS = frozenset({"turn_admission"})
 GENERIC_TURN_SNAPSHOT_KINDS = frozenset({"turn_session", "turn_request", "turn_execution"})
 
 
@@ -40,51 +37,76 @@ def _address(scope: TurnScopeIdentity, kind: str, identity: str) -> tuple[bytes,
     )
 
 
-def turn_snapshot_record(table: str, row: Mapping[str, object], *, namespace: str, tenant_id: str) -> StoredRecord:
-    """Encode one source row without persisting or exporting SQL surrogate IDs."""
-    try:
-        scope = TurnScopeIdentity(namespace, tenant_id, RUNTIME_TURN_SCOPE)
-        if table == TURN_SLOT_TABLE:
-            kind = "turn_slot"
-            identity = turn_session_identity(row["session_kind"], row["session_key"])
-            execution = row["active_execution_id"]
-            token, expiry = row["lease_token"], row["lease_expires_at"]
-            active = execution is not None
-            if expiry is not None:
-                if not isinstance(expiry, datetime):
-                    raise _integrity()
-                if expiry.tzinfo is None:
-                    expiry = expiry.replace(tzinfo=timezone.utc)
-                else:
-                    expiry = expiry.astimezone(timezone.utc)
-            key, grouped = _address(scope, kind, identity)
-            return StoredRecord(
-                key, grouped, None, kind, key, "ACTIVE" if active else "IDLE", row["revision"],
-                None if token is None else token.decode("utf-8"), row["lease_fence"], expiry,
-                {"scope": scope.scope, "session_key": identity,
-                 "execution_id": execution.decode("utf-8") if active else None},
-            )
-        if table != TURN_ADMISSION_TABLE:
-            raise _integrity()
-        proof = SqlTurnProof.from_row(row)
-        kind = "turn_admission"
-        key, grouped = _address(scope, kind, proof.execution_id)
-        return StoredRecord(key, grouped, None, kind, key, "ACTIVE" if proof.active else "RETIRED", 0, None, 0, None, {
-            "scope": scope.scope, "execution_id": proof.execution_id, "session_key": proof.session_key,
-            "request_key": proof.request_key, "request_digest": proof.request_digest, "owner_id": proof.owner_id,
-            "fence": proof.fence, "cancel_requested": proof.cancel_requested,
-            "receipt_id": proof.receipt_id, "receipt_kind": proof.receipt_kind,
-            **({"coowned": True} if proof.active and row.get("control_id") is not None else {}),
-        })
-    except (AttributeError, KeyError, TypeError, ValueError) as error:
-        raise _integrity() from error
+def _utc(value: object) -> datetime:
+    if not isinstance(value, datetime):
+        raise _integrity()
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def execution_receipt_snapshot_record(
+    row: Mapping[str, object], proof: SqlTurnProof, *, namespace: str, tenant_id: str, split_session: bool = False,
+) -> StoredRecord:
+    """Encode the portable receipt without duplicating the owning Execution body."""
+    scope = TurnScopeIdentity(namespace, tenant_id, RUNTIME_TURN_SCOPE)
+    kind = "turn_admission"
+    key, grouped = _address(scope, kind, proof.execution_id)
+    retained = row["turn_occupied_route"] if split_session else row["turn_request_route"]
+    state = "ACTIVE" if proof.active else "RETIRED" if retained == unoccupied_turn_route(row["key_locator"]) else "PARKED"
+    token = row["turn_token"].decode("ascii") if proof.active else None
+    return StoredRecord(
+        key, grouped, None, kind, key, state, row["turn_revision"], token, proof.fence, _utc(row["turn_expiry"]),
+        {"scope": scope.scope, "execution_id": proof.execution_id, "session_key": proof.session_key,
+         "request_key": proof.request_key, "execution_receipt": True, "owner_kind": row["kind"],
+         **({"split_session": True} if split_session else {}), **row["turn_receipt"]},
+    )
+
+
+def _decode_execution_receipt(record: StoredRecord, *, session_kind: int, session_key: bytes) -> dict[str, object]:
+    data = record.data
+    proof_fields = {"owner_id", "request_digest", "receipt_id", "receipt_kind", "cancel_requested"}
+    split_session = "split_session" in data
+    if (data["execution_receipt"] is not True or split_session and (session_kind != SESSION or data["split_session"] is not True)
+            or set(data) - {"split_session"} != proof_fields | {"scope", "execution_id", "session_key", "request_key", "execution_receipt", "owner_kind"}
+            or data["owner_kind"] not in ("execution", "execution_shell")
+            or session_kind not in (SESSION, STANDALONE) or record.state not in ("ACTIVE", "PARKED", "RETIRED")
+            or split_session != (session_kind == SESSION)
+            or record.lease_fence < 1 or record.lease_expires_at is None):
+        raise _integrity()
+    request = turn_hex(data["request_key"], TURN_REQUEST_MAX_BYTES)
+    if session_kind == STANDALONE and request != session_key:
+        raise _integrity()
+    active, retained = record.state == "ACTIVE", record.state != "RETIRED"
+    token = turn_hex(record.lease_owner, 32) if active else None
+    if not active and record.lease_owner is not None:
+        raise _integrity()
+    execution = _bytes(data["execution_id"], TURN_EXECUTION_MAX_BYTES)
+    receipt = {field: data[field] for field in proof_fields}
+    if session_kind == SESSION:
+        receipt["request_key"] = data["request_key"]
+    if (type(receipt["cancel_requested"]) is not bool
+            or receipt["receipt_kind"] not in (("claim", "renew", "cancel") if active else ("release", "expire"))
+            or receipt["receipt_kind"] == "claim" and receipt["cancel_requested"]
+            or receipt["receipt_kind"] == "cancel" and not receipt["cancel_requested"]):
+        raise _integrity()
+    for field, width in (("owner_id", 32), ("request_digest", 64), ("receipt_id", 32)):
+        turn_hex(receipt[field], width)
+    if active and receipt["receipt_kind"] == "claim" and token != receipt["receipt_id"].encode("ascii"):
+        raise _integrity()
+    return {
+        "owner_kind": data["owner_kind"], "split_session": split_session,
+        "turn_occupied_route": session_key if split_session and retained else None,
+        "session_kind": session_kind, "session_key": session_key,
+        "execution_id": execution, "turn_request_route": request if active or session_kind == STANDALONE and retained else None,
+        "turn_receipt": receipt, "turn_token": token, "turn_fence": record.lease_fence,
+        "turn_revision": record.storage_revision, "turn_expiry": _utc(record.lease_expires_at),
+    }
 
 
 def decode_turn_snapshot(
-    records: Sequence[StoredRecord], *, namespace: str, tenant_id: str, store_key: bytes = b"",
-) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    """Validate logical cross-links before returning slot/admission restore values."""
-    slots, admissions = {}, {}
+    records: Sequence[StoredRecord], *, namespace: str, tenant_id: str,
+) -> list[dict[str, object]]:
+    """Validate current portable Execution receipts and their exact retained routes."""
+    execution_receipts = {}
     requests = set()
     for record in records:
         if record.kind not in TURN_SNAPSHOT_KINDS:
@@ -94,76 +116,39 @@ def decode_turn_snapshot(
             scope = TurnScopeIdentity(namespace, tenant_id, data["scope"])
             if scope.scope != RUNTIME_TURN_SCOPE:
                 raise _integrity()
-            is_slot = record.kind == "turn_slot"
-            identity = data["session_key"] if is_slot else data["execution_id"]
+            identity = data["execution_id"]
             key, grouped = _address(scope, record.kind, identity)
             if ((record.key, record.scope_key, record.sort_key) != (key, grouped, key)
                     or record.parent_key is not None or record.subject_id is not None
                     or record.payload_bytes is not None):
                 raise _integrity()
             session_kind, session_key = turn_session_address(data["session_key"])
-            row = {"store_key": store_key, "session_kind": session_kind, "session_key": session_key}
-            if is_slot:
-                if set(data) != {"scope", "session_key", "execution_id"} or record.state not in ("ACTIVE", "IDLE"):
-                    raise _integrity()
-                active = record.state == "ACTIVE"
-                contents = data["execution_id"], record.lease_owner, record.lease_expires_at
-                if (active and (any(item is None for item in contents) or record.lease_fence < 1)
-                        or not active and any(item is not None for item in contents)):
-                    raise _integrity()
-                row.update(
-                    active_execution_id=_bytes(data["execution_id"], TURN_EXECUTION_MAX_BYTES) if active else None,
-                    lease_token=turn_hex(record.lease_owner, 32) if active else None,
-                    lease_fence=record.lease_fence, lease_expires_at=record.lease_expires_at,
-                    revision=record.storage_revision,
-                )
-                identity = session_kind, session_key
-                if identity in slots:
-                    raise _integrity()
-                slots[identity] = row
-            else:
-                if (("coowned" in data and (data["coowned"] is not True or record.state != "ACTIVE"))
-                        or set(data) - {"coowned"} != {"scope", "session_key", "execution_id", "request_key", "request_digest",
-                                  "owner_id", "fence", "cancel_requested", "receipt_id", "receipt_kind"}
-                        or record.state not in ("ACTIVE", "RETIRED")
-                        or record.storage_revision != 0 or record.lease_owner is not None
-                        or record.lease_fence != 0 or record.lease_expires_at is not None):
-                    raise _integrity()
-                request = turn_hex(data["request_key"], TURN_REQUEST_MAX_BYTES)
-                execution = _bytes(data["execution_id"], TURN_EXECUTION_MAX_BYTES)
-                active = record.state == "ACTIVE"
-                row.update(execution_id=execution, retired_request_key=None if active else request,
-                           route_kind=ACTIVE_REQUEST if active else RETIRED_EXECUTION, route_key=request if active else execution,
-                           request_digest=data["request_digest"], owner_id=turn_hex(data["owner_id"], 32), lease_fence=data["fence"],
-                           cancel_requested=data["cancel_requested"], receipt_id=turn_hex(data["receipt_id"], 32),
-                           receipt_kind=data["receipt_kind"])
-                proof = SqlTurnProof.from_row(row)
-                if (type(proof.cancel_requested) is not bool
-                        or proof.receipt_kind == "claim" and proof.cancel_requested
-                        or proof.receipt_kind == "cancel" and not proof.cancel_requested):
-                    raise _integrity()
-                identity = row["execution_id"]
-                if identity in admissions or proof.active and request in requests:
-                    raise _integrity()
-                if data.get("coowned") is True:
-                    row["_coowned"] = True
-                admissions[identity] = row
-                if proof.active:
-                    requests.add(request)
+            receipt = _decode_execution_receipt(record, session_kind=session_kind, session_key=session_key)
+            execution = receipt["execution_id"]
+            route = receipt["turn_request_route"]
+            if execution in execution_receipts or route is not None and route in requests:
+                raise _integrity()
+            execution_receipts[execution] = receipt
+            if route is not None:
+                requests.add(route)
         except (KeyError, TypeError, ValueError) as error:
             raise _integrity() from error
 
-    for address, row in slots.items():
-        if row["active_execution_id"] is None:
-            continue
-        linked = admissions.get(row["active_execution_id"])
-        if (linked is None or linked["route_kind"] != ACTIVE_REQUEST
-                or (linked["session_kind"], linked["session_key"]) != address or linked["lease_fence"] != row["lease_fence"]
-                or linked["receipt_kind"] == "claim" and linked["receipt_id"] != row["lease_token"]):
+    standalone = [row for row in execution_receipts.values() if row["session_kind"] == STANDALONE]
+    retained = {row["session_key"]: row["turn_fence"] for row in standalone
+                if row["turn_request_route"] is not None}
+    if any(row["turn_request_route"] is None and retained.get(row["session_key"], 0) <= row["turn_fence"]
+           for row in standalone):
+        raise _integrity()
+    split_rows = [row for row in execution_receipts.values() if row["split_session"]]
+    split_current = {}
+    for row in split_rows:
+        route = row["turn_occupied_route"]
+        if route is not None and route in split_current:
             raise _integrity()
-    for execution, row in admissions.items():
-        slot = slots.get((row["session_kind"], row["session_key"]))
-        if (slot is None or slot["lease_fence"] < row["lease_fence"]
-                or row["route_kind"] == ACTIVE_REQUEST and slot["active_execution_id"] != execution):
-            raise _integrity()
-    return list(slots.values()), list(admissions.values())
+        if route is not None:
+            split_current[route] = row["turn_fence"]
+    if any(row["turn_occupied_route"] is None and split_current.get(row["session_key"], 0) <= row["turn_fence"]
+           for row in split_rows):
+        raise _integrity()
+    return list(execution_receipts.values())

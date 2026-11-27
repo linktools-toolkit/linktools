@@ -164,7 +164,7 @@ async def test_mixed_payload_batch_reuses_only_returned_rows(tmp_path: Path, rol
         finally:
             event.remove(engine, "before_cursor_execute", observe)
         assert len(statements) == 1
-        assert statements[0].startswith("INSERT INTO ai_step_messages")
+        assert statements[0].startswith("INSERT INTO ai_messages")
         assert await store.read_record(candidate.key) == (None if rollback else candidate)
         if rollback:
             await archive.ensure_content(((PAYLOAD_CODEC, b"new"),))
@@ -180,7 +180,7 @@ async def test_mysql_payload_returning_fallback_does_not_execute() -> None:
         async def execute(self, statement):
             pytest.fail("unsupported RETURNING must leave execution to the count fallback")
 
-    table = build_step_sql_metadata().tables["ai_step_messages"]
+    table = build_step_sql_metadata().tables["ai_messages"]
     assert await MySQLDialect().insert_ignore_conflict_many_returning(
         NoExecute(), table=table, rows=({"sha256": "a" * 64},),
         index_elements=("store_locator", "sha256"), returning=("sha256",),
@@ -249,7 +249,7 @@ async def test_mixed_duplicate_rejects_corrupt_typed_size(tmp_path: Path) -> Non
         values = ((PAYLOAD_CODEC, b'body'), ('execution-binding', b'binding'))
         await archive.ensure_content(values)
         async with store.storage_group.context.engine.begin() as connection:
-            await connection.execute(text('UPDATE ai_step_messages SET raw_size = raw_size + 1'))
+            await connection.execute(text('UPDATE ai_messages SET raw_size = raw_size + 1'))
         with pytest.raises(AIError) as caught:
             await archive.ensure_content(values)
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -285,4 +285,4 @@ async def test_grouped_mixed_content_reads_hits_and_misses_once(tmp_path: Path) 
         finally:
             event.remove(engine, "before_cursor_execute", observe)
         assert len(reads) == 1
-        assert "ai_step_messages" in reads[0] and "ai_state_records" in reads[0]
+        assert "ai_messages" in reads[0] and "ai_state_records" in reads[0]

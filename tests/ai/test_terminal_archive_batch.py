@@ -13,9 +13,11 @@ from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, Tex
 import pytest
 from sqlalchemy import event, select
 
-from linktools.ai.capability import TraceCapability
+from linktools.ai.capability import StepPersistenceCapability, TraceCapability
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, InMemoryStepStore, RunRecord
-from linktools.ai.core import ExecutionEventType, ExecutionStatus, StopReason, UsageMetrics
+from linktools.ai.core import (
+    ExecutionEventType, ExecutionStatus, Principal, ResourceRef, StopReason, TenantAuthorizationPolicy, UsageMetrics,
+)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime
 from linktools.ai.storage import StoredPayload
@@ -25,7 +27,7 @@ from linktools.ai.persistence.runs import OfficialStepReader
 from linktools.ai.persistence._archive import ContentArchive, ContentRecord, PreparedArchive
 from linktools.ai.persistence._checkpoint_persistence import CheckpointPersistence
 from linktools.ai.persistence.contracts import (
-    ConversationCursor, ExecutionTerminalCommit, ExecutionTerminalCommitResult, ExecutionRecoveryDetail,
+    ExecutionTerminalCommit, ExecutionTerminalCommitResult, ExecutionRecoveryDetail,
     ExecutionRecoveryState, ResultRecord,
 )
 from linktools.ai.persistence._runtime_commands import StateCommands
@@ -40,7 +42,6 @@ from ._session_tool_test_helpers import _application, _relevant_kinds, _split_sq
 from .test_checkpoint_metadata_snapshot_io import _checkpoint
 from .test_incremental_projection_boundaries import _storage
 from .test_step_projection import _execution
-from .test_session_admission import _session
 
 pytestmark = pytest.mark.asyncio
 
@@ -75,7 +76,7 @@ async def test_terminal_shared_preparation_bounds_owner_reads_and_deduplicates_c
                 batches.append((first, second))
             finally:
                 event.remove(engine, "before_cursor_execute", capture)
-            assert all("ai_step_messages" not in sql and "ai_step_sequences" not in sql for sql in selected)
+            assert all("ai_messages" not in sql and "ai_message_sequences" not in sql for sql in selected)
         # Each owner captures its mutable head once; native content preparation
         # uses frozen bytes rather than querying prior message bodies.
         assert owner_reads == [(1, 1), (1, 1)]
@@ -233,8 +234,8 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
     monkeypatch.setattr(CheckpointPersistence, "materialize_recovery_checkpoint", materialize_recovery)
     monkeypatch.setattr(StateCommands, "commit_terminal_checkpoint", commit)
     async with Persistence.open('terminal-archive-tool', storage=storage) as persistence_211, Runtime.open(persistence=persistence_211, features=model_features(_ToolModels(), application)) as runtime:
-        await runtime.agents.get("default").create_session("session")
-        session = runtime.agents.get("default").session("session")
+        agent = runtime.agents.get("default")
+        session = await agent.create_session("session") if backend == "memory" else None
         group = runtime._state.execution.executions.state_store.storage_group
         mutate = group.mutate
         lost = False
@@ -249,32 +250,36 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
 
         monkeypatch.setattr(group, "mutate", lose_response)
         run_publications.clear()
-        execution = await session.start("inspect", idempotency_key="turn")
+        execution = await (agent if session is None else session).start("inspect", idempotency_key="turn")
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
         assert calls == ["lookup"] and lost == lost_ack
         expected = ["user", "tool_call", "tool_result", "assistant"]
-        assert _relevant_kinds((await session.history()).items) == expected
+        if session is not None:
+            assert _relevant_kinds((await session.history()).items) == expected
         history = await runtime.history.history(
             execution.execution_id, principal=runtime.default_principal, include_content=True,
         )
         assert _relevant_kinds(history.items) == expected
         if backend == "split":
-            retained_scopes = set()
+            scopes = {}
             for domain in (PersistenceDomain.TRACE, PersistenceDomain.CONVERSATION):
                 owner = runtime._run_store.read_store(domain)
                 content = await owner.transcript_repository.content_archive()
-                retained_scopes.add((id(owner.state_store.storage_group), content.scope_id))
-                table = build_step_sql_metadata().tables["ai_step_messages"]
+                scopes[domain] = (id(owner.state_store.storage_group), content.scope_id)
+                table = build_step_sql_metadata().tables["ai_messages"]
                 async with owner.state_store.context.engine.connect() as connection:
-                    assert (await connection.execute(select(table.c.id).where(
+                    retained = (await connection.execute(select(table.c.id).where(
                         table.c.store_key == SqlStepStore.scope_key(
                             namespace=runtime.namespace, tenant_id=runtime.tenant_id,
                         ),
-                    ).limit(1))).first() is not None
-                assert await owner.list_agent_runs()
-            assert len(retained_scopes) > 1
-            assert retained_scopes.issubset(set(run_publications))
+                    ).limit(1))).first()
+                expected_history = domain is PersistenceDomain.TRACE
+                assert (retained is not None) is expected_history
+                assert bool(await owner.list_agent_runs()) is expected_history
+            assert scopes[PersistenceDomain.TRACE] != scopes[PersistenceDomain.CONVERSATION]
+            assert scopes[PersistenceDomain.TRACE] in run_publications
+            assert scopes[PersistenceDomain.CONVERSATION] not in run_publications
         else:
             assert checked_plans == 1
             assert len(publications) == 1
@@ -283,6 +288,58 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
         assert verified_snapshots
         for snapshot in verified_snapshots:
             assert await OfficialStepReader(native.store).latest_snapshot(run_id=snapshot.run_id) == snapshot
+
+
+class _NativeSessionHost(TenantAuthorizationPolicy):
+    """Authorize the fixture's native SQL history and exact lookup return."""
+
+    permitted_turn: str | None = None
+
+    async def session_tool_return_names(
+        self, principal: Principal, session_id: str, turn: ResourceRef,
+    ) -> frozenset[str]:
+        return frozenset({"lookup"}) if session_id == "session" and turn.id == self.permitted_turn else frozenset()
+
+
+async def test_native_session_terminal_archive_retains_ordered_tool_history_without_execution(
+    tmp_path: Path,
+) -> None:
+    storage = _storage("sqlite", tmp_path)
+    calls: list[str] = []
+    application = _application(calls)
+    application.capability(StepPersistenceCapability(), scope="runtime")
+    features = model_features(_ToolModels(), application)
+    authorization = _NativeSessionHost()
+    async with (
+        Persistence.open("terminal-archive-tool", storage=storage) as state,
+        Runtime.open(persistence=state, features=features, authorization=authorization) as runtime,
+    ):
+        actor = Principal("fixture-owner", runtime.tenant_id)
+        await runtime.sessions.create_turn_session("session", principal=actor)
+        turn = await runtime.sessions.start("session", "inspect", principal=actor, agent="default",
+                                            idempotency_key="turn")
+        assert (await turn.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
+        assert await state.execution.executions.get(turn.key.turn_id, tenant_id=actor.tenant_id) is None
+
+    async with (
+        Persistence.open("terminal-archive-tool", storage=storage) as state,
+        Runtime.open(persistence=state, features=features, authorization=authorization) as runtime,
+    ):
+        result = await runtime.history.turn_result("session", turn.key.turn_id, principal=actor)
+        assert result["user_input"]["prompt"] == "inspect"
+        assert [item["item_kind"] for item in result["items"]] == ["tool_call", "assistant"]
+        assert "tool-result" not in repr(result)
+        authorization.permitted_turn = turn.key.turn_id
+        [tool_return] = await runtime.history.turn_tool_returns(
+            "session", turn.key.turn_id, principal=actor, tool_names=frozenset({"lookup"}),
+        )
+        assert (tool_return["tool_name"], tool_return["value"]) == ("lookup", "tool-result")
+        assert result["conversation_committed"]
+        replay = await runtime.sessions.start("session", "inspect", principal=actor, agent="default",
+                                              idempotency_key="turn")
+        assert replay.key == turn.key
+        assert (await replay.wait_final(timeout_seconds=5)).view == result
+    assert calls == ["lookup"]
 
 
 @pytest.mark.parametrize("foreign_scope", (False, True))
@@ -299,7 +356,7 @@ async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
         namespace="foreign" if foreign_scope else "terminal-scopes",
         tenant_id="tenant", runtime_domain=PersistenceDomain.CONVERSATION,
     )
-    current = replace(_execution(), session_id="session", conversation=True,
+    current = replace(_execution(), conversation=True,
                       conversation_agent_run_id="run", restart_checkpoints=True, recovery=ExecutionRecoveryDetail(agent_run_id="run"))
     run = AgentRunRecord("run", metadata={"history_id": "history"})
     checkpoint = _checkpoint(2)
@@ -330,14 +387,9 @@ async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
 
     try:
         await state.execution.executions.create_execution(current)
-        await state.conversation.sessions.create(replace(_session(), history_id="history"))
-        await state.conversation.sessions.admit_execution(
-            "session", tenant_id="tenant", execution_id="execution", expected=None,
-        )
         commands = StateCommands(
             state.execution.executions, namespace="terminal-scopes", events=state.execution.events,
             checkpoint=state.checkpoint, execution_run_store=trace,
-            conversation=state.conversation.sessions, conversation_history=state.conversation.histories,
             conversation_run_store=conversation, background_tasks=set(),
         )
         monkeypatch.setattr(ContentArchive, "publish", capture)
@@ -345,8 +397,7 @@ async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
 
         async def commit_terminal():
             return await commands.commit_terminal_checkpoint(
-                commit, expected_execution=current, session_id="session",
-                next_cursor=ConversationCursor("run", "history"),
+                commit, expected_execution=current,
                 conversation_agent_run=run, conversation_checkpoint=checkpoint,
                 execution_run=run, execution_checkpoints=(checkpoint,),
             )

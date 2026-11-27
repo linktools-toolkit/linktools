@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from linktools.ai.persistence import Persistence
-"""Runtime shutdown joins admitted work even after its caller is cancelled."""
-from ._runtime_test_helpers import model_features
+"""Runtime shutdown waits for admitted work to yield its storage ownership."""
 
 import asyncio
 from pathlib import Path
@@ -11,91 +9,123 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.persistence import Persistence
+from linktools.ai.capability import ExecutionCapability
+from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime
-from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.runtime._execution import DefaultExecutionService
-from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.runtime import Runtime, RuntimeFeatures
 
-from ._runtime_test_helpers import _Models, _UsageFunctionModel
+from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 from .test_mixed_pending_admission import _start, _writers
-from .test_terminal_commit_shared_runtime import _group
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel_close_waiter", (False, True))
-async def test_runtime_close_joins_pending_publication_after_start_cancellation(
+async def test_native_close_drains_committed_admission_after_caller_cancellation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancel_close_waiter: bool,
 ) -> None:
-    publishing, release, published = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    preflight_entered, storage_closed = asyncio.Event(), asyncio.Event()
+    committed, producer_cancelled, release, producer_drained = (asyncio.Event() for _ in range(4))
+    keys = []
+    calls = 0
 
-    class BlockingCache(InMemoryCacheBackend):
-        async def put(self, key, value):
-            if key.startswith("runtime-pending-execution:") and not publishing.is_set():
-                publishing.set()
-                await release.wait()
-                await super().put(key, value)
-                published.set()
-                return
-            await super().put(key, value)
+    class HostAuthorization(TenantAuthorizationPolicy):
+        """Authorize the native SQL session in both runtimes."""
 
-    async def model(messages, info):
-        assert not storage_closed.is_set()
+    async def model(_messages, _info):
+        nonlocal calls
+        assert producer_drained.is_set(), "shutdown must not dispatch the old producer"
+        calls += 1
         return ModelResponse(parts=[TextPart("answer")])
 
-    original_preflight = DefaultExecutionService.preflight_close
+    name = "native-admission-close"
+    features = RuntimeFeatures(name)
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features.agent("default", model="default", allow_tools=())
+    model_features(_Models(_UsageFunctionModel(model)), features)
+    storage = PersistenceStorage.from_root(tmp_path)
 
-    async def observe_preflight(service):
-        preflight_entered.set()
-        await original_preflight(service)
+    def open_runtime(state):
+        return Runtime.open(persistence=state, features=features, authorization=HostAuthorization())
 
-    monkeypatch.setattr(DefaultExecutionService, "preflight_close", observe_preflight)
-    cache = BlockingCache(max_bytes=2**20)
-    storage = PersistenceStorage.sqlite(tmp_path / "state.db", coordination=cache)
-    original_close = Persistence.close
+    async with Persistence.open(name, storage=storage) as state, open_runtime(state) as runtime:
+        turns = state.session_turns
+        await runtime.agents.get().create_session("session")
+        original_accept = turns.accept
 
-    async def close_storage(owner):
-        assert published.is_set(), "storage closed before admitted publication settled"
-        await original_close(owner)
-        storage_closed.set()
+        async def hold_committed_admission(key, **kwargs):
+            assert await original_accept(key, **kwargs)
+            keys.append(key)
+            committed.set()
+            try:
+                # The caller has not received its receipt yet.
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                producer_cancelled.set()
+                # Model a driver still draining the acknowledged mutation.
+                await release.wait()
+                assert state.ready
+                producer_drained.set()
+                raise
 
-    monkeypatch.setattr(Persistence, "close", close_storage)
-    async with Persistence.open('pending-admission-close', storage=storage) as persistence_62, Runtime.open(persistence=persistence_62, features=model_features(_Models(_UsageFunctionModel(model)), _group())) as runtime:
-        session = await runtime.agents.get().create_session("session")
-        starting = asyncio.create_task(session.start("question", idempotency_key="request"))
-        closing = None
-        repeated_close = None
-        try:
-            await asyncio.wait_for(publishing.wait(), 5)
-            starting.cancel()
-            closing = asyncio.create_task(runtime.close())
-            await asyncio.wait_for(preflight_entered.wait(), 5)
-            assert not closing.done()
-            assert not starting.done()
-            assert not storage_closed.is_set()
-            if cancel_close_waiter:
-                closing.cancel()
+        with monkeypatch.context() as patch:
+            patch.setattr(turns, "accept", hold_committed_admission)
+            principal = runtime.default_principal
+            sending = asyncio.create_task(runtime.sessions.start(
+                "session", "question", agent=runtime.agents.get(),
+                principal=principal, idempotency_key="request",
+            ))
+            closing = repeated = None
+            try:
+                await asyncio.wait_for(committed.wait(), 5)
+                sending.cancel()
                 with pytest.raises(asyncio.CancelledError):
-                    await closing
-                repeated_close = asyncio.create_task(runtime.close())
-                await asyncio.sleep(0)
-                assert not repeated_close.done()
-                assert not published.is_set() and not storage_closed.is_set()
-            release.set()
-            with pytest.raises(asyncio.CancelledError):
-                await asyncio.wait_for(starting, 5)
-            await asyncio.wait_for(repeated_close or closing, 5)
-            assert published.is_set() and not storage_closed.is_set()
-            assert runtime._state.ready
-        finally:
-            release.set()
-            await asyncio.gather(
-                *(task for task in (starting, closing, repeated_close) if task is not None),
-                return_exceptions=True,
-            )
-    assert storage_closed.is_set()
+                    await sending
+                closing = asyncio.create_task(runtime.close())
+                await asyncio.wait_for(producer_cancelled.wait(), 5)
+                assert not closing.done() and not producer_drained.is_set()
+                assert state.ready and calls == 0
+
+                if cancel_close_waiter:
+                    closing.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await closing
+                    repeated = asyncio.create_task(runtime.close())
+                    await asyncio.sleep(0)
+                    assert not repeated.done() and not producer_drained.is_set()
+
+                release.set()
+                await asyncio.wait_for(repeated or closing, 5)
+                assert producer_drained.is_set() and state.ready and calls == 0
+                [key] = keys
+                row = await turns.get_turn(key)
+                assert row["state"] == "accepted" and row["generation"] == 1
+                assert (await turns.get_session("session"))["active_turn_id"] == key.turn_id.encode()
+            finally:
+                release.set()
+                await asyncio.gather(
+                    *(task for task in (sending, closing, repeated) if task is not None),
+                    return_exceptions=True,
+                )
+
+    async with Persistence.open(name, storage=storage) as state, open_runtime(state) as reopened:
+        principal = reopened.default_principal
+        duplicate = await reopened.sessions.start(
+            "session", "question", agent=reopened.agents.get(), principal=principal, idempotency_key="request",
+        )
+        assert duplicate.key == key and calls == 0
+        assert not await reopened.sessions.recover_turn("session", key.turn_id, principal=principal)
+        turns = state.session_turns
+        async with turns._context.engine.begin() as connection:
+            expired = await connection.execute(turns._turns.update().filter_by(
+                **turns._turn_values(key), generation=1, state="accepted",
+            ).values(lease_until=0))
+            assert expired.rowcount == 1
+        assert await reopened.sessions.recover_turn("session", key.turn_id, principal=principal)
+        result = await duplicate.wait_final(timeout_seconds=5)
+        assert result.key == key and result.status is ExecutionStatus.SUCCEEDED
+        assert result.view["output"] == {"text": "answer"} and calls == 1
+        assert (await turns.get_turn(key))["generation"] == 2
+        assert (await turns.get_session("session"))["active_turn_id"] is None
 
 
 @pytest.mark.asyncio

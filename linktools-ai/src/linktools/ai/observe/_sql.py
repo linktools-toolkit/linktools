@@ -8,7 +8,7 @@ import json
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Protocol, cast
 
-from ..core import Page, canonical_sha256, validate_persistence_namespace, validate_resource_id
+from ..core import PERSISTENCE_NAMESPACE_MAX_BYTES, Page, canonical_sha256, validate_persistence_namespace, validate_resource_id
 from ..errors import AIError, ErrorCode
 from ..storage import (
     create_sql_storage_context,
@@ -64,7 +64,9 @@ def build_metrics_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaDa
         target,
         sql_id_column(),
         Column(
-            "namespace", sql_text_key(128).with_variant(String(128, collation="C"), "postgresql"),
+            "namespace", sql_text_key(PERSISTENCE_NAMESPACE_MAX_BYTES).with_variant(
+                String(PERSISTENCE_NAMESPACE_MAX_BYTES, collation="C"), "postgresql",
+            ),
             nullable=False, comment="Metrics namespace owning the definition.",
         ),
         Column(
@@ -103,7 +105,9 @@ def build_metrics_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaDa
         target,
         sql_id_column(),
         Column(
-            "namespace", sql_text_key(128).with_variant(String(128, collation="C"), "postgresql"),
+            "namespace", sql_text_key(PERSISTENCE_NAMESPACE_MAX_BYTES).with_variant(
+                String(PERSISTENCE_NAMESPACE_MAX_BYTES, collation="C"), "postgresql",
+            ),
             nullable=False,
             comment="Original Metrics namespace retained after pruning.",
         ),

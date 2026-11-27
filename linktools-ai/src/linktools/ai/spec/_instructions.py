@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -153,6 +153,28 @@ class RepositoryInstructions:
         if len(self.render().encode("utf-8")) > max_bytes:
             raise AIError(ErrorCode.PROMPT_TOO_LARGE)
 
+    def fit_additions(
+        self,
+        candidates: Iterable[RepositoryInstructionDocument],
+        *,
+        max_documents: int,
+        max_bytes: int,
+    ) -> "RepositoryInstructions":
+        """Select whole documents in discovery order within the remaining budget."""
+        count = len(self.documents)
+        size = len(self.render().encode("utf-8"))
+        additions = []
+        for document in candidates:
+            if count >= max_documents:
+                continue
+            rendered = RepositoryInstructions((document,)).render(include_preamble=False)
+            added_bytes = len(rendered.encode("utf-8")) + (1 if count else len(_PREAMBLE.encode("utf-8")) + 2)
+            if size + added_bytes <= max_bytes:
+                additions.append(document)
+                count += 1
+                size += added_bytes
+        return RepositoryInstructions(tuple(additions))
+
     def render(self, *, include_preamble: bool = True) -> str:
         if not self.documents:
             return ""
@@ -172,7 +194,10 @@ class RepositoryInstructionResolver(Protocol):
         path: str | Path = ".",
         *,
         exclude_sources: frozenset[str] = frozenset(),
-    ) -> RepositoryInstructions: ...
+        within: RepositoryInstructions | None = None,
+    ) -> RepositoryInstructions:
+        """Resolve strictly, or return fitting additions to the active bundle when given."""
+        ...
 
 
 class RuleInstructionResolver:
@@ -199,8 +224,11 @@ class RuleInstructionResolver:
         path: str | Path = ".",
         *,
         exclude_sources: frozenset[str] = frozenset(),
+        within: RepositoryInstructions | None = None,
     ) -> RepositoryInstructions:
         result = self._rules.for_path(path, exclude_sources=exclude_sources)
+        if within is not None:
+            return within.fit_additions(result.documents, max_documents=self._max_documents, max_bytes=self._max_bytes)
         self.validate(result)
         return result
 

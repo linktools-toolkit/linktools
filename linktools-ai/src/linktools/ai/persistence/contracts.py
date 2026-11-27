@@ -14,7 +14,6 @@ from ..execution import (
     RuntimePayloadRef,
     PendingDeferredCall,
     PendingToolContinuation,
-    RepositoryInstructionBarrier,
     ExecutionRecoveryState,
     RecoveryHandoffPhase,
     RecoveryTerminalOutcome,
@@ -48,7 +47,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Protocol, TypeVar
+from typing import TYPE_CHECKING, Protocol, TypeVar, runtime_checkable
 
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai_harness.step_persistence import ToolEffectRecord
@@ -77,6 +76,7 @@ from ..core import (
     ImmutableJsonMapping,
     OperationLedgerInput,
     OperationLedgerRecord,
+    Principal,
     OperationStatus,
     Page,
     ResourceKind,
@@ -94,8 +94,10 @@ from ..core import (
     validate_lease_owner,
     validate_memory_scope,
     validate_resource_id,
+    validate_task_graph_id,
     validate_idempotency_key,
     validate_tenant_id,
+    validate_tool_operation_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..spec import CapabilityRef
@@ -329,7 +331,7 @@ class TaskPreparedInputRecord:
 
     def __post_init__(self) -> None:
         try:
-            validate_resource_id(self.graph_id)
+            validate_task_graph_id(self.graph_id)
             validate_resource_id(self.node_id)
         except AIError as error:
             raise ValueError("prepared task identity is invalid") from error
@@ -1159,6 +1161,7 @@ class ToolOperationRecord:
         else:
             raise ValueError("tool operation status is invalid")
         try:
+            validate_tool_operation_id(self.tool_operation_id)
             validate_resource_id(self.execution_id)
             validate_resource_id(self.agent_run_id)
             validate_resource_id(self.tool_call_id)
@@ -1890,6 +1893,7 @@ class ToolOperationAdmission:
             raise ValueError("tool producer generation is invalid")
         _validate_tool_arguments_payload(self.arguments_digest, self.arguments_payload)
         try:
+            validate_tool_operation_id(self.tool_operation_id)
             validate_resource_id(self.execution_id)
             validate_resource_id(self.agent_run_id)
             validate_resource_id(self.tool_call_id)
@@ -2110,6 +2114,9 @@ class TaskRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         cancel_requested: bool = False,
+        recovery_operation: OperationLedgerRecord | None = None,
+        recovery_actor: Principal | None = None,
+        linked_execution_ids: frozenset[str] = frozenset(),
     ) -> TaskGraphView: ...
     async def requeue_recovery(
         self,
@@ -2285,7 +2292,7 @@ class ArtifactRepository(RuntimeRepository, Protocol):
 
 @dataclass(frozen=True, slots=True)
 class ConversationRepositories:
-    sessions: SessionRepository
+    sessions: SessionRepository | None
     histories: ConversationHistoryRepository
     operations: OperationLedgerRepository
 
@@ -2369,10 +2376,16 @@ class CheckpointRepositories:
 
 from ._evaluation_records import EvaluationHumanDecision
 
-__all__ = ["ExecutionObservationRecord", "ToolOperationMetadata", 'ExecutionMembershipRecord', 'ExecutionStartReceipt', 'ExecutionTerminalPublication', 'ToolBoundaryReceipt', 'ExecutionInsertionReceipt', 'AgentAttemptClaim', 'ApprovalRecord', 'ApprovalRepository', 'ArchivedContextBlock', 'ArtifactRecord', 'ArtifactRepositories', 'ArtifactRepository', 'BudgetRepository', 'ContextProjection', 'ConversationCursor', 'ConversationHistoryRecord', 'ConversationHistoryRepository', 'ConversationRepositories', 'EvaluationHumanDecision', 'EvaluationLaunchIntent', 'EvaluationRecord', 'EvaluationRepositories', 'EvaluationRepository', 'EvaluationSlotDisposition', 'EvaluationTrialEvidence', 'EventRepository', 'ExecutionCancelRequestCommit', 'ExecutionEventAppend', 'ExecutionEventRecord', 'ExecutionHistorySealRecord', 'ExecutionRecord', 'ExecutionRepositories', 'ExecutionRepository', 'ExecutionRunSealHead', 'ExecutionStartClaim', 'ExecutionStartReservation', 'ExecutionStartReservationResult', 'ExecutionStartUnknownCommit', 'ExecutionTerminalCommit', 'ExecutionTerminalCommitResult', 'ExternalCallRecord', 'ExternalCallRepository', 'HistoryQuality', 'IdempotencyRecord', 'IdempotencyRepository', 'IdempotencyTerminalUpdate', 'InlineContextBlock', 'LoadedContextMessage', 'LoadedModelContext', 'MemoryRecord', 'MemoryRepositories', 'MemoryRepository', 'ModelClientBodyRef', 'ModelClientRequestRef', 'ModelClientResponseRef', 'ModelInteractionRecord', 'OperationLedgerRepository', 'OperationTerminalUpdate', 'PendingDeferredCall', 'PendingToolContinuation', 'ExecutionRecoveryDetail', 'ExecutionRecoveryState', 'RecoveryConversationIntent', 'RecoveryHandoffPhase', 'CheckpointRepositories', 'RecoveryTerminalHandoff', 'RecoveryTerminalOutcome', 'RepositoryInstructionBarrier', 'ResultRecord', 'RuntimePayloadRef', 'RuntimeRepository', 'SessionRecord', 'SessionRepository', 'StoredAgentRunCheckpoint', 'StreamAttemptRecord', 'TaskAdmissionRepository', 'TaskPreparedInputRecord', 'TaskRepositories', 'TaskRepository', 'ToolOperationAdmission', 'ToolOperationRecord', 'ToolStateRepository', 'TranscriptChunk', 'TranscriptHeadRecord', 'TranscriptMessageRef', 'TranscriptOrigin', 'TranscriptOwnerDomain', 'TranscriptSeekDimension', 'TranscriptSeekRecord', 'TranscriptSpanRef', 'decode_tool_operation_failure', 'deferred_resource_id']
+__all__ = ["ExecutionObservationRecord", "ToolOperationMetadata", 'ExecutionMembershipRecord', 'ExecutionStartReceipt', 'ExecutionTerminalPublication', 'ToolBoundaryReceipt', 'ExecutionInsertionReceipt', 'AgentAttemptClaim', 'ApprovalRecord', 'ApprovalRepository', 'ArchivedContextBlock', 'ArtifactRecord', 'ArtifactRepositories', 'ArtifactRepository', 'BudgetRepository', 'ContextProjection', 'ConversationCursor', 'ConversationHistoryRecord', 'ConversationHistoryRepository', 'ConversationRepositories', 'EvaluationHumanDecision', 'EvaluationLaunchIntent', 'EvaluationRecord', 'EvaluationRepositories', 'EvaluationRepository', 'EvaluationSlotDisposition', 'EvaluationTrialEvidence', 'EventRepository', 'ExecutionCancelRequestCommit', 'ExecutionEventAppend', 'ExecutionEventRecord', 'ExecutionHistorySealRecord', 'ExecutionRecord', 'ExecutionRepositories', 'ExecutionRepository', 'ExecutionRunSealHead', 'ExecutionStartClaim', 'ExecutionStartReservation', 'ExecutionStartReservationResult', 'ExecutionStartUnknownCommit', 'ExecutionTerminalCommit', 'ExecutionTerminalCommitResult', 'ExternalCallRecord', 'ExternalCallRepository', 'HistoryQuality', 'IdempotencyRecord', 'IdempotencyRepository', 'IdempotencyTerminalUpdate', 'InlineContextBlock', 'LoadedContextMessage', 'LoadedModelContext', 'MemoryRecord', 'MemoryRepositories', 'MemoryRepository', 'ModelClientBodyRef', 'ModelClientRequestRef', 'ModelClientResponseRef', 'ModelInteractionRecord', 'OperationLedgerRepository', 'OperationTerminalUpdate', 'PendingDeferredCall', 'PendingToolContinuation', 'ExecutionRecoveryDetail', 'ExecutionRecoveryState', 'RecoveryConversationIntent', 'RecoveryHandoffPhase', 'CheckpointRepositories', 'RecoveryTerminalHandoff', 'RecoveryTerminalOutcome', 'ResultRecord', 'RuntimePayloadRef', 'RuntimeRepository', 'SessionRecord', 'SessionRepository', 'StoredAgentRunCheckpoint', 'StreamAttemptRecord', 'TaskAdmissionRepository', 'TaskPreparedInputRecord', 'TaskRepositories', 'TaskRepository', 'ToolOperationAdmission', 'ToolOperationRecord', 'ToolStateRepository', 'TranscriptChunk', 'TranscriptHeadRecord', 'TranscriptMessageRef', 'TranscriptOrigin', 'TranscriptOwnerDomain', 'TranscriptSeekDimension', 'TranscriptSeekRecord', 'TranscriptSpanRef', 'decode_tool_operation_failure', 'deferred_resource_id']
 
 
-class ToolStateRepository(Protocol):
+@runtime_checkable
+class ToolStateRepository(RuntimeRepository, Protocol):
+    async def settle_deferred_result(
+        self, expected: ToolOperationRecord, *,
+        result_payload: StoredPayload | None, error_code: str | None, error_payload: StoredPayload | None,
+    ) -> ToolOperationRecord: ...
+
     async def record_tool_effect(
         self, effect: ToolEffectRecord, *, execution_id: str,
         tool_operation_id: str, binding_digest: str,

@@ -267,6 +267,13 @@ async def test_external_url_attachment_does_not_claim_size_or_digest() -> None:
         await materializer.close()
 
 
+def test_binary_task_input_preserves_standard_base64_for_object_storage() -> None:
+    content = BinaryContent(data=b"\xfb\xff\xff", media_type="application/octet-stream", identifier="file")
+    draft = task_prompt_draft((content,))
+    assert draft["items"][0]["value"]["items"][0]["data"] == "+///"
+    assert decode_task_prompt_draft(draft) == (content,)
+
+
 def test_url_allow_local_force_download_round_trips() -> None:
     content = ImageUrl(
         url="https://example.com/evidence.png",

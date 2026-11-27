@@ -7,10 +7,13 @@ from dataclasses import replace
 from datetime import datetime
 from typing import TYPE_CHECKING, TypeVar
 from ._record_query import ExecutionRecoveryCandidateQuery
-from ._message_root import NativeTextReference, NativeMessageRoot
+from ._message_root import NativeTextReference, NativeMessageRoot, NativeUserInputReference
 from linktools.core import environ
 from ..core import (
     ExecutionEventType,
+    ExecutionLineageKind,
+    Principal,
+    canonical_sha256,
     ExecutionStatus,
     IdempotencyStatus,
     JsonValue,
@@ -19,9 +22,11 @@ from ..core import (
     ResourceKind,
     validate_resource_id,
     validate_idempotency_key,
+    validate_execution_request_key,
     ResourceRef,
 )
 from ..errors import AIError, ErrorCode
+from ..storage import ObjectRef
 from ..task import TaskBindingContract
 from ..execution import ExecutionMetadataRecord, ExecutionControlRecord, ExecutionResultRecord, ExecutionRetentionRecord, ExecutionTimelineRecord, ExecutionView
 from .codec import execution_prepared_handoff, decode_execution_observation, decode_execution_event_control, decode_execution_membership, pending_operation_reference, decode_execution_producer_authority, runtime_policy_reference, binding_reference, execution_payload_slots, native_user_input_reference, native_text_reference, decode_execution_metadata, decode_execution_control, decode_execution_retention, encode_envelope, encode_domain, decode_execution_producer_control, decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
@@ -90,6 +95,8 @@ _logger = environ.get_logger("ai.runtime.state.repositories")
 
 if TYPE_CHECKING:
     from ._execution_authority import ExecutionAuthority, InitialExecutionAuthority
+    from ._checkpoint_repositories import ToolRepositoryImpl
+    from ._session_turn_sql import SessionTurnKey, SqlSessionTurns
 
 
 class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
@@ -118,7 +125,9 @@ class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     def _identity_key(self, scope: str, key: str) -> tuple[str, str]:
-        return validate_resource_id(scope), validate_idempotency_key(key)
+        validate_key = (validate_execution_request_key if self._resource_kind is ResourceKind.EXECUTION
+                        else validate_idempotency_key)
+        return validate_resource_id(scope), validate_key(key)
 
     async def reserve(self, record: IdempotencyRecord) -> IdempotencyRecord:
         _require_tenant(record, self._tenant_id)
@@ -204,6 +213,10 @@ _ContentValueT = TypeVar("_ContentValueT")
 
 
 class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
+    def bind_archive_object_reader(self, reader: Callable[[ObjectRef], Awaitable[bytes]]) -> None:
+        """Use the same physical archive for references shared by Execution and Session."""
+        self._execution_content.bind_archive_object_reader(reader)
+
     def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
         super().__init__(
             store,
@@ -867,6 +880,39 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             return tuple(value for value in values if statuses is None or value.status in statuses)
         return await self.read_content(read)
 
+    async def require_children_terminal_for_abandon(
+        self, transaction: StateTransaction, execution_id: str,
+    ) -> None:
+        """Check control state after the same-group parent CAS fenced admission."""
+        from sqlalchemy import literal, or_, select
+
+        from ._record_owner import record_owner_names
+        from ._sql import SqlStateStore
+        from .state import SqlStateRowReader
+
+        if (not isinstance(self._store, SqlStateStore) or self._store.context.engine.dialect.name != "sqlite"
+                or not isinstance(transaction, SqlStateRowReader)):
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        store = self._store
+        parent = self._parent("execution", "execution", (execution_id,))
+        terminal = tuple(status.value for status in (
+            ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+        ))
+        blockers = []
+        for owner in record_owner_names(kind="execution"):
+            rows = store.storage_group.metadata.tables[owner].c
+            blockers.append(select(literal(1)).where(
+                rows.store_key == store.store_key,
+                rows.kind == "execution",
+                rows.parent_key == parent,
+                or_(rows.state.is_(None), rows.state.not_in(terminal)),
+            ).exists())
+        if await transaction.read_sql_rows(store.context, select(literal(1)).where(or_(*blockers))):
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"reason": "abandon_child_disposition_required"},
+            )
+
     async def list_children(
         self, execution_id: str, *, tenant_id: str
     ) -> tuple[ExecutionRecord, ...]:
@@ -1156,6 +1202,8 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 authority.control_id = await transaction.insert_execution_with_authority(
                     authority.proof, execution, expiry=authority.expiry,
+                    **({"receipt_values": authority.receipt_values} if authority.receipt_values is not None else {}),
+                    **({"shell_revision": authority.shell_revision} if authority.shell_revision is not None else {}),
                 )
             else:
                 await transaction.publish_execution_shell(authority, execution)
@@ -1168,16 +1216,89 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     ) -> ExecutionStartReservationResult:
         return await self._reserve_start(reservation, input_context_write=input_context_write, authority=authority)
 
+    async def reserve_native_subagent(
+        self, reservation: ExecutionStartReservation, *, turns: "SqlSessionTurns", key: "SessionTurnKey",
+        tools: "ToolRepositoryImpl", operation_id: str, owner: str, fence: int, invocation_id: str,
+        principal: Principal, input_context_write: tuple[ContentArchive, PreparedArchive] | None = None,
+        authority: "ExecutionAuthority | None" = None,
+    ) -> ExecutionStartReservationResult:
+        """Reserve one child under its canonical tool claim without a shadow parent."""
+        child, identity = reservation.execution, reservation.idempotency
+        generation = reservation.parent_producer_generation
+        if (generation is None or child.lineage_kind is not ExecutionLineageKind.SUBAGENT
+                or child.session_id is not None or principal.tenant_id != self._tenant_id
+                or (child.parent_execution_id, child.root_execution_id, child.parent_invocation_id,
+                    child.principal_id, child.principal_kind)
+                != (key.turn_id, key.turn_id, invocation_id, principal.principal_id, principal.kind)
+                or identity.scope != "execution.subagent" or identity.resource_id != child.execution_id
+                or identity.idempotency_key != canonical_sha256({
+                    "kind": "subagent", "parent_execution_id": key.turn_id, "invocation_id": invocation_id,
+                })):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+        async def reserve(write: Callable[[StateTransaction], Awaitable[ExecutionStartReservationResult]]) -> ExecutionStartReservationResult:
+            return await turns.with_claimed_subagent_parent(
+                key, generation=generation, tools=tools, operation_id=operation_id, owner=owner,
+                fence=fence, invocation_id=invocation_id, child_store=self._store,
+                principal=principal, write=write,
+            )
+
+        return await self._reserve_start(
+            reservation, input_context_write=input_context_write, authority=authority, _under_native_parent=reserve,
+        )
+
+    async def require_native_subagent_terminal(
+        self, transaction: StateTransaction, *, parent_id: str, invocation_id: str,
+        principal: Principal, expected: ExecutionRecord,
+    ) -> ExecutionRecord:
+        """Re-read the exact terminal child and its original start receipt in one transaction."""
+        scope = "execution.subagent"
+        request_key = canonical_sha256({
+            "kind": "subagent", "parent_execution_id": parent_id, "invocation_id": invocation_id,
+        })
+        receipt_key = self._idempotency._key("idempotency", self._idempotency._identity_key(scope, request_key))
+        stored = await transaction.get_record(receipt_key)
+        if stored is None:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        receipt = await self._idempotency._decode(stored, IdempotencyRecord)
+        if receipt.resource_id != expected.execution_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        child = await self.get_in_transaction(transaction, receipt.resource_id, tenant_id=principal.tenant_id)
+        if (child is None or child != expected or child.completed_at is None):
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        if (child.lineage_kind is not ExecutionLineageKind.SUBAGENT or child.session_id is not None
+                or (child.parent_execution_id, child.root_execution_id, child.parent_invocation_id,
+                    child.principal_id, child.principal_kind)
+                != (parent_id, parent_id, invocation_id, principal.principal_id, principal.kind)):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        expected_status = {
+            ExecutionStatus.SUCCEEDED: IdempotencyStatus.COMPLETED,
+            ExecutionStatus.FAILED: IdempotencyStatus.FAILED,
+            ExecutionStatus.CANCELLED: IdempotencyStatus.CANCELLED,
+        }.get(child.status)
+        if expected_status is None or receipt.status is not expected_status:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        return child
+
     async def reserve_started(
-        self, reservation: ExecutionStartReservation, *, authority: "ExecutionAuthority | InitialExecutionAuthority | None" = None,
+        self, reservation: ExecutionStartReservation, *,
+        authority: "ExecutionAuthority | InitialExecutionAuthority | None" = None,
+        _admitted_input_source: NativeUserInputReference | None = None,
     ) -> ExecutionStartReservationResult:
         """Insert a new admitted owner once inside the caller's group transaction."""
-        return await self._reserve_start(reservation, started=True, authority=authority)
+        return await self._reserve_start(
+            reservation, started=True, authority=authority, _admitted_input_source=_admitted_input_source,
+        )
 
     async def _reserve_start(
         self, reservation: ExecutionStartReservation, *, started: bool = False,
         input_context_write: tuple[ContentArchive, PreparedArchive] | None = None,
         authority: "ExecutionAuthority | InitialExecutionAuthority | None" = None,
+        _admitted_input_source: NativeUserInputReference | None = None,
+        _under_native_parent: Callable[
+            [Callable[[StateTransaction], Awaitable[ExecutionStartReservationResult]]],
+            Awaitable[ExecutionStartReservationResult],
+        ] | None = None,
     ) -> ExecutionStartReservationResult:
         _require_tenant(reservation.execution, self._tenant_id)
         _require_tenant(reservation.idempotency, self._tenant_id)
@@ -1227,7 +1348,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 )
             if execution_key in records:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if reservation.execution.parent_execution_id is not None:
+            if reservation.execution.parent_execution_id is not None and _under_native_parent is None:
                 if reservation.parent_producer_generation is None:
                     raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
                 await self._guard_subagent_parent_in_transaction(
@@ -1265,6 +1386,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 idempotency = replace(idempotency, status=IdempotencyStatus.STARTED, updated_at=now)
             execution_record = await self._stored_content(
                 "execution", (execution.execution_id,), execution, state=execution.status.value,
+                _admitted_input_source=_admitted_input_source,
             )
             idempotency_record = self._idempotency._stored(
                 "idempotency", identity, idempotency, state=idempotency.status.value,
@@ -1283,6 +1405,8 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             _logger.debug("execution start reserved: execution=%s", execution.execution_id)
             return ExecutionStartReservationResult(execution, idempotency, True)
 
+        if _under_native_parent is not None:
+            return await _under_native_parent(mutate)
         return await self._store.mutate(mutate)
 
     async def _guard_subagent_parent_in_transaction(
@@ -1315,10 +1439,18 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             lambda transaction: self.claim_start_in_transaction(transaction, claim)
         )
 
+    async def claim_existing_native_subagent_in_transaction(
+        self, transaction: StateTransaction, claim: ExecutionStartClaim, *,
+        parent_id: str, invocation_id: str, principal: Principal,
+    ) -> ExecutionRecord:
+        return await self.claim_start_in_transaction(
+            transaction, claim, _reserved_child=(parent_id, invocation_id, principal),
+        )
+
     async def claim_start_in_transaction(
         self,
         transaction: StateTransaction,
-        claim: ExecutionStartClaim,
+        claim: ExecutionStartClaim, *, _reserved_child: tuple[str, str, Principal] | None = None,
     ) -> ExecutionRecord:
         execution_key = self._key("execution", (claim.execution_id,))
         identity = self._idempotency._identity_key(
@@ -1338,6 +1470,19 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         idempotency_record = stored.get(idempotency_key)
+        if _reserved_child is not None:
+            parent_id, invocation_id, principal = _reserved_child
+            if (principal.tenant_id != self._tenant_id
+                    or current.lineage_kind is not ExecutionLineageKind.SUBAGENT or current.session_id is not None
+                    or (current.parent_execution_id, current.root_execution_id, current.parent_invocation_id,
+                        current.principal_id, current.principal_kind)
+                    != (parent_id, parent_id, invocation_id, principal.principal_id, principal.kind)):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            if (idempotency_record is None or current.started_at is not None or current.completed_at is not None
+                    or current.revision != 0 or current.event_seq != 0 or current.agent_run_seq != 0
+                    or current.producer_generation != 0 or current.producer_claim_id is not None
+                    or current.recovery is not None):
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         idempotency_created = idempotency_record is None
         if idempotency_record is None:
             idempotency = IdempotencyRecord(
@@ -1351,7 +1496,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 error_code=None,
                 created_at=claim.started_at,
                 updated_at=claim.started_at,
-                request_identity_version=claim.request_identity_version,
             )
             idempotency_record = self._idempotency._stored(
                 "idempotency",
@@ -1380,7 +1524,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                         error_code=idempotency.error_code,
                         created_at=idempotency.created_at,
                         updated_at=idempotency.updated_at,
-                        request_identity_version=idempotency.request_identity_version,
                     ),
                 )
                 or idempotency.status is not IdempotencyStatus.RESERVED
@@ -2835,7 +2978,6 @@ def _same_idempotency_identity(
         left.scope == right.scope
         and left.idempotency_key == right.idempotency_key
         and left.request_digest == right.request_digest
-        and left.request_identity_version == right.request_identity_version
         and left.resource_kind is right.resource_kind
     )
 

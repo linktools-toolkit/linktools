@@ -3,7 +3,7 @@
 ## Historical measurement, not current branch performance
 
 The numbers below apply only to the named commits. Current tool owners and
-bodies have moved to `ai_step_tool_operations` and `ai_step_messages`; the old
+bodies have moved to `ai_step_tool_operations` and `ai_messages`; the old
 records-only total must not be used to claim current total storage savings.
 
 The manual script now reports per-table row counts and `text_and_blob_bytes`

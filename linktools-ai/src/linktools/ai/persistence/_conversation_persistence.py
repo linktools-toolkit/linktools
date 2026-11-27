@@ -23,7 +23,7 @@ from ._step_contracts import AgentRunStore
 class ConversationPersistence:
     """Own conversation data access independently from execution coordination."""
 
-    def __init__(self, archive: AgentRunStore) -> None:
+    def __init__(self, archive: AgentRunStore | None) -> None:
         self.archive = archive
 
     async def read_conversation_payload(self, payload: StoredPayload) -> bytes:

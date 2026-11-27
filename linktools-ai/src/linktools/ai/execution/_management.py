@@ -143,7 +143,6 @@ class ExecutionManager:
             or refreshed.scope != identity.scope
             or refreshed.idempotency_key != identity.idempotency_key
             or refreshed.request_digest != identity.request_digest
-            or refreshed.request_identity_version != identity.request_identity_version
             or refreshed.resource_kind is not identity.resource_kind
             or refreshed.resource_id != identity.resource_id
             or not terminal_idempotency_matches(refreshed, execution)

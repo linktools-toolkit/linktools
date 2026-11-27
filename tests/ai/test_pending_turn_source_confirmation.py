@@ -3,6 +3,8 @@
 """Unknown commits can be confirmed later without attempting another write."""
 
 import asyncio
+from contextlib import asynccontextmanager
+from dataclasses import replace
 
 import pytest
 
@@ -23,15 +25,33 @@ from tests.ai.test_pending_turn_commit import (
     _storage,
     _turn_state,
 )
+from tests.ai.test_session_admission import _session
 from tests.ai.test_pending_turn_sessionless import _commit as _commit_standalone, _standalone
 
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
-@pytest.mark.parametrize("standalone", (False, True))
+@asynccontextmanager
+async def _source_state(backend, path, *, standalone):
+    if not standalone:
+        async with _turn_state(backend, path) as state:
+            yield state
+        return
+    async with Persistence.open(_NAMESPACE, tenant_id="tenant", storage=_storage(backend, path)) as storage:
+        # The standalone builder needs fixture IDs and a clock, not a stored Session.
+        session = replace(_session(), agent_id="default", owner_principal_id="principal", history_id="history")
+        state = _TurnState(storage, _runtime_commands(storage, _NAMESPACE), session)
+        # An archive identity bootstrap is not an uncertain promotion or publication.
+        await storage.execution.executions.prepare_content(_standalone(state).reservation.execution)
+        yield state
+
+
+_SOURCE_CASES = (("memory", False), ("memory", True), ("sqlite", True))
+
+
+@pytest.mark.parametrize(("backend", "standalone"), _SOURCE_CASES)
 async def test_terminal_unknown_can_later_confirm_source_without_mutation(tmp_path, monkeypatch, backend, standalone):
-    async with _turn_state(backend, tmp_path) as state:
+    async with _source_state(backend, tmp_path, standalone=standalone) as state:
         turn = _standalone(state) if standalone else _pending_turn(state)
         expected = None if standalone else state.session
         group = state.storage.execution.executions.state_store.storage_group
@@ -77,11 +97,10 @@ async def test_terminal_unknown_can_later_confirm_source_without_mutation(tmp_pa
         assert await _snapshot(state) == before
 
 
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
-@pytest.mark.parametrize("standalone", (False, True))
+@pytest.mark.parametrize(("backend", "standalone"), _SOURCE_CASES)
 @pytest.mark.parametrize("prepared", (False, True))
 async def test_promotion_unknown_confirms_only_original_source_receipt(tmp_path, monkeypatch, backend, standalone, prepared):
-    async with _turn_state(backend, tmp_path) as state:
+    async with _source_state(backend, tmp_path, standalone=standalone) as state:
         turn = _standalone(state) if standalone else _pending_turn(state)
         expected = None if standalone else state.session
         context = RuntimePayloadRef(StoredPayload.inline_bytes(b"[]"), PersistenceDomain.EXECUTION) if prepared else None
@@ -144,13 +163,13 @@ async def test_promotion_unknown_confirms_only_original_source_receipt(tmp_path,
 
 @pytest.mark.parametrize("prepared", (False, True))
 async def test_promotion_concurrent_conflicting_digest_is_definite_conflict(tmp_path, monkeypatch, prepared):
-    async with _turn_state("sqlite", tmp_path) as first:
+    async with _source_state("sqlite", tmp_path, standalone=True) as first:
         other = Persistence(_storage("sqlite", tmp_path))
         await other.initialize(namespace=_NAMESPACE, tenant_id="tenant")
         try:
             second = _TurnState(other, _runtime_commands(other, _NAMESPACE), first.session)
-            turns = (_pending_turn(first, execution_id="first"),
-                     _pending_turn(second, execution_id="second", request_digest="d" * 64))
+            turns = (_standalone(first, execution_id="first"),
+                     _standalone(second, execution_id="second", request_digest="d" * 64))
             groups = tuple(state.storage.execution.executions.state_store.storage_group for state in (first, second))
             original = type(groups[0]).mutate
             entered, ready = set(), asyncio.Event()
@@ -168,7 +187,7 @@ async def test_promotion_concurrent_conflicting_digest_is_definite_conflict(tmp_
                 patch.setattr(type(groups[0]), "mutate", mutate)
                 results = await asyncio.wait_for(asyncio.gather(*(
                     state.commands.promote_pending_turn(
-                        turn.reservation, expected_session=state.session, captured_input_context=context,
+                        turn.reservation, expected_session=None, captured_input_context=context,
                         producer_claim_id="claim-" + turn.reservation.execution.execution_id,
                     ) for state, turn in zip((first, second), turns)
                 ), return_exceptions=True), 15)

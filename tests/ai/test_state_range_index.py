@@ -181,8 +181,8 @@ def test_relation_address_enforces_the_complete_encoded_byte_budget(address: _Re
     for identity in ("x" * (RELATION_KEY_MAX_BYTES - overhead + 1), "x" * 65536):
         with pytest.raises(ValueError):
             address(*prefix, (identity,))
-    assert len(address("n" * 128, "t" * 128, "task", "task_graph_binding_capture", "owner", ("p" * 128,))) == (438 if address is scope_key else 439)
-    assert len(address("n" * 128, "t" * 128, "execution", "turn", "scope", ("s" * 128,))) == (421 if address is scope_key else 422)
+    assert len(address("n" * 64, "t" * 64, "task", "task_graph_binding_capture", "owner", ("p" * 128,))) == (310 if address is scope_key else 311)
+    assert len(address("n" * 64, "t" * 64, "execution", "turn", "scope", ("s" * 128,))) == (293 if address is scope_key else 294)
 
 
 @pytest.mark.parametrize("relation", (b"\x00", bytes(range(256)), b"\xff" * RELATION_KEY_MAX_BYTES))

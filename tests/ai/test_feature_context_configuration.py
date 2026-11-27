@@ -165,16 +165,20 @@ async def test_restored_history_enforces_current_policy(tmp_path):
     from linktools.ai.snapshot import RestoredSnapshot
 
     policy = Policy()
-    async with Persistence.open('namespace', storage=PersistenceStorage.from_root(tmp_path), tenant_id='tenant'):
-        pass
+    principal = service_principal('tenant', 'reader')
+    async with Runtime.open(
+        'namespace', storage=PersistenceStorage.from_root(tmp_path), tenant_id='tenant',
+        features=RuntimeFeatures('namespace'), authorization=policy,
+    ) as runtime:
+        await runtime.sessions.create_turn_session('session', principal=principal)
     restored = RestoredSnapshot('digest', 'namespace', 'tenant', tmp_path, None, 'generation')
+    policy.calls.clear()
     async with restored.open_history(authorization=policy) as history:
-        principal = service_principal('tenant', 'reader')
-        assert (await history.list_sessions(principal=principal)).items == ()
+        assert (await history.turn_session_state('session', principal=principal))['session_id'] == 'session'
         assert policy.calls
         policy.denied = True
         with pytest.raises(AIError) as rejected:
-            await history.list_sessions(principal=principal)
+            await history.turn_session_state('session', principal=principal)
         assert rejected.value.code is ErrorCode.AUTHORIZATION_DENIED
 
 
@@ -209,8 +213,7 @@ async def test_restored_history_ignores_source_routes_and_cache(tmp_path, monkey
     group.model("default", _FeatureModels())
     capture = group.borrow()
     async with Persistence.open('restore-policy', storage=source_storage()) as persistence_198, Runtime.open(persistence=persistence_198, features=capture, authorization=policy) as runtime:
-        session = await runtime.agents.get().create_session('session')
-        execution = await session.start('question')
+        execution = await runtime.agents.get().start('question')
         await execution.wait(timeout_seconds=5)
         execution_id, principal = execution.execution_id, runtime.default_principal
         expected = (await execution.model_interactions()).items

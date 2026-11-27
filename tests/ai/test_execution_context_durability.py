@@ -67,6 +67,7 @@ def _backend(execution: ExecutionRecord) -> LocalExecutionBackend:
     backend = object.__new__(LocalExecutionBackend)
     backend._accepting = True
     backend._tenant_id = "tenant"
+    backend._execution_trace_atomic = True
     backend._restore_binding = None
     backend._catalog = SimpleNamespace(
         binding=lambda digest: SimpleNamespace(

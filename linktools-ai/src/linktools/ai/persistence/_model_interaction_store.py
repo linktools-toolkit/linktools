@@ -22,13 +22,16 @@ from ._step_archive import (
     _encode_step,
     _validate_interaction_page,
 )
+from ._sql import SqlStateStorageGroup
 from .state import (
+    StateGroupCallback,
     RecordQuery,
     RecordReplacement,
     StateStore,
     StateTransaction,
     SqlStateRowReader,
     StoredRecord,
+    active_state_transaction,
     record_key,
     require_no_run_history_lock,
 )
@@ -36,6 +39,14 @@ from .state import (
 
 class ModelInteractionStateStepArchive(StateStepArchive):
     """Durable archive with one CAS-protected record per admitted model request."""
+
+    async def write_lossy_trace(self, stores: Sequence[StateStore], write: StateGroupCallback[None]) -> None:
+        """Publish optional evidence without waiting for SQLite's writer lock."""
+        group = self.state_store.storage_group
+        if isinstance(group, SqlStateStorageGroup):
+            await group.mutate(stores, write, sqlite_nowait=True)
+        else:
+            await group.mutate(stores, write)
 
     async def capture_model_interactions(
         self,
@@ -318,6 +329,32 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             owner_already_guarded=bool(events or checkpoints),
         )
         return created
+
+    async def append_canonical_turn_interactions_in_transaction(
+        self, transaction: StateTransaction, run: AgentRunRecord, *,
+        interactions: Sequence[ModelInteractionRecord],
+    ) -> int:
+        """Publish existing Trace receipts under the caller's canonical turn fence.
+
+        The caller holds the authoritative Conversation generation and has
+        joined the exact native Trace run registration to this mutation. The
+        compatibility Execution row is not read or created here. Model bodies
+        remain with their prepared archive; these rows retain only their
+        existing reference descriptors.
+        """
+        from ._plan import PersistenceDomain
+
+        if not interactions:
+            return 0
+        if (self.runtime_domain is not PersistenceDomain.TRACE
+                or active_state_transaction(self.state_store, writable=True) is not transaction):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        owner = await transaction.get_record(self._agent_run_key(run.agent_run_id))
+        if owner is None or owner.kind != "agent_run":
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        return await self._sync_interactions_in_transaction(
+            transaction, run, interactions, owner_already_guarded=True,
+        )
 
     async def _sync_interactions_in_transaction(
         self,

@@ -752,14 +752,15 @@ async def test_agent_metric_cancellation_follows_usage_accounting(failure: bool)
 
     executor._execute_with_workspace = execute
     scope = SimpleNamespace(
-        binding=SimpleNamespace(compiled_agent=SimpleNamespace(
-            spec=SimpleNamespace(id="agent", usage_limits=None),
-        )),
+        binding=SimpleNamespace(
+            binding_contract=SimpleNamespace(selected=()),
+            compiled_agent=SimpleNamespace(spec=SimpleNamespace(id="agent", usage_limits=None)),
+        ),
         context=SimpleNamespace(
             namespace="workspace", execution_id="execution", session_id=None,
-            principal=Principal("owner", "tenant"),
+            principal=Principal("owner", "tenant"), selected_capabilities=(),
         ),
-        agent_run_id="run", usage_sink=captured_usage.append,
+        agent_run_id="run", usage_sink=captured_usage.append, regenerable=False,
     )
     task = asyncio.create_task(executor.execute(scope))
     await asyncio.wait_for(entered.wait(), timeout=1)

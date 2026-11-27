@@ -209,3 +209,88 @@ async def test_embedded_acp_without_workspace_keeps_logical_directories(tmp_path
 
         fork_id = (await agent.fork_session(session_id, "nested")).session_id
         assert {item.session_id for item in (await agent.list_sessions("nested")).sessions} == {session_id, fork_id}
+
+
+@pytest.mark.asyncio
+async def test_acp_native_prompt_streams_only_its_canonical_turn() -> None:
+    acp = pytest.importorskip("acp")
+    principal = Principal("caller", "tenant")
+    subscription = []
+    connection = SimpleNamespace(session_update=AsyncMock())
+
+    def subscribe(session_id, callback):
+        assert session_id == "shared-session"
+        subscription.append(callback)
+        return subscription.clear
+
+    async def start_turn(session_id, text, **kwargs):
+        assert session_id == "shared-session" and text == "hi" and kwargs["principal"] == principal
+        request_id = kwargs["idempotency_key"]
+        assert len(request_id) == 12 and request_id.isascii()
+        # Simulate producer emissions during admission, before the caller
+        # receives its turn ID, including a delayed frame for another turn.
+        for turn_id, kind, value in [
+            ("previous", "text", "not mine"),
+            ("canonical-turn", "thinking", "considering"),
+            ("canonical-turn", "text", "answer"),
+        ]:
+            subscription[0]({"type": "delta", "turn_id": turn_id, "delta_kind": kind, "text": value})
+        subscription[0]({"type": "terminal", "turn_id": "canonical-turn", "state": "succeeded",
+                         "output": {"text": "answer"}})
+        return "canonical-turn"
+
+    runtime = SimpleNamespace(
+        sessions=SimpleNamespace(
+            _uses_turn_sessions=True, start_turn=start_turn, observe_turn_session=subscribe,
+        ),
+        history=SimpleNamespace(turn_result=AsyncMock()),
+    )
+    agent = ACPAgent(runtime, principal=principal)
+    agent.on_connect(connection)
+    await agent.initialize(acp.PROTOCOL_VERSION)
+    response = await agent.prompt("shared-session", [SimpleNamespace(text="hi")])
+
+    assert response.stop_reason == "end_turn"
+    updates = [call.args[1] for call in connection.session_update.await_args_list]
+    assert [update.content.text for update in updates] == ["considering", "answer"]
+    assert subscription == []
+    runtime.history.turn_result.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_acp_native_preview_reset_does_not_append_a_replacement_to_partial_text() -> None:
+    acp = pytest.importorskip("acp")
+    principal = Principal("caller", "tenant")
+    subscription = []
+    connection = SimpleNamespace(session_update=AsyncMock())
+
+    def subscribe(_session_id, callback):
+        subscription.append(callback)
+        return subscription.clear
+
+    async def start_turn(_session_id, _prompt, **_kwargs):
+        async def produce():
+            asyncio.get_running_loop().call_soon(
+                subscription[0], {"type": "preview_reset", "turn_id": "turn", "model_key": "model:1:1", "attempt": 1},
+            )
+            asyncio.get_running_loop().call_soon(
+                subscription[0], {"type": "terminal", "turn_id": "turn", "state": "succeeded",
+                                  "output": {"text": "canonical"}},
+            )
+        subscription[0]({"type": "delta", "turn_id": "turn", "delta_kind": "text", "text": "partial"})
+        await produce()
+        return "turn"
+
+    runtime = SimpleNamespace(
+        sessions=SimpleNamespace(_uses_turn_sessions=True, start_turn=start_turn, observe_turn_session=subscribe),
+        history=SimpleNamespace(turn_result=AsyncMock()),
+    )
+    agent = ACPAgent(runtime, principal=principal)
+    agent.on_connect(connection)
+    await agent.initialize(acp.PROTOCOL_VERSION)
+    with pytest.raises(acp.RequestError) as caught:
+        await agent.prompt("session", [SimpleNamespace(text="hello")])
+
+    assert caught.value.data["code"] == "SESSION_HISTORY_UNAVAILABLE"
+    assert [call.args[1].content.text for call in connection.session_update.await_args_list] == ["partial"]
+    runtime.history.turn_result.assert_not_awaited()

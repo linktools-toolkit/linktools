@@ -3,17 +3,14 @@
 """Recover accepted session requests without rebuilding mutable input context."""
 
 import asyncio
-import sqlite3
-from contextlib import closing
-from contextvars import ContextVar
 from dataclasses import replace
 
 import pytest
 
 from linktools.ai.core import ExecutionStatus, IdempotencyStatus, Principal, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence.state import active_state_scope
 from linktools.ai.storage import InMemoryCacheBackend, TurnScopeIdentity
+from linktools.ai.session import SessionTurnAdmission
 from linktools.ai.storage._database import SqlStorageContext
 
 from .test_pending_session_projection import _runtimes
@@ -22,14 +19,21 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_lost_response_returns_frozen_input_without_rebuilding_context(tmp_path, monkeypatch):
-    async with _runtimes(tmp_path, cache=None, shared=False) as (runtimes, *_):
+    async with _runtimes(tmp_path, cache=None, shared=False, native=True) as (runtimes, *_):
         runtime, _ = runtimes[0]
-        session = await runtime.agents.get().create_session("conversation")
+        agent = runtime.agents.get()
+        principal = runtime.default_principal
+        await agent.create_session("conversation", principal=principal)
         prompt = '{"question":"q","context_revision":1}'
-        execution = await session.start(prompt, idempotency_key="request-1")
-        await execution.wait()
+        execution = await runtime.sessions.start(
+            "conversation", prompt, agent=agent, principal=principal, idempotency_key="request-1",
+        )
+        assert (await execution.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
         with pytest.raises(AIError) as conflict:
-            await session.start('{"question":"q","context_revision":2}', idempotency_key="request-1")
+            await runtime.sessions.start(
+                "conversation", '{"question":"q","context_revision":2}', agent=agent,
+                principal=principal, idempotency_key="request-1",
+            )
         assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
 
         async def no_write(*args, **kwargs):
@@ -40,7 +44,7 @@ async def test_lost_response_returns_frozen_input_without_rebuilding_context(tmp
             admission = await runtime.sessions.lookup_admission(
                 "conversation", principal=runtime.default_principal, idempotency_key="request-1",
             )
-            assert admission.execution_id == execution.execution_id
+            assert admission.turn_id == execution.key.turn_id
             assert admission.user_input == prompt
             assert await runtime.sessions.lookup_admission(
                 "conversation", principal=runtime.default_principal, idempotency_key="absent",
@@ -104,18 +108,22 @@ async def test_uncertain_admission_is_not_absence(tmp_path, monkeypatch, status)
 
 
 async def test_lookup_survives_persistence_reopen(tmp_path):
-    async with _runtimes(tmp_path, cache=None, shared=False) as (runtimes, *_):
+    async with _runtimes(tmp_path, cache=None, shared=False, native=True) as (runtimes, *_):
         runtime, _ = runtimes[0]
-        session = await runtime.agents.get().create_session("conversation")
-        execution = await session.start("frozen input", idempotency_key="request")
-        await execution.wait()
-        execution_id = execution.execution_id
-    async with _runtimes(tmp_path, cache=None, shared=False) as (runtimes, *_):
+        agent = runtime.agents.get()
+        principal = runtime.default_principal
+        await agent.create_session("conversation", principal=principal)
+        execution = await runtime.sessions.start(
+            "conversation", "frozen input", agent=agent, principal=principal, idempotency_key="request",
+        )
+        assert (await execution.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+        execution_id = execution.key.turn_id
+    async with _runtimes(tmp_path, cache=None, shared=False, native=True) as (runtimes, *_):
         runtime, _ = runtimes[0]
         admission = await runtime.sessions.lookup_admission(
             "conversation", principal=runtime.default_principal, idempotency_key="request",
         )
-        assert admission.execution_id == execution_id
+        assert admission.turn_id == execution_id
         assert admission.user_input == "frozen input"
 
 
@@ -187,29 +195,39 @@ async def test_lookup_absence_race_does_not_change_admission_idempotency(tmp_pat
         assert admission.user_input == "original"
 
 
-async def test_uncertain_local_turn_does_not_settle_or_report_absence(tmp_path):
-    async with _runtimes(tmp_path, cache=InMemoryCacheBackend(max_bytes=2**24), shared=False) as (runtimes, entered, finish, block):
-        runtime, _ = runtimes[0]
-        session = await runtime.agents.get().create_session("conversation")
+async def test_unavailable_native_admission_read_does_not_settle_or_report_absence(tmp_path, monkeypatch):
+    async with _runtimes(tmp_path, cache=None, shared=False, native=True) as (runtimes, entered, finish, block):
+        runtime, state = runtimes[0]
+        principal = runtime.default_principal
+        await runtime.agents.get().create_session("conversation", principal=principal)
         block()
-        execution = await session.start("input", idempotency_key="request")
-        await asyncio.wait_for(entered.wait(), 5)
-        turn = runtime._execution_service._runtime_bridge.pending_turns.get(
-            execution.execution_id, tenant_id=runtime.tenant_id,
+        turn = await runtime.sessions.start(
+            "conversation", "input", agent="default", principal=principal, idempotency_key="request",
         )
-        turn.uncertain = True
-        async def no_reconcile():
-            pytest.fail("lookup must not reconcile")
-        turn.reconcile = no_reconcile
+        await asyncio.wait_for(entered.wait(), 5)
+
+        async def unavailable(*args, **kwargs):
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+
+        async def no_write(*args, **kwargs):
+            pytest.fail("admission lookup must not settle or recover")
+
         try:
-            with pytest.raises(AIError) as error:
-                await runtime.sessions.lookup_admission("conversation", principal=runtime.default_principal, idempotency_key="request")
-            assert error.value.code is ErrorCode.EXECUTION_START_UNKNOWN
+            with monkeypatch.context() as patch:
+                patch.setattr(state.session_turns, "read_admission_input", unavailable)
+                patch.setattr(SqlStorageContext, "run_mutation", no_write)
+                with pytest.raises(AIError) as error:
+                    await runtime.sessions.lookup_admission(
+                        "conversation", principal=principal, idempotency_key="request",
+                    )
+                assert error.value.code is ErrorCode.STORAGE_UNAVAILABLE
+            found = await runtime.sessions.lookup_admission(
+                "conversation", principal=principal, idempotency_key="request",
+            )
+            assert found == SessionTurnAdmission(turn.key.turn_id, "input")
         finally:
-            turn.uncertain = False
-            turn.reconcile = None
             finish.set()
-        await execution.wait()
+        assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
 
 
 @pytest.mark.parametrize("has_record", [False, True])
@@ -259,71 +277,49 @@ async def test_terminal_admission_keeps_result_integrity_check(tmp_path, monkeyp
             assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-@pytest.mark.parametrize("source_authority, pause_at", [
-    (False, "owner"), (False, "cache"), (True, "cache"), (True, "receipt"),
-])
-async def test_receipt_wins_when_remote_turn_finishes_during_lookup(tmp_path, monkeypatch, source_authority, pause_at):
-    cache = InMemoryCacheBackend(max_bytes=2**24)
-    async with _runtimes(tmp_path, cache=cache, source_authority=source_authority) as (runtimes, entered, finish, block):
-        if pause_at == "receipt":
-            # Allow the owner to settle while the other runtime holds a read snapshot.
-            with closing(sqlite3.connect(tmp_path / "state.db")) as connection:
-                assert connection.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+@pytest.mark.parametrize("pause_at", ["before_receipt", "after_receipt"])
+async def test_receipt_wins_when_remote_turn_finishes_during_lookup(tmp_path, monkeypatch, pause_at):
+    async with _runtimes(tmp_path, cache=None, native=True) as (runtimes, entered, finish, block):
         owner, _ = runtimes[0]
         reader, state = runtimes[1]
-        principal = reader.default_principal
-        session = await owner.agents.get().create_session("conversation")
+        await owner.agents.get().create_session("conversation", principal=owner.default_principal)
         block()
-        execution = await session.start("frozen input", idempotency_key="request")
+        turn = await owner.sessions.start(
+            "conversation", "frozen input", agent="default", principal=owner.default_principal,
+            idempotency_key="request",
+        )
         await asyncio.wait_for(entered.wait(), 5)
-        backend = owner._execution_service.runtime_backend()
-        live_owner = backend._turn_owners[execution.execution_id]
-        reading = ContextVar("test-reading-admission", default=False)
-        reading_remote, continue_read = asyncio.Event(), asyncio.Event()
-        target = state.execution.idempotency if pause_at == "receipt" else cache
-        name = "read_turn_by_request" if pause_at == "owner" else "get"
-        original = getattr(target, name)
+        reading, resume = asyncio.Event(), asyncio.Event()
+        read_input = state.session_turns.read_admission_input
+        reads = []
 
-        async def delayed(*args, **kwargs):
-            if (not reading.get() or reading_remote.is_set()
-                    or pause_at == "cache" and not str(args[0]).startswith("runtime-pending-execution:")):
-                return await original(*args, **kwargs)
-            if pause_at == "receipt":
-                assert active_state_scope() is not None
-                result = await original(*args, **kwargs)
-                assert result is None
-                reading_remote.set()
-                await continue_read.wait()
-                return result
-            assert active_state_scope() is None
-            reading_remote.set()
-            await continue_read.wait()
-            return await original(*args, **kwargs)
+        async def delayed(session_id, request_key):
+            reads.append((session_id, request_key))
+            if pause_at == "before_receipt":
+                reading.set()
+                await resume.wait()
+            row = await read_input(session_id, request_key)
+            if pause_at == "after_receipt":
+                assert row is not None and row["turn_id"].decode("utf-8") == turn.key.turn_id
+                reading.set()
+                await resume.wait()
+            return row
 
-        async def lookup():
-            token = reading.set(True)
-            try:
-                return await reader.sessions.lookup_admission(
-                    "conversation", principal=principal, idempotency_key="request",
-                )
-            finally:
-                reading.reset(token)
-
-        monkeypatch.setattr(target, name, delayed)
-        result = asyncio.create_task(lookup())
+        monkeypatch.setattr(state.session_turns, "read_admission_input", delayed)
+        lookup = asyncio.create_task(reader.sessions.lookup_admission(
+            "conversation", principal=reader.default_principal, idempotency_key="request",
+        ))
         try:
-            await asyncio.wait_for(reading_remote.wait(), 5)
+            await asyncio.wait_for(reading.wait(), 5)
             finish.set()
-            assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
-            await asyncio.wait_for(live_owner.closed.wait(), 5)
-            continue_read.set()
-            admission = await asyncio.wait_for(result, 5)
-            assert admission.execution_id == execution.execution_id
-            assert admission.user_input == "frozen input"
+            assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
+            resume.set()
+            assert await asyncio.wait_for(lookup, 5) == SessionTurnAdmission(turn.key.turn_id, "frozen input")
+            assert reads == [("conversation", "request")]
         finally:
-            continue_read.set()
+            resume.set()
             finish.set()
-            await asyncio.gather(result, return_exceptions=True)
+            await asyncio.gather(lookup, return_exceptions=True)
 
 
 @pytest.mark.parametrize("source_authority", [False, True])
@@ -376,7 +372,7 @@ async def test_same_source_live_owner_without_pending_bytes_is_unknown(tmp_path)
     ("session_key", "session:" + "界" * 43),
 ))
 async def test_same_source_admission_rejects_oversized_keys_before_mutation(tmp_path, monkeypatch, field, invalid):
-    async with _runtimes(tmp_path, cache=None, shared=False, source_authority=True) as (runtimes, *_):
+    async with _runtimes(tmp_path, cache=None, shared=False, source_authority=True, native=True) as (runtimes, *_):
         _, state = runtimes[0]
         authority = state.coordination_backend
         scope = TurnScopeIdentity(state.namespace, state.tenant_id, "runtime-pending-turn")
@@ -428,27 +424,30 @@ async def test_builtin_session_inspection_reuses_its_authorized_row(tmp_path, mo
 
 
 async def test_remote_pending_refresh_does_not_materialize_an_absent_execution(tmp_path, monkeypatch):
-    cache = InMemoryCacheBackend(max_bytes=2**24)
-    async with _runtimes(tmp_path, cache=cache, source_authority=True) as (runtimes, entered, finish, block):
+    async with _runtimes(tmp_path, cache=None, native=True) as (runtimes, entered, finish, block):
         owner, _ = runtimes[0]
         reader, storage = runtimes[1]
-        session = await owner.agents.get().create_session("pending-refresh")
+        session = await owner.agents.get().create_session("pending-refresh", principal=owner.default_principal)
         block()
-        execution = await session.start("pending input", idempotency_key="request")
+        turn = await owner.sessions.start(
+            session.session_id, "pending input", agent="default", principal=owner.default_principal,
+            idempotency_key="request",
+        )
         await asyncio.wait_for(entered.wait(), 5)
-        repository = storage.execution.executions
-        original = repository.get_timeline_many
 
-        async def get_timeline_many(ids, **kwargs):
-            assert execution.execution_id not in ids
-            return await original(ids, **kwargs)
+        async def no_execution(*args, **kwargs):
+            pytest.fail("native session refresh must not read a legacy execution")
 
         try:
             with monkeypatch.context() as patch:
-                patch.setattr(repository, "get_timeline_many", get_timeline_many)
+                patch.setattr(storage.execution.executions, "get_timeline_many", no_execution)
                 view = await reader.sessions.refresh("pending-refresh", principal=reader.default_principal)
-            assert view.session.active_execution_id == execution.execution_id
-            assert view.timeline.items[0].execution_id == execution.execution_id
+            assert view["session"]["active_turn_id"] == turn.key.turn_id
+            assert view["timeline"]["items"] == []
         finally:
             finish.set()
-            await execution.wait()
+        terminal = await turn.wait_final(timeout_seconds=5)
+        assert terminal.status is ExecutionStatus.SUCCEEDED
+        view = await reader.sessions.refresh("pending-refresh", principal=reader.default_principal)
+        assert view["session"]["active_turn_id"] is None
+        assert view["timeline"]["items"] == [terminal.view]

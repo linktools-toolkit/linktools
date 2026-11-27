@@ -177,13 +177,19 @@ class TranscriptRepository:
         self._native_messages: SqlStepStore | None = None
 
 
-    async def content_archive(self, *, create: bool = False) -> ContentArchive:
+    async def content_archive(self, *, create: bool = False, best_effort: bool = False) -> ContentArchive:
         if self._content_archive is None:
-            if not isinstance(self._store.storage_group, StateStorageGroup):
+            group = self._store.storage_group
+            if not isinstance(group, StateStorageGroup):
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-            opened = self._store.storage_group.opened_archive
+            opened = group.opened_archive
             if opened is None and active_state_scope() is None:
-                opened = await self._store.storage_group.open_archive(create=create)
+                from ._sql import SqlStateStorageGroup
+
+                if best_effort and isinstance(group, SqlStateStorageGroup):
+                    opened = await group.open_archive(create=create, sqlite_nowait=True)
+                else:
+                    opened = await group.open_archive(create=create)
             if opened is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             scope, store = opened
@@ -484,6 +490,8 @@ class TranscriptRepository:
         pending: ModelMessage | None,
         pending_keys: tuple[str, ...],
         archive: PreparedArchive | None = None,
+        native_alias: tuple[NativeMessageRoot, Sequence[ModelMessage]] | None = None,
+        partial_native_alias: bool = False,
     ) -> PreparedTranscriptObservation:
         require_no_run_history_lock("TranscriptRepository.prepare_observation")
         async def capture(transaction: StateTransaction):
@@ -491,6 +499,9 @@ class TranscriptRepository:
             return await self.capture_observation(
                 transaction, owner_id, messages, first_message_index=first_message_index,
                 pending=pending, pending_keys=pending_keys, archive=archive, head_record=record,
+                **({} if native_alias is None else {
+                    "native_alias": native_alias, "partial_native_alias": partial_native_alias,
+                }),
             )
 
         prepare = await self._store.read(capture)
@@ -500,6 +511,8 @@ class TranscriptRepository:
         self, transaction: StateTransaction, owner_id: str, messages: Sequence[ModelMessage], *,
         first_message_index: int, pending: ModelMessage | None, pending_keys: tuple[str, ...],
         archive: PreparedArchive | None, head_record: StoredRecord | None,
+        native_alias: tuple[NativeMessageRoot, Sequence[ModelMessage]] | None = None,
+        partial_native_alias: bool = False,
     ) -> Callable[[], Awaitable[PreparedTranscriptObservation]]:
         """Capture pending facts before preparing bytes outside the source scope."""
         scope = active_state_scope()
@@ -546,7 +559,34 @@ class TranscriptRepository:
                 if len(pending.parts) != len(pending_keys) or len(set(pending_keys)) != len(pending_keys) or not pending_keys:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             archive = prepared_archive
-            chunks = await self.prepare_chunks(owner_id, values, first_message_index=first_message_index, prepared=archive)
+            alias_chunks = ()
+            aliased = 0
+            if native_alias is not None and values:
+                source, source_messages = native_alias
+                snapshot = MessageArchive().snapshot(source_messages)
+                source_digest, source_size = snapshot.encoded_digest()
+                end = first_message_index + len(values)
+                if partial_native_alias:
+                    end = min(end, source.count)
+                if (end > first_message_index and source.count == len(snapshot)
+                        and end <= source.count and self._native_messages is not None
+                        and (pending is None or partial_native_alias)
+                        and self._native_messages.can_reuse_message_root(
+                            source, raw_digest=source_digest, raw_size=source_size,
+                        )):
+                    matching = end - first_message_index
+                    digest, size = MessageArchive().snapshot(values[:matching]).encoded_digest()
+                    if snapshot[first_message_index:end].encoded_digest() == (digest, size):
+                        alias_chunks = (TranscriptChunk(
+                            owner_id, first_message_index, matching, TranscriptOrigin.RAW, "raw",
+                            digest, size, source.slice(first_message_index, end),
+                        ),)
+                        aliased = matching
+                if not partial_native_alias and aliased != len(values):
+                    raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+            chunks = (*alias_chunks, *await self.prepare_chunks(
+                owner_id, values[aliased:], first_message_index=first_message_index + aliased, prepared=archive,
+            ))
             target = first_message_index + len(values)
             shell = None
             next_parts: list[_PendingPart] = []
@@ -1145,6 +1185,46 @@ class TranscriptRepository:
             seek_owner_id=owner_id,
         ):
             yield message
+
+    async def capture_raw_native_range(
+        self, owner_id: str, *, start: int, end: int,
+    ) -> tuple[tuple[NativeMessageRoot, tuple[ModelMessage, ...]], ...]:
+        """Read immutable raw chunks and their bodies from one bounded owner snapshot."""
+        require_no_run_history_lock("TranscriptRepository.capture_raw_native_range")
+        if not 0 <= start <= end:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if start == end:
+            return ()
+
+        async def capture():
+            async def read(transaction):
+                facts = await self._read_range_start(transaction, owner_id, start=start, end=end)
+                ranges = []
+                cursor = start
+                while facts:
+                    for chunk, left, right in self._chunk_ranges(facts, start, end):
+                        if (chunk.owner_id != owner_id or chunk.origin is not TranscriptOrigin.RAW
+                                or not isinstance(chunk.content, NativeMessageRoot)
+                                or chunk.first_message_index + left != cursor):
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        ranges.append((chunk, left, right))
+                        cursor += right - left
+                        if cursor == end:
+                            return tuple(ranges)
+                    if len(facts) < _TRANSCRIPT_PAGE_SIZE:
+                        break
+                    facts = tuple(await transaction.list_facts(FactQuery(
+                        self._transcript_stream(owner_id),
+                        after_sequence=facts[-1].sequence, limit=_TRANSCRIPT_PAGE_SIZE,
+                    )))
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+            ranges = await self._store.read(read)
+            return ranges, await self._capture_chunk_ranges(ranges)
+
+        ranges, load = await self.read_content(capture)
+        return tuple((chunk.content.slice(left, right), messages)
+                     for (chunk, left, right), messages in zip(ranges, await load(), strict=True))
 
     async def iter_raw_messages(self, owner_id: str) -> AsyncIterator[ModelMessage]:
         require_no_run_history_lock("TranscriptRepository.iter_raw_messages")

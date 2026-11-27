@@ -20,7 +20,7 @@ from pydantic_ai.settings import ModelSettings
 
 from linktools.ai.capability import ExecutionCapability, AgentContext
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.core import ExecutionStatus, JsonValue
+from linktools.ai.core import ExecutionStatus, JsonValue, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import TraceCapability
 from pydantic_ai_harness.step_persistence import StepPersistence
@@ -75,16 +75,46 @@ async def test_minimal_runtime_supports_sessions_without_retained_model_context(
         conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
         execution=StorageRoute.sqlite(tmp_path / "execution.db"),
     )) if split_storage else PersistenceStorage.in_memory())
-    async with Persistence.open('minimal', storage=storage) as persistence_73, Runtime.open(persistence=persistence_73, features=model_features(_FeatureModels(), _definitions())) as runtime:
-        session = await runtime.agents.get().create_session("session")
-        execution = await session.start("question")
-        assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
-        record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
-        assert record is not None
-        assert not record.conversation and not record.restart_checkpoints and not record.durable_trace
-        with pytest.raises(AIError) as missing:
-            await execution.fork("fork")
-        assert missing.value.code is ErrorCode.CAPABILITY_REQUIRED_MISSING
+    class HostAuthorization(TenantAuthorizationPolicy):
+        """Explicitly authorize the SQL session API on this test host."""
+
+    async with Persistence.open("minimal", storage=storage) as persistence:
+        if split_storage:
+            async with Runtime.open(
+                persistence=persistence, features=model_features(_FeatureModels(), _definitions()),
+            ) as runtime:
+                with pytest.raises(AIError) as unauthenticated:
+                    await runtime.agents.get().create_session("session")
+                assert unauthenticated.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+                assert unauthenticated.value.safe_details["reason"] == "turn_session_authorization_not_configured"
+            async with Runtime.open(
+                persistence=persistence, features=model_features(_FeatureModels(), _definitions()),
+                authorization=HostAuthorization(),
+            ) as runtime:
+                agent = runtime.agents.get()
+                principal = runtime.default_principal
+                await agent.create_session("session", principal=principal)
+                turn = await runtime.sessions.start(
+                    "session", "question", principal=principal, agent=agent, idempotency_key="question",
+                )
+                result = await turn.wait_final(timeout_seconds=5)
+                assert result.status is ExecutionStatus.SUCCEEDED
+                assert result.view["output"] == {"text": "done"}
+                assert await persistence.execution.executions.get(turn.key.turn_id, tenant_id=runtime.tenant_id) is None
+                assert not (await runtime.history.turn_trace("session", turn.key.turn_id, principal=principal)).items
+            return
+        async with Runtime.open(
+            persistence=persistence, features=model_features(_FeatureModels(), _definitions()),
+        ) as runtime:
+            session = await runtime.agents.get().create_session("session")
+            execution = await session.start("question")
+            assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
+            record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+            assert record is not None
+            assert not record.conversation and not record.restart_checkpoints and not record.durable_trace
+            with pytest.raises(AIError) as missing:
+                await execution.fork("fork")
+            assert missing.value.code is ErrorCode.CAPABILITY_REQUIRED_MISSING
 
 
 @pytest.mark.asyncio
@@ -98,7 +128,7 @@ async def test_minimal_runtime_supports_sessions_without_retained_model_context(
     ("checkpoint", "full"),
     ("trace", "full"),
 ))
-async def test_conversation_pending_requires_complete_coordination(tmp_path, monkeypatch, cache_kind, evidence):
+async def test_execution_pending_requires_complete_coordination(tmp_path, monkeypatch, cache_kind, evidence):
     entered, release = asyncio.Event(), asyncio.Event()
     async def model(messages, info):
         entered.set()
@@ -111,7 +141,7 @@ async def test_conversation_pending_requires_complete_coordination(tmp_path, mon
         features.capability(native_checkpoint() if evidence == "checkpoint" else TraceCapability(), scope="runtime")
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache if cache_kind == "full" else None, coordination=cache)
     async with Persistence.open('pending', storage=storage) as persistence_108, Runtime.open(persistence=persistence_108, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), features)) as runtime:
-        session = await runtime.agents.get().create_session("session")
+        agent = runtime.agents.get()
         writes = []
         cleanups = []
         original = SqlStorageContext.run_mutation
@@ -121,7 +151,7 @@ async def test_conversation_pending_requires_complete_coordination(tmp_path, mon
             (cleanups if domain == "native.content_cleanup" else writes).append(domain)
             return result
         monkeypatch.setattr(SqlStorageContext, "run_mutation", count)
-        execution = await session.start("question", idempotency_key="turn")
+        execution = await agent.start("question", idempotency_key="turn")
         await asyncio.wait_for(entered.wait(), 5)
         pending = cache_kind == "full" and evidence == "none"
         try:
@@ -135,7 +165,7 @@ async def test_conversation_pending_requires_complete_coordination(tmp_path, mon
         assert len(writes) == 1 if pending else len(writes) > 1
         assert len(cleanups) <= len(writes)
         total = (len(writes), len(cleanups))
-        replay = await session.start("question", idempotency_key="turn")
+        replay = await agent.start("question", idempotency_key="turn")
         assert replay.execution_id == execution.execution_id and (len(writes), len(cleanups)) == total
 
 
@@ -186,7 +216,7 @@ async def test_native_type_requirement_survives_binding(feature_type):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('effect_policy', ('none', 'replay_safe', 'non_replay_safe'))
-async def test_reconstructed_test_actual_effect_promotes_before_invocation_but_read_only_tool_stays_pending(
+async def test_actual_effect_promotes_before_invocation_but_read_only_tool_stays_pending(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, effect_policy: str,
 ) -> None:
     from pydantic_ai.messages import ToolCallPart, ToolReturnPart
@@ -208,7 +238,7 @@ async def test_reconstructed_test_actual_effect_promotes_before_invocation_but_r
     group.tool(lookup, effect_policy=effect_policy)
     group.agent('default', model='default', allow_tools=('lookup',))
     async with Persistence.open('pending-tool', storage=state) as persistence_203, Runtime.open(persistence=persistence_203, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), group)) as runtime:
-        session = await runtime.agents.get().create_session('session')
+        agent = runtime.agents.get()
         original = SqlStorageContext.run_mutation
         commits = []
         cleanups = []
@@ -218,7 +248,7 @@ async def test_reconstructed_test_actual_effect_promotes_before_invocation_but_r
             (cleanups if domain == "native.content_cleanup" else commits).append(domain)
             return result
         monkeypatch.setattr(SqlStorageContext, 'run_mutation', count)
-        execution = await session.start('question')
+        execution = await agent.start('question')
         owner.update(execution=execution.execution_id, tenant=runtime.tenant_id)
         assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
         assert len(calls) == 1
@@ -233,7 +263,7 @@ async def test_reconstructed_test_actual_effect_promotes_before_invocation_but_r
 
 
 @pytest.mark.asyncio
-async def test_reconstructed_test_pending_cancel_promotes_and_quiesces_before_cancelled(tmp_path: Path) -> None:
+async def test_pending_execution_cancel_promotes_and_quiesces_before_cancelled(tmp_path: Path) -> None:
     entered = asyncio.Event()
     stopped = asyncio.Event()
     async def model(messages, info):
@@ -248,8 +278,8 @@ async def test_reconstructed_test_pending_cancel_promotes_and_quiesces_before_ca
     group.agent('default', model='default', allow_tools=())
     state = PersistenceStorage.sqlite(tmp_path / 'state.db', cache=cache, coordination=cache)
     async with Persistence.open('pending-cancel', storage=state) as persistence_239, Runtime.open(persistence=persistence_239, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), group)) as runtime:
-        session = await runtime.agents.get().create_session('session')
-        execution = await session.start('question')
+        agent = runtime.agents.get()
+        execution = await agent.start('question')
         await asyncio.wait_for(entered.wait(), 5)
         assert await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id) is None
         await execution.cancel()
@@ -269,7 +299,7 @@ async def test_cached_lost_ack_reconciles_without_replay(tmp_path, monkeypatch):
         calls.append(messages)
         return ModelResponse(parts=[TextPart("done")])
     async with Persistence.open('lost-ack', storage=storage) as persistence_260, Runtime.open(persistence=persistence_260, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), _features(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal())))) as runtime:
-        session = await runtime.agents.get().create_session("session")
+        agent = runtime.agents.get()
         original = SqlStorageContext.run_mutation
         writes = []
         async def lose_ack(context, callback, **kwargs):
@@ -279,9 +309,9 @@ async def test_cached_lost_ack_reconciles_without_replay(tmp_path, monkeypatch):
                 raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
             return result
         monkeypatch.setattr(SqlStorageContext, "run_mutation", lose_ack)
-        execution = await session.start("question", idempotency_key="turn")
+        execution = await agent.start("question", idempotency_key="turn")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
-        replay = await session.start("question", idempotency_key="turn")
+        replay = await agent.start("question", idempotency_key="turn")
         assert replay.execution_id == execution.execution_id
         assert len(calls) == len(writes) == 1
 

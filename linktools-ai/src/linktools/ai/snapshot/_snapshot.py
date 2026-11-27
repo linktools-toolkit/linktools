@@ -40,6 +40,7 @@ from ..storage import (
 from ..observe.stream import await_stream_cleanup
 from ..history import History
 from ..persistence.snapshots import (
+    parse_storage_snapshot_manifest,
     snapshot_manifest_identity,
     snapshot_manifest_usage,
     SnapshotExclusiveGuard,
@@ -135,7 +136,7 @@ class Snapshot:
                 expected_digest=storage_ref.digest,
                 expected_size=storage_ref.size,
             )
-            storage_manifest = _parse_storage_manifest(storage_payload)
+            storage_manifest = parse_storage_snapshot_manifest(storage_payload)
             storage_entries, storage_object_bytes = _storage_snapshot_usage(
                 storage_manifest
             )
@@ -199,7 +200,7 @@ class Snapshot:
             expected_digest=storage.digest,
             expected_size=storage.size,
         )
-        storage_manifest = _parse_storage_manifest(storage_payload)
+        storage_manifest = parse_storage_snapshot_manifest(storage_payload)
         if (
             storage_manifest.get("namespace") != manifest.get("namespace")
             or storage_manifest.get("tenant_id") != manifest.get("tenant_id")
@@ -271,7 +272,7 @@ class Snapshot:
             expected_size=storage_ref.size,
         )
         refs = [storage_ref]
-        storage_manifest = _parse_storage_manifest(storage_payload)
+        storage_manifest = parse_storage_snapshot_manifest(storage_payload)
         storage_objects = storage_manifest.get("objects", [])
         if not isinstance(storage_objects, list):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -962,7 +963,7 @@ async def _verify_restored_generation(
                 expected_digest=actual_ref.digest,
                 expected_size=actual_ref.size,
             )
-            actual_manifest = _parse_storage_manifest(actual_payload)
+            actual_manifest = parse_storage_snapshot_manifest(actual_payload)
             expected_ref = _object_ref_from_payload(manifest.get("storage"))
             expected_payload = await read_object(
                 object_store,
@@ -970,7 +971,7 @@ async def _verify_restored_generation(
                 expected_digest=expected_ref.digest,
                 expected_size=expected_ref.size,
             )
-            expected_manifest = _parse_storage_manifest(expected_payload)
+            expected_manifest = parse_storage_snapshot_manifest(expected_payload)
             if _storage_manifest_identity(actual_manifest) != _storage_manifest_identity(
                 expected_manifest
             ):
@@ -1079,21 +1080,6 @@ def _workspace_snapshot_usage(
         if "content" in entry:
             total_bytes += _object_ref_from_payload(entry["content"]).size
     return len(entries), total_bytes
-
-
-def _parse_storage_manifest(payload: bytes) -> Mapping[str, object]:
-    try:
-        value = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if not isinstance(value, Mapping):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if value.get("kind") != "runtime-storage-snapshot":
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    _require_snapshot_format_version(value.get("format_version"))
-    if not isinstance(value.get("domains"), Mapping):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return value
 
 
 def _same_file_snapshot(before: os.stat_result, after: os.stat_result, size: int) -> bool:

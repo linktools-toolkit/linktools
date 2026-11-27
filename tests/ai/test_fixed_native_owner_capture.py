@@ -95,10 +95,10 @@ async def test_fixed_native_capture_remains_exact_and_transaction_scoped(tmp_pat
         else:
             async with group.context.engine.begin() as connection:
                 if case == "missing":
-                    await connection.execute(text("DELETE FROM ai_step_sequences WHERE store_key = :store"),
+                    await connection.execute(text("DELETE FROM ai_message_sequences WHERE store_key = :store"),
                         {"store": native_store_key("native-result", "tenant")})
                 else:
-                    await connection.execute(text("UPDATE ai_step_messages SET message = :bad WHERE store_key = :store"),
+                    await connection.execute(text("UPDATE ai_messages SET message = :bad WHERE store_key = :store"),
                         {"bad": b"broken source", "store": native_store_key("native-result", "tenant")})
         # A new transaction cannot reuse the successful earlier source capture.
         with pytest.raises(AIError) as damaged:

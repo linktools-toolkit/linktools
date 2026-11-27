@@ -166,7 +166,7 @@ async def test_projection_join_uses_indexed_owners_and_counts_ctes_as_reads(tmp_
             details = tuple(row[-1] for row in plan)
         assert any("SEARCH ai_execution_records" in row and "key_locator" in row for row in details)
         assert any("SEARCH content_source" in row and "sort_prefix" in row for row in details)
-        assert any("SEARCH ai_step_messages" in row and "sha256" in row for row in details)
+        assert any("SEARCH ai_messages" in row and "sha256" in row for row in details)
         _, content = await group.open_archive()
         paths = tuple(("value", "payload", "fields", *path, marker) for path, marker in (
             (("runtime_policy",), "$runtime_policy"),
@@ -242,4 +242,4 @@ async def test_transaction_execution_read_batches_fixed_content(tmp_path: Path) 
             event.remove(engine, "before_cursor_execute", observe)
         assert len(statements) == 1
         assert "ai_execution_records" in statements[0]
-        assert "ai_step_messages" in statements[0]
+        assert "ai_messages" in statements[0]

@@ -16,8 +16,8 @@ from pydantic_ai.models.function import AgentInfo
 from pydantic_ai.tools import RunContext
 
 from linktools.ai.asset import AssetKey, AssetVersionRef
-from linktools.ai.capability import AgentContext, ExecutionCapability, ReferencedInputsCapability
-from linktools.ai.core import ApprovalDecision, ExecutionStatus, Principal
+from linktools.ai.capability import AgentContext, ExecutionCapability, ReferencedInputsCapability, SessionCapability
+from linktools.ai.core import ApprovalDecision, ExecutionStatus, Principal, TenantAuthorizationPolicy, ToolOperationStatus
 from linktools.ai.execution import ApprovalDecisionRequest, ExecutionInputContext
 from linktools.ai.inputs import ExecutionContextArchive
 from linktools.ai.model import ReferencedContent
@@ -108,16 +108,18 @@ async def test_original_input_is_detached_and_shared_by_tools_and_output_hooks(i
 @pytest.mark.parametrize("backend", ("local_sqlite", "sqlite"))
 async def test_original_input_reopens_while_session_metadata_remains_live(tmp_path: Path, backend: str) -> None:
     observed = []
+    approval_requested = False
     principal = Principal("original-actor", "default", "service")
     recovery_actor = Principal("recovery-actor", "default", "service")
 
-    class RequireApproval(AbstractCapability):
-        async def before_tool_execute(self, ctx: Any, *, call: Any, tool_def: Any, args: Any) -> Any:
-            if not ctx.tool_call_approved:
-                raise ApprovalRequired()
-            return args
+    class HostAuthorization(TenantAuthorizationPolicy):
+        """The embedded host authorizes both the initiator and the approver."""
 
     def inspect_input(context: AgentContext[None]) -> str:
+        nonlocal approval_requested
+        if not approval_requested:
+            approval_requested = True
+            raise ApprovalRequired()
         observed.append(context)
         return "inspected"
 
@@ -134,37 +136,56 @@ async def test_original_input_reopens_while_session_metadata_remains_live(tmp_pa
     def features() -> RuntimeFeatures:
         value = RuntimeFeatures("original-input-reopen")
         value.tool(inspect_input, effect_policy="replay_safe")
-        value.capability(RequireApproval(), id="approval", revision=1, scope="agent")
         value.capability(ExecutionCapability(retain_history=True))
+        value.capability(SessionCapability(checkpoints=True))
         value.capability(ReferencedInputsCapability(load), id=_SOURCE.id, revision=1, scope="agent")
         value.agent("default", allow_tools=("inspect_input",), allow_skills=(), allow_subagents=())
         return model_features(_Models(_UsageFunctionModel(model)), value)
 
+    async def start(runtime):
+        return await runtime.sessions.start(
+            "session", ["original request", _reference()], agent="default", principal=principal,
+            idempotency_key="inspect-original",
+        )
+
     storage = (PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
                if backend == "local_sqlite" else PersistenceStorage.sqlite(tmp_path / "state.db"))
     async with Persistence.open("original-input-reopen", storage=storage) as persistence:
-        async with Runtime.open(persistence=persistence, features=features(), auto_recover=False) as runtime:
-            session = await runtime.agents.get().create_session(
+        async with Runtime.open(persistence=persistence, features=features(), auto_recover=False,
+                                authorization=HostAuthorization()) as runtime:
+            await runtime.agents.get().create_session(
                 "session", principal=principal, metadata={"selected": ["original"]},
             )
-            execution = await session.start(["original request", _reference()])
-            execution_id = execution.execution_id
-            async with asyncio.timeout(15):
-                while not (pending := await runtime.approvals.list(execution_id, principal=principal)):
-                    await asyncio.sleep(0.01)
+            turn = await start(runtime)
+            key = turn.key
+            assert (await asyncio.wait_for(turn.wait(), 15)).status is ExecutionStatus.WAITING_DEFERRED
+            [pending] = await runtime.approvals.list(key, principal=principal)
+            [original] = await persistence.checkpoint.tools.list_by_execution(key.turn_id, tenant_id=runtime.tenant_id)
+            assert original.status is ToolOperationStatus.PENDING
             await runtime.handoff()
 
     async with Persistence.open("original-input-reopen", storage=storage) as persistence:
-        async with Runtime.open(persistence=persistence, features=features(), auto_recover=False) as runtime:
-            current = (await runtime.sessions.refresh("session", principal=principal)).session
-            await runtime.agents.get().session("session", principal=principal).update(
-                expected_revision=current.revision, metadata={"selected": ["current"]},
+        async with Runtime.open(persistence=persistence, features=features(), auto_recover=False,
+                                authorization=HostAuthorization()) as runtime:
+            session = await runtime.sessions.get("session", principal=principal)
+            current = await session.inspect()
+            assert current["active_turn_id"] == key.turn_id
+            assert not await session.close(expected_revision=current["revision"])
+            assert not await session.update(
+                expected_revision=current["revision"], metadata={"selected": ["ignored"]}, replace_cwd=True,
             )
-            await runtime.approvals.decide(execution_id, ApprovalDecisionRequest(
-                recovery_actor, pending[0].approval_id, "approve", ApprovalDecision.APPROVE,
+            assert await session.update(expected_revision=current["revision"], metadata={"selected": ["current"]})
+            assert not await session.update(expected_revision=current["revision"], metadata={"selected": ["stale"]})
+            replay = await start(runtime)
+            assert replay.key == key
+            await runtime.approvals.decide(key, ApprovalDecisionRequest(
+                recovery_actor, pending.approval_id, "approve", ApprovalDecision.APPROVE,
             ))
-            result = (await runtime.executions.wait(execution_id, principal=principal, timeout_seconds=15)).result
+            result = await replay.wait_final(timeout_seconds=15)
             assert result.status is ExecutionStatus.SUCCEEDED, result
+            [completed] = await persistence.checkpoint.tools.list_by_execution(key.turn_id, tenant_id=runtime.tenant_id)
+            assert completed.tool_operation_id == original.tool_operation_id
+            assert completed.status is ToolOperationStatus.COMPLETED
     assert len(observed) == 1
     context = observed[0]
     assert context.principal == principal and context.tool_call.principal == principal

@@ -12,11 +12,14 @@ from typing import Literal
 
 from pydantic_ai_harness.step_persistence import StepEvent
 
-from .core import validate_resource_id, validate_persistence_namespace, validate_tenant_id
+from .core import (
+    PERSISTENCE_NAMESPACE_MAX_BYTES, TENANT_ID_MAX_BYTES, validate_agent_run_id,
+    validate_persistence_namespace, validate_resource_id, validate_tenant_id,
+)
 from .errors import AIError
 
 
-NATIVE_STORE_KEY_MAX_BYTES = 274
+NATIVE_STORE_KEY_MAX_BYTES = 3 * 2 + len("native_store") + PERSISTENCE_NAMESPACE_MAX_BYTES + TENANT_ID_MAX_BYTES
 NATIVE_REPLAY_KEY_MAX_BYTES = 128
 
 
@@ -109,11 +112,12 @@ def decode_native_replay_key(value: bytes) -> str | None:
 def validate_native_step_ids(
     *, run_id: str, conversation_id: str | None = None, parent_run_id: str | None = None,
 ) -> None:
-    """Apply the resource ID contract to native run identity and lineage."""
-    validate_resource_id(run_id)
-    for value in (conversation_id, parent_run_id):
-        if value is not None:
-            validate_resource_id(value)
+    """Keep native run identities bounded without shortening conversation identifiers."""
+    validate_agent_run_id(run_id)
+    if parent_run_id is not None:
+        validate_agent_run_id(parent_run_id)
+    if conversation_id is not None:
+        validate_resource_id(conversation_id)
 
 
 @dataclass(frozen=True, slots=True)

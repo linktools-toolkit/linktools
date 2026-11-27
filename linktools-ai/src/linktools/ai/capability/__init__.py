@@ -8,6 +8,7 @@ from ._tool_responses import ToolResponseFixture, ToolResponsesCapability
 from ._tool_results import ToolResultsCapability
 from ._run_callbacks import RunCallbacks, RunCallbackScope, bind_run_callbacks
 from ._referenced_inputs import MCPInputResolver, ReferencedInputResult, ReferencedInputsCapability
+from ._provider_messages import ProviderMessagesCapability
 from ._asset import AssetCapability
 from ._tool_identity import ToolCallIdentity
 from ._context import AgentContext
@@ -73,7 +74,7 @@ from ._session import SessionCapability
 from ._execution import ExecutionCapability
 
 __all__ = [
-    "MCPInputResolver", "ReferencedInputResult", "ReferencedInputsCapability",
+    "MCPInputResolver", "ReferencedInputResult", "ReferencedInputsCapability", "ProviderMessagesCapability",
     "SessionCapability",
     "MemoryCapability",
     "ExecutionCapability",

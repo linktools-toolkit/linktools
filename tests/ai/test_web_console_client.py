@@ -5,6 +5,7 @@ from linktools.ai.persistence import Persistence
 """Deterministic Web client stream and projection invariants, without a model."""
 from ._runtime_test_helpers import model_features
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -100,9 +101,24 @@ def test_web_dom_interactions_ignore_stale_work_and_preserve_mutation_identity()
     root = Path(__file__).parents[2]
     script = Path(__file__).with_name("web_console_dom.mjs")
     assets = root / "linktools-ai/src/linktools/ai/web/assets"
-    for mode in ("writable", "readonly", "workspace", "races", "navigation", "native", "sdk", "protocols", "diagnostics", "tools", "guided", "details", "minimal", "resume", "streaming", "attempts", "unavailable", "session-sync", "session-open-active", "snapshot-tail"):
+    for mode in ("writable", "readonly", "workspace", "races", "navigation", "native", "sdk", "protocols", "diagnostics", "tools", "guided", "details", "minimal", "resume", "streaming", "attempts", "unavailable", "session-sync", "session-open-active", "snapshot-tail", "session-published-turn", "native-model-messages"):
         result = subprocess.run([node, str(script), str(assets), mode], capture_output=True, text=True, timeout=20, check=False)
-        assert result.returncode == 0, result.stderr
+        if result.returncode:
+            error = re.sub(r"data:text/javascript;base64,[A-Za-z0-9+/=]+", "<web module>", result.stderr)
+            pytest.fail(f"{mode}: {error}", pytrace=False)
+
+
+def test_native_stop_displays_cancelling_until_terminal() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the optional Web client tests")
+    script = Path(__file__).with_name("web_console_dom.mjs")
+    assets = Path(__file__).parents[2] / "linktools-ai/src/linktools/ai/web/assets"
+    result = subprocess.run([node, str(script), str(assets), "native-stop"],
+                            capture_output=True, text=True, timeout=20, check=False)
+    if result.returncode:
+        pytest.fail(re.sub(r"data:text/javascript;base64,[A-Za-z0-9+/=]+", "<web module>", result.stderr),
+                    pytrace=False)
 
 
 def test_web_stream_attempts_preserve_request_and_replay_boundaries() -> None:
@@ -182,8 +198,8 @@ def thinking_request_json() -> str:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("thinking", (None, False, "max"))
-async def test_thinking_request_reaches_custom_binding(
-    tmp_path: Path, thinking, thinking_request_json: str,
+async def test_non_sql_plan_and_thinking_reach_custom_binding(
+    thinking, thinking_request_json: str,
 ) -> None:
     import json
     from pydantic_ai.models.test import TestModel
@@ -201,7 +217,7 @@ async def test_thinking_request_reaches_custom_binding(
     }))
     features = RuntimeFeatures("custom")
     features.agent("default", model="default", allow_tools=())
-    async with Persistence.open('custom', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_193, Runtime.open(persistence=persistence_193, features=model_features(models, features)) as runtime:
+    async with Persistence.open('custom', storage=PersistenceStorage.in_memory()) as persistence_193, Runtime.open(persistence=persistence_193, features=model_features(models, features)) as runtime:
         await runtime.agents.get("default").create_session("a")
         async with _client(create_app(runtime=runtime)) as http:
             meta = await http.get("/api/session", params={"session_id": "a", "include_timeline": "false"})
@@ -216,3 +232,73 @@ async def test_thinking_request_reaches_custom_binding(
                 execution.execution_id, tenant_id=runtime.tenant_id)
             assert record.thinking == thinking
             assert record.planning is True, "the visible Plan mode reaches durable admission"
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("thinking", (None, False, "max"))
+async def test_sql_chat_thinking_reaches_custom_model_on_the_canonical_turn(
+    tmp_path: Path, thinking, thinking_request_json: str,
+) -> None:
+    import asyncio
+    import json
+    from contextlib import asynccontextmanager
+
+    from pydantic_ai.models.test import TestModel
+
+    from linktools.ai.core import TenantAuthorizationPolicy
+    from linktools.ai.persistence import PersistenceStorage
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
+    from linktools.ai.web import create_app
+    from .test_model_client_request_capture import _ModelBinding
+    from .test_web_console_viewers import _client
+
+    used_settings = []
+
+    class CapturingModel(TestModel):
+        @asynccontextmanager
+        async def request_stream(self, messages, model_settings, model_request_parameters, run_context=None):
+            used_settings.append((model_settings or {}).get("thinking"))
+            async with super().request_stream(messages, model_settings, model_request_parameters, run_context) as result:
+                yield result
+
+    class WorkspacePolicy(TenantAuthorizationPolicy):
+        async def authorize(self, principal, action, resource):
+            await super().authorize(principal, action, resource)
+
+    payload = json.loads(thinking_request_json)
+    assert payload.pop("planning") is True  # SQL chat is not the standalone Plan operation.
+    payload.update(thinking=thinking, agent_id="default")
+    model = CapturingModel(custom_output_text="ok", profile={
+        "supports_thinking": True, "thinking_always_enabled": True,
+    })
+    features = RuntimeFeatures("custom")
+    features.agent("default", model="default", allow_tools=())
+    async with (
+        Persistence.open("custom", storage=PersistenceStorage.from_root(tmp_path)) as state,
+        Runtime.open(persistence=state, features=model_features(_ModelBinding(model), features),
+                     authorization=WorkspacePolicy()) as runtime,
+        _client(create_app(runtime=runtime, local_workspace=True)) as http,
+    ):
+        headers = {"X-LinkTools-Console": "1"}
+        created = await http.post("/api/sessions", json={"session_id": "a", "request_id": "session"}, headers=headers)
+        assert created.status_code == 201, created.text
+        finished = asyncio.Event()
+
+        def observe(frame):
+            if frame["type"] == "terminal":
+                finished.set()
+
+        unsubscribe = runtime.sessions.observe_turn_session("a", observe)
+        try:
+            started = await http.post("/api/session/messages", params={"session_id": "a"}, json=payload, headers=headers)
+            assert started.status_code == 202, started.text
+            assert set(started.json()) == {"turn_id"}
+            turn_id = started.json()["turn_id"]
+            await asyncio.wait_for(finished.wait(), 5)
+        finally:
+            unsubscribe()
+        exact = await http.get("/api/session", params={"session_id": "a", "turn_id": turn_id})
+        assert exact.status_code == 200, exact.text
+        assert exact.json()["status"] == "SUCCEEDED" and exact.json()["conversation_committed"]
+        assert used_settings == [thinking]

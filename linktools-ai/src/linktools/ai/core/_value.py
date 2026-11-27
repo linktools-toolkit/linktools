@@ -64,7 +64,8 @@ def normalize_thinking(value: JsonValue) -> ThinkingValue:
         return value
     if isinstance(value, str) and value in _THINKING_EFFORTS:
         return value  # type: ignore[return-value]
-    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "thinking is invalid")
+    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "thinking is invalid",
+                  safe_details={"field": "thinking", "reason": "thinking_invalid"})
 
 
 def canonical_string_tuple(value: Sequence[str], *, field: str) -> "tuple[str, ...]":

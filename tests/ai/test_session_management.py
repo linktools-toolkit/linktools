@@ -9,8 +9,8 @@ import pytest
 
 from linktools.ai.core import AuthorizationAction, HmacCursorSigner, Principal, ResourceKind, ResourceRef, SessionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.persistence import Persistence
+from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.session import CloseSessionRequest, ForkSessionRequest, ListSessionRequest, SessionManager, SessionView, UpdateSessionRequest
 
 from .test_session_timeline import _session
@@ -151,10 +151,8 @@ async def test_session_authorization_uses_one_record_and_rechecks_each_operation
 
 
 @pytest.mark.parametrize("operation", ("close", "force-close", "update", "fork"))
-@pytest.mark.parametrize("backend", ("memory", "sqlite"))
-async def test_session_mutation_guards_owner_changed_during_policy(tmp_path, operation, backend) -> None:
-    storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "state.db")
-    async with Persistence.open("session-owner", storage=storage, tenant_id="tenant") as state:
+async def test_session_mutation_guards_owner_changed_during_policy(operation) -> None:
+    async with Persistence.open("session-owner", storage=PersistenceStorage.in_memory(), tenant_id="tenant") as state:
         original = await state.conversation.sessions.create(_session())
         changed = False
 
@@ -190,21 +188,141 @@ async def test_session_mutation_guards_owner_changed_during_policy(tmp_path, ope
         assert await state.conversation.sessions.get("fork", tenant_id="tenant") is None
 
 
+@pytest.mark.parametrize("operation", ("close", "update"))
+@pytest.mark.parametrize("expected_offset", (0, 1))
+async def test_native_session_mutation_cannot_use_a_different_authorized_revision(
+    tmp_path, operation, expected_offset,
+) -> None:
+    writer = Principal("writer", "tenant")
+    action_under_test = AuthorizationAction.SESSION_CLOSE if operation == "close" else AuthorizationAction.SESSION_UPDATE
+
+    class Policy(TenantAuthorizationPolicy):
+        async def authorize(self, principal, action, resource):
+            await super().authorize(principal, action, resource)
+            if principal == _PRINCIPAL and action is action_under_test:
+                # Change the authorized snapshot before the original mutation can write.
+                assert await runtime.sessions.update_turn_session(
+                    "session", principal=writer, expected_revision=original["revision"],
+                    metadata={"source": "writer"},
+                )
+
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db")
+    async with (
+        Persistence.open("session-owner", storage=storage, tenant_id="tenant") as state,
+        Runtime.open(persistence=state, features=RuntimeFeatures("session-owner"), authorization=Policy()) as runtime,
+    ):
+        original = await runtime.sessions.create_turn_session("session", principal=_PRINCIPAL)
+        revision = original["revision"] + expected_offset
+        if operation == "close":
+            changed = await runtime.sessions.close_turn_session(
+                "session", principal=_PRINCIPAL, expected_revision=revision,
+            )
+        else:
+            changed = await runtime.sessions.update_turn_session(
+                "session", principal=_PRINCIPAL, expected_revision=revision, metadata={"source": "owner"},
+            )
+        assert not changed
+        current = await runtime.history.turn_session_state("session", principal=_PRINCIPAL)
+        assert current["status"] == "OPEN"
+        assert current["revision"] == original["revision"] + 1
+        assert current["metadata"] == {"source": "writer"}
+
+
+async def test_native_fork_cannot_copy_metadata_from_a_different_revision(tmp_path, monkeypatch) -> None:
+    class Policy(TenantAuthorizationPolicy):
+        pass
+
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db")
+    async with (
+        Persistence.open("session-owner", storage=storage, tenant_id="tenant") as state,
+        Runtime.open(persistence=state, features=RuntimeFeatures("session-owner"), authorization=Policy()) as runtime,
+    ):
+        sessions = runtime.sessions
+        original = await sessions.create_turn_session("source", principal=_PRINCIPAL, metadata={"value": "old"})
+        revision = original["revision"]
+        get = state.session_turns.get_session
+        once = True
+
+        async def interleave(session_id):
+            nonlocal once
+            row = await get(session_id)
+            if session_id == "source" and once:
+                once = False
+                assert await sessions.update_turn_session(
+                    "source", principal=_PRINCIPAL, expected_revision=revision, metadata={"value": "current"},
+                )
+            return row
+
+        with monkeypatch.context() as patch:
+            patch.setattr(state.session_turns, "get_session", interleave)
+            assert not await sessions.fork_turn_session(
+                "source", "child", principal=_PRINCIPAL, expected_revision=revision + 1, idempotency_key="fork",
+            )
+        with pytest.raises(AIError) as absent:
+            await runtime.history.turn_session_state("child", principal=_PRINCIPAL)
+        assert absent.value.code is ErrorCode.AUTHORIZATION_DENIED
+        for _ in range(2):
+            assert await sessions.fork_turn_session(
+                "source", "child", principal=_PRINCIPAL, expected_revision=revision + 1, idempotency_key="fork",
+            )
+        child = await runtime.history.turn_session_state("child", principal=_PRINCIPAL)
+        assert child["metadata"] == {"value": "current"}
+
+
+async def test_native_fork_replay_keeps_original_revision_and_configuration(tmp_path) -> None:
+    class Policy(TenantAuthorizationPolicy):
+        async def authorize(self, principal, action, resource):
+            await super().authorize(principal, action, resource)
+            if principal.principal_id == "denied" and action is AuthorizationAction.SESSION_CREATE:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+
+    async with (
+        Persistence.open("session-owner", storage=PersistenceStorage.sqlite(tmp_path / "state.db"),
+                         tenant_id="tenant") as state,
+        Runtime.open(persistence=state, features=RuntimeFeatures("session-owner"), authorization=Policy()) as runtime,
+    ):
+        sessions = runtime.sessions
+        source = await sessions.create_turn_session("source", principal=_PRINCIPAL, metadata={"value": "original"})
+        request = {"expected_revision": source["revision"], "idempotency_key": "fork"}
+        assert await sessions.fork_turn_session("source", "child", principal=_PRINCIPAL, **request)
+        source = await runtime.history.turn_session_state("source", principal=_PRINCIPAL)
+        assert await sessions.update_turn_session(
+            "source", principal=_PRINCIPAL, expected_revision=source["revision"], metadata={"value": "updated"},
+        )
+        updated = await runtime.history.turn_session_state("source", principal=_PRINCIPAL)
+        with pytest.raises(AIError) as denied:
+            await sessions.fork_turn_session("source", "child", principal=Principal("denied", "tenant"), **request)
+        assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+        assert await sessions.fork_turn_session("source", "child", principal=_PRINCIPAL, **request)
+        assert await runtime.history.turn_session_state("source", principal=_PRINCIPAL) == updated
+        assert (await runtime.history.turn_session_state("child", principal=_PRINCIPAL))["metadata"] == {"value": "original"}
+        for conflict in (dict(request, expected_revision=updated["revision"]), dict(request, idempotency_key="other")):
+            with pytest.raises(AIError) as mismatched:
+                await sessions.fork_turn_session("source", "child", principal=_PRINCIPAL, **conflict)
+            assert mismatched.value.code is ErrorCode.STORAGE_CONFLICT
+
+
 @pytest.mark.parametrize("resource", ("session", "execution"))
 async def test_management_authorization_uses_one_sql_select(tmp_path, resource) -> None:
     from sqlalchemy import event
     from linktools.ai.core import PersistenceDomain
     from linktools.ai.execution import ExecutionManager
+    from linktools.ai.history import History
     from linktools.ai.persistence._execution_management import StoredExecutionManagementAdapter
     from .test_runtime_persistence_evidence import _execution
 
     async with Persistence.open("single-authorization-read", storage=PersistenceStorage.sqlite(tmp_path / "state.db"), tenant_id="tenant") as state:
-        await state.conversation.sessions.create(_session())
+        await state.session_turns.create("session", config={})
         await state.execution.executions.create(replace(_execution(), principal_id="owner"))
-        sessions = _manager(state)
         executions = ExecutionManager(StoredExecutionManagementAdapter(
             state.execution, state.object_store(PersistenceDomain.EXECUTION)), TenantAuthorizationPolicy())
-        engine = state.conversation.sessions.state_store.storage_group.context.engine
+        engine = state.execution.executions.state_store.storage_group.context.engine
+
+        class Policy(TenantAuthorizationPolicy):
+            async def authorize(self, principal, action, resource):
+                await super().authorize(principal, action, resource)
+                if principal != _PRINCIPAL or resource.id != "session":
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         selects = []
 
         def capture(_connection, _cursor, statement, *_args):
@@ -214,8 +332,9 @@ async def test_management_authorization_uses_one_sql_select(tmp_path, resource) 
         event.listen(engine.sync_engine, "before_cursor_execute", capture)
         try:
             if resource == "session":
-                record = await sessions.read_authorized("session", _PRINCIPAL, AuthorizationAction.SESSION_READ)
-                assert record.owner_principal_id == "owner"
+                async with History.open(persistence=state, authorization=Policy()) as history:
+                    record = await history.turn_session_state("session", principal=_PRINCIPAL)
+                assert record["session_id"] == "session"
             else:
                 record = await executions.authorize_execution("execution", _PRINCIPAL, AuthorizationAction.EXECUTION_READ)
                 assert record.owner_principal_id == "owner"

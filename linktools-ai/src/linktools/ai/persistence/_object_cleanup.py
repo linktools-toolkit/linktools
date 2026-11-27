@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
-from ..core import JsonValue, validate_page_limit
+from ..core import JsonValue, RUNTIME_OBJECT_STORE_ID, validate_page_limit
 from ..steps import native_store_locator, native_store_key
 from ..errors import AIError, ErrorCode
 from ..model.attachments import read_attachment_payload
@@ -24,6 +24,7 @@ from ._archive_closure import (
     ArchiveClosure, NativeMessageClosure, iter_archive_content_refs, iter_archive_roots,
     iter_native_message_roots, require_known_retention, validate_native_message_content,
 )
+from ._object_key import ObjectKeyFactory
 from ._payload import decode_payload_bytes
 from ._tool_operation_content import expand_tool_content, expand_native_tool_content
 from ._native_tool_result import restore_native_tool_result_payload
@@ -33,12 +34,13 @@ from ._archive import archive_content_scope
 from ._record_key import decode_key_components, RECORD_KEY_MAX_BYTES
 from ._pending_operation_reference import pending_operation_values
 from ._execution_content import (expand_retained_execution_content, expand_native_execution_content,
-                                 restore_native_text_payload, restore_native_user_input)
-from ._sql import SqlStateStorageGroup
+                                 restore_native_text_payload)
+from ._sql import SqlStateStorageGroup, SqlStateStore
 from ._step_schema import native_message_sql_tables
 from ._step_maintenance import inspect_native_message_tables, native_message_partitions
+from ._session_transcript import decode_session_input_reference, scan_ordinary_message_roots
 from ._capability_marker import has_capability_partition_marker
-from .codec import (iter_runtime_object_dependencies, iter_runtime_object_refs, decode_envelope,
+from .codec import (iter_runtime_object_dependencies, iter_runtime_object_refs, decode_envelope, restore_native_user_input,
                     execution_payload_slots, tool_payload_slots, native_user_input_reference,
                     native_text_reference, native_tool_result_reference, native_tool_arguments_reference, native_tool_error_reference)
 from .captures import (
@@ -51,8 +53,10 @@ from .state import (
     FactScanCursor,
     OperationScanCursor,
     RecordScanCursor,
+    SqlStateRowReader,
     StateStorageGroup,
     StateStore,
+    StateTransaction,
     StoredRecord,
 )
 
@@ -166,6 +170,88 @@ async def purge_unreferenced_captures(
         return CaptureCleanupResult(tuple(deleted), tuple(missing), tuple(retained), tuple(blocked))
 
 
+def _is_canonical_runtime_key(key: str, domain: PersistenceDomain, digest: str) -> bool:
+    """Only framed Runtime keys can be named by an ordinary attachment."""
+    prefix = "v1/runtime/"
+    if not key.startswith(prefix):
+        return False
+    remaining = key[len(prefix):]
+    parts = []
+    for _ in range(2):
+        length, separator, rest = remaining.partition(":")
+        if (not separator or not 1 <= len(length) <= 9
+                or not length.isascii() or not length.isdecimal()):
+            return False
+        size = int(length)
+        if len(rest) <= size or rest[size] != "/":
+            return False
+        parts.append(rest[:size])
+        remaining = rest[size + 1:]
+    try:
+        return key == ObjectKeyFactory(parts[0]).key(domain, parts[1], digest)
+    except (AIError, ValueError):
+        return False
+
+
+_ORDINARY_ATTACHMENT_SCAN_PAGE = 32
+
+
+async def _ordinary_input_object_keys(
+    store: SqlStateStore, *, namespace: str, tenant_id: str, candidates: set[str],
+) -> set[str]:
+    """Prove reachability for all candidates in one offline keyset sweep.
+
+    Worst case: linear in the scoped turns, with only one projected page and
+    the candidate keys in memory. Never run this against active writers.
+    """
+    from sqlalchemy import select
+
+    from ..execution import StoredUserInput
+    from ._session_turn_sql import SESSION_TURN_TABLE
+    from .codec import decode_domain
+    from .state import state_store_key
+
+    columns = store.storage_group.metadata.tables[SESSION_TURN_TABLE].c
+    scope = state_store_key(namespace, tenant_id, "regenerable-session")
+    object_keys = ObjectKeyFactory(namespace)
+    input_value = columns.request_json["input"]
+
+    async def scan(transaction: StateTransaction) -> set[str]:
+        if not isinstance(transaction, SqlStateRowReader):
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        protected: set[str] = set()
+        after = 0
+        while True:
+            rows = await transaction.read_sql_rows(
+                store.context,
+                select(
+                    columns.id, columns.turn_id, input_value.label("input"),
+                    columns.request_json["graph_execution"].as_string().label("graph_execution"),
+                    columns.request_json["prompt"].as_string().label("prompt"),
+                ).where(
+                    columns.scope_key == scope, columns.id > after,
+                ).order_by(columns.id).limit(_ORDINARY_ATTACHMENT_SCAN_PAGE),
+            )
+            for row in rows:
+                if row["input"] is None or decode_session_input_reference(
+                    row, row["turn_id"].decode("utf-8"),
+                ) is not None:
+                    continue
+                admitted = decode_domain(row["input"], StoredUserInput)
+                for reference in admitted.payload.object_refs():
+                    if (reference.store_id != RUNTIME_OBJECT_STORE_ID
+                            or reference.key != object_keys.key(PersistenceDomain.EXECUTION, tenant_id, reference.digest)):
+                        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                    if reference.key in candidates:
+                        protected.add(reference.key)
+            if protected == candidates or len(rows) < _ORDINARY_ATTACHMENT_SCAN_PAGE:
+                return protected
+            after = rows[-1]["id"]
+
+
+    return await store.read(scan)
+
+
 async def purge_unreferenced_objects(
     candidates: tuple[ObjectCandidate, ...], *, namespace: str, tenant_id: str,
     stores: Mapping[PersistenceDomain, StateStore],
@@ -192,6 +278,38 @@ async def purge_unreferenced_objects(
             for group in groups:
                 if isinstance(group, SqlStateStorageGroup):
                     SqlStepStore.invalidate_context(group.context)
+
+
+async def _retain_ordinary_bindings(group, closure: ArchiveClosure) -> None:
+    """Retain the exact binding roots for all tenant partitions in this SQL group."""
+    from sqlalchemy import select
+    from ._archive import archive_scope_parts, decode_archive_scope
+    from ._session_transcript import SESSION_TURN_TABLE
+    from .state import state_store_key
+
+    table = group.metadata.tables.get(SESSION_TURN_TABLE)
+    if table is None:
+        return
+    scopes = {}
+    for _, content_scope, identity in closure.binding_contents():
+        if identity.startswith("execution-binding:"):
+            owner = archive_scope_parts(decode_archive_scope(content_scope))
+            scopes[state_store_key(*owner, "regenerable-session")] = content_scope
+    after = 0
+    async with group.context.sessions() as session:
+        await group.context.dialect.begin_consistent_read(session)
+        while True:
+            rows = (await session.execute(select(
+                table.c.id, table.c.scope_key, table.c.binding_key,
+            ).where(table.c.id > after).order_by(table.c.id).limit(128))).mappings().all()
+            for row in rows:
+                content_scope = scopes.get(row["scope_key"])
+                if content_scope is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                closure.mark_content(closure.scope_id, content_scope, "execution-binding:" + row["binding_key"].hex())
+            if len(rows) < 128:
+                return
+            after = rows[-1]["id"]
 
 
 async def _purge_unreferenced_objects(
@@ -252,6 +370,8 @@ async def _purge_unreferenced_objects(
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             archive_closures[scope] = ArchiveClosure(scope, records)
             archive_stores[scope] = archive
+            if isinstance(group, SqlStateStorageGroup):
+                await _retain_ordinary_bindings(group, archive_closures[scope])
     for group, domain in groups.items():
         if not isinstance(group, SqlStateStorageGroup):
             continue
@@ -259,6 +379,8 @@ async def _purge_unreferenced_objects(
 
         names = await inspect_native_message_tables(group.context, group.metadata)
         if not names:
+            async for _ in scan_ordinary_message_roots(group):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             continue
         tables = native_message_sql_tables()
         async with group.context.sessions() as session:
@@ -267,7 +389,7 @@ async def _purge_unreferenced_objects(
             for name in names:
                 table = tables[name]
                 statement = select(table)
-                if name == "ai_step_messages":
+                if name == "ai_messages":
                     # Typed Step payload bytes share this physical relation but
                     # are owned and swept by ArchiveClosure, never Native GC.
                     native_partitions = await native_message_partitions(group.context, session, table)
@@ -276,12 +398,16 @@ async def _purge_unreferenced_objects(
                 result = await group.context.run_statement(session.execute(statement))
                 rows[name] = result.mappings().all()
         snapshots = rows.get("ai_step_snapshots", ())
-        sequences, messages = rows["ai_step_sequences"], rows["ai_step_messages"]
+        sequences, messages = rows["ai_message_sequences"], rows["ai_messages"]
         closure = NativeMessageClosure(sequences)
         for snapshot in snapshots:
             closure.mark_snapshot(snapshot)
         bodies = {(row["store_key"], row["sha256"]): row for row in messages}
         opened = await group.open_archive()
+        async for root in scan_ordinary_message_roots(group):
+            if opened is None or root.group_id != opened[0]:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            closure.mark(root.store_key, root.slices)
         sequence_ids = {(row["store_key"], row["sha256"]) for row in sequences}
         native_groups[group] = closure, bodies, domain, None if opened is None else opened[0], sequence_ids
         if opened is not None:
@@ -291,6 +417,24 @@ async def _purge_unreferenced_objects(
 
     candidate_locations = {(id(source_for(domain, reference)), reference.key) for domain, reference in candidates}
     protected: set[str] = set()
+    foreign_ordinary_candidates: set[str] = set()
+    conversation = stores.get(PersistenceDomain.CONVERSATION)
+    if isinstance(conversation, SqlStateStore):
+        object_keys = ObjectKeyFactory(namespace)
+        local_ordinary_candidates: set[str] = set()
+        for domain, reference in selected:
+            if (reference.store_id == RUNTIME_OBJECT_STORE_ID
+                    and reference.key == object_keys.key(domain, tenant_id, reference.digest)):
+                local_ordinary_candidates.add(reference.key)
+            elif _is_canonical_runtime_key(reference.key, domain, reference.digest):
+                # Other namespaces or tenants may borrow these same stores;
+                # this scoped scan cannot prove their objects unreachable.
+                foreign_ordinary_candidates.add(reference.key)
+        if local_ordinary_candidates:
+            protected.update(await _ordinary_input_object_keys(
+                conversation, namespace=namespace, tenant_id=tenant_id, candidates=local_ordinary_candidates,
+            ))
+
     visited: set[tuple[int, str, str, int]] = set()
     metadata: dict[tuple[int, str], ObjectStat | None] = {}
 
@@ -533,8 +677,8 @@ async def _purge_unreferenced_objects(
 
         tables = native_message_sql_tables()
         unused = (
-            (tables["ai_step_sequences"], sequence_ids - closure.retained_sequences),
-            (tables["ai_step_messages"], bodies.keys() - closure.retained_messages),
+            (tables["ai_message_sequences"], sequence_ids - closure.retained_sequences),
+            (tables["ai_messages"], bodies.keys() - closure.retained_messages),
         )
         if not any(identities for _, identities in unused):
             continue
@@ -562,7 +706,8 @@ async def _purge_unreferenced_objects(
         source = source_for(domain, reference)
         if reference.key in protected:
             retained.append(candidate)
-        elif not isinstance(source, ObjectStoreDeletion) or len(deleted) + len(missing) >= limit:
+        elif (reference.key in foreign_ordinary_candidates or not isinstance(source, ObjectStoreDeletion)
+              or len(deleted) + len(missing) >= limit):
             blocked.append(candidate)
         else:
             removed = await source.delete_object(reference.key, expected_digest=reference.digest)

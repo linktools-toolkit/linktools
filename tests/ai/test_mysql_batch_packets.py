@@ -235,7 +235,7 @@ async def test_mysql_large_native_snapshot_rolls_back_and_retries_at_packet_limi
 
                 def fail_refs(connection, cursor, statement, parameters, context, many):
                     if (context.compiled is not None and context.compiled.isinsert
-                            and context.compiled.statement.table.name == "ai_step_sequences"):
+                            and context.compiled.statement.table.name == "ai_message_sequences"):
                         raise RuntimeError("reference write failed")
 
                 event.listen(engine.sync_engine, "before_cursor_execute", fail_refs)
@@ -245,8 +245,8 @@ async def test_mysql_large_native_snapshot_rolls_back_and_retries_at_packet_limi
                 finally:
                     event.remove(engine.sync_engine, "before_cursor_execute", fail_refs)
                 async with engine.connect() as probe:
-                    for name in ("runs", "snapshots", "messages", "sequences"):
-                        assert await probe.scalar(text(f"SELECT count(*) FROM ai_step_{name}")) == 0
+                    for name in ("ai_step_runs", "ai_step_snapshots", "ai_messages", "ai_message_sequences"):
+                        assert await probe.scalar(text(f"SELECT count(*) FROM {name}")) == 0
                 await store.commit_step(run=run, snapshot=snapshot)
                 assert await store.latest_snapshot(run_id="run") == snapshot
                 await store.close()

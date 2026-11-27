@@ -45,7 +45,7 @@ def test_metrics_schema_compiles_for_supported_sql_dialects(
     assert "observation_digest" not in observations.c
     for table in (definitions, observations):
         assert "namespace_digest" not in table.c
-        assert table.c.namespace.type.length == 128
+        assert table.c.namespace.type.length == 64
         if dialect_name == "postgresql":
             assert 'COLLATE "C"' in str(table.c.namespace.type.compile(dialect=engine.dialect))
     if dialect_name == "postgresql":

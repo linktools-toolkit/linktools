@@ -5,6 +5,11 @@
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
+from ..core import (
+    AGENT_RUN_ID_MAX_BYTES, EXECUTION_ID_MAX_BYTES, EXECUTION_REQUEST_KEY_MAX_BYTES,
+    PERSISTENCE_NAMESPACE_MAX_BYTES, RESOURCE_ID_MAX_BYTES,
+    TENANT_ID_MAX_BYTES, TOOL_OPERATION_ID_MAX_BYTES, TaskStatus, validate_lease_owner,
+)
 from ..errors import AIError, ErrorCode
 from ._content_reference_projection import CONTENT_REFERENCE_COLUMN_NAMES, CONTENT_REFERENCE_COLUMNS, EXECUTION_REFERENCE_COLUMNS
 from ._record_key import RECORD_KEY_MAX_BYTES, decode_key_components, encode_key_components
@@ -13,6 +18,9 @@ if TYPE_CHECKING:
     from sqlalchemy import MetaData
     from sqlalchemy.sql.selectable import FromClause
     from sqlalchemy.sql.elements import ColumnElement
+
+
+GRAPH_RECOVERY_STATES = frozenset({TaskStatus.PENDING.value, TaskStatus.RUNNING.value})
 
 
 EXECUTION_SCAN_STATES = frozenset((
@@ -30,11 +38,17 @@ def record_scan_kind(kind: str, state: str | None, *, prepared: bool = False) ->
     if kind.rstrip(" ") == "execution":
         hot = state is not None and state.rstrip(" ") in EXECUTION_SCAN_STATES
         return "e:1" if hot or prepared else "e:0"
+    if kind.rstrip(" ") == "task_graph":
+        return "g:1" if state is not None and state.rstrip(" ") in GRAPH_RECOVERY_STATES else "g:0"
     return "k:" + kind
 
 
 def record_scan_kinds(kind: str, states: frozenset[str] | None = None) -> tuple[str, ...]:
     """Select disjoint physical ranges without replacing the logical state filter."""
+    if kind.rstrip(" ") == "task_graph":
+        if states is not None and states <= GRAPH_RECOVERY_STATES:
+            return ("g:1",) if states else ()
+        return ("g:1", "g:0")
     if kind.rstrip(" ") != "execution":
         return ("k:" + kind,)
     if states is None:
@@ -51,6 +65,7 @@ def record_scan_kinds(kind: str, states: frozenset[str] | None = None) -> tuple[
 EXECUTION_SHELL_KIND = "execution_shell"
 EXECUTION_AUTHORITY_COLUMNS = frozenset({
     "turn_slot_kind", "turn_slot_key", "turn_token", "turn_fence", "turn_expiry", "turn_revision",
+    "turn_request_route", "turn_occupied_route", "turn_receipt",
 })
 
 
@@ -66,19 +81,57 @@ def record_owner_columns(table: "FromClause", *, pad_execution: bool = False) ->
     )
 
 
+_SCOPE_OWNER_MAX_BYTES = PERSISTENCE_NAMESPACE_MAX_BYTES + TENANT_ID_MAX_BYTES
+
 RUN_COUNTER_COLUMNS = ("event_high_water", "checkpoint_high_water", "interaction_high_water")
-RECORD_OWNER_TABLES = ("ai_state_records", "ai_execution_records", "ai_step_tool_operations", "ai_step_run_admissions", "ai_task_graphs")
+# Framed execution and idempotency writer addresses share this physical owner.
+EXECUTION_RECORD_KEY_MAX_BYTES = _SCOPE_OWNER_MAX_BYTES + max(
+    36 + EXECUTION_ID_MAX_BYTES,
+    40 + RESOURCE_ID_MAX_BYTES + EXECUTION_REQUEST_KEY_MAX_BYTES,
+)
+# Execution, idempotency and authority-shell rows order by their framed key.
+# Timestamp-prefixed sort addresses belong to other State owners.
+EXECUTION_SORT_KEY_MAX_BYTES = EXECUTION_RECORD_KEY_MAX_BYTES
+TOOL_OPERATION_KEY_MAX_BYTES = 42 + _SCOPE_OWNER_MAX_BYTES + TOOL_OPERATION_ID_MAX_BYTES
+_RUN_ADMISSION_DOMAINS = frozenset(("trace", "checkpoint", "conversation"))
+RUN_ADMISSION_KEY_MAX_BYTES = 27 + max(map(len, _RUN_ADMISSION_DOMAINS)) + _SCOPE_OWNER_MAX_BYTES + AGENT_RUN_ID_MAX_BYTES
+# Seven framed components: role, namespace, tenant, domain, agent_run, relation, ID.
+RUN_ADMISSION_SCOPE_MAX_BYTES = 40 + max(map(len, _RUN_ADMISSION_DOMAINS)) + _SCOPE_OWNER_MAX_BYTES + RESOURCE_ID_MAX_BYTES
+RUN_ADMISSION_PARENT_MAX_BYTES = 35 + max(map(len, _RUN_ADMISSION_DOMAINS)) + _SCOPE_OWNER_MAX_BYTES + AGENT_RUN_ID_MAX_BYTES
+# Tool ledger accepts both exact resource IDs at the 128-byte public boundary.
+TOOL_OPERATION_SCOPE_MAX_BYTES = 52 + _SCOPE_OWNER_MAX_BYTES + RESOURCE_ID_MAX_BYTES
+TOOL_OPERATION_PARENT_MAX_BYTES = 53 + _SCOPE_OWNER_MAX_BYTES + RESOURCE_ID_MAX_BYTES
+# Execution can carry a session scope or an EXECUTION idempotency resource scope.
+EXECUTION_SCOPE_MAX_BYTES = _SCOPE_OWNER_MAX_BYTES + max(44 + RESOURCE_ID_MAX_BYTES, 58 + EXECUTION_ID_MAX_BYTES)
+EXECUTION_PARENT_MAX_BYTES = 47 + _SCOPE_OWNER_MAX_BYTES + EXECUTION_ID_MAX_BYTES
+RECORD_OWNER_RELATION_WIDTHS = {
+    "ai_execution_records": (EXECUTION_SCOPE_MAX_BYTES, EXECUTION_PARENT_MAX_BYTES),
+    "ai_step_run_admissions": (RUN_ADMISSION_SCOPE_MAX_BYTES, RUN_ADMISSION_PARENT_MAX_BYTES),
+    "ai_step_tool_operations": (TOOL_OPERATION_SCOPE_MAX_BYTES, TOOL_OPERATION_PARENT_MAX_BYTES),
+}
+RECORD_OWNER_TABLES = ("ai_state_records", "ai_execution_records", "ai_step_tool_operations", "ai_step_run_admissions")
 SCAN_KIND_OWNERS = frozenset(("ai_state_records", "ai_execution_records"))
-_EXECUTION_ADDRESS_LENGTHS = {"execution": 6, "idempotency": 7}
-_KIND_OWNERS = {"execution": "ai_execution_records", "idempotency": "ai_execution_records", "task_graph": "ai_task_graphs", "tool_operation": "ai_step_tool_operations", "agent_run": "ai_step_run_admissions"}
+_EXECUTION_ADDRESS_IDENTITIES = {
+    "execution": (EXECUTION_ID_MAX_BYTES,),
+    "idempotency": (RESOURCE_ID_MAX_BYTES, EXECUTION_REQUEST_KEY_MAX_BYTES),
+}
+_KIND_OWNERS = {"execution": "ai_execution_records", "idempotency": "ai_execution_records", "tool_operation": "ai_step_tool_operations", "agent_run": "ai_step_run_admissions"}
 _CONSTANTS = {
-    "ai_task_graphs": {"kind": "task_graph"},
+    "ai_execution_records": {"payload_bytes": None},
     "ai_step_tool_operations": {"kind": "tool_operation", "payload_bytes": None},
     "ai_step_run_admissions": {"kind": "agent_run", "subject_id": None, "state": None,
         "lease_owner": None, "lease_fence": 0, "lease_expires_at": None, "payload_bytes": None},
 }
-_EDGE_OWNERS = {"ai_task_graphs": "task_graph", "ai_state_records": "record", "ai_step_tool_operations": "tool_record",
+_EDGE_OWNERS = {"ai_state_records": "record", "ai_step_tool_operations": "tool_record",
                 "ai_step_run_admissions": "run_admission", "ai_execution_records": "record"}
+
+
+def is_run_admission_address(parts: Sequence[str]) -> bool:
+    """Recognize the bounded owner prefix and run ID shared by record and stream addresses."""
+    return (len(parts) == 6 and parts[3] in _RUN_ADMISSION_DOMAINS
+            and all(1 <= len(value.encode("utf-8")) <= width for value, width in
+                    zip(parts[1:3], (PERSISTENCE_NAMESPACE_MAX_BYTES, TENANT_ID_MAX_BYTES)))
+            and 1 <= len(parts[5].encode("utf-8")) <= AGENT_RUN_ID_MAX_BYTES)
 
 
 def record_owner_table(key: bytes, *, store_key: bytes | None = None) -> str:
@@ -89,11 +142,22 @@ def record_owner_table(key: bytes, *, store_key: bytes | None = None) -> str:
         return "ai_state_records"
     if len(parts) == 6 and parts[0] == "record" and parts[3:5] == ("archive", "archive_content"):
         if parts[5].rpartition(":")[0] == "execution-payload":
-            return ("ai_step_messages" if store_key == encode_key_components(("state-group-archive",), 128)
+            return ("ai_messages" if store_key == encode_key_components(("state-group-archive",), 128)
                     else "ai_state_records")
     if len(parts) >= 6 and parts[0] == "record":
-        if parts[4] in _EXECUTION_ADDRESS_LENGTHS and (
-                parts[3] != "execution" or len(parts) != _EXECUTION_ADDRESS_LENGTHS[parts[4]]):
+        if parts[4] == "tool_operation" and (
+                len(parts) != 6 or parts[3] != "checkpoint" or len(key) > TOOL_OPERATION_KEY_MAX_BYTES
+                or len(parts[5].encode("utf-8")) > TOOL_OPERATION_ID_MAX_BYTES
+        ):
+            return "ai_state_records"
+        if parts[4] == "agent_run" and not is_run_admission_address(parts):
+            return "ai_state_records"
+        execution_identity_widths = _EXECUTION_ADDRESS_IDENTITIES.get(parts[4])
+        if execution_identity_widths is not None and (
+                parts[3] != "execution" or len(parts) != 5 + len(execution_identity_widths)
+                or any(not 1 <= len(value.encode("utf-8")) <= width for value, width in
+                       zip((*parts[1:3], *parts[5:]), (PERSISTENCE_NAMESPACE_MAX_BYTES, TENANT_ID_MAX_BYTES, *execution_identity_widths)))
+        ):
             return "ai_state_records"
         return _KIND_OWNERS.get(parts[4], "ai_state_records")
     return "ai_state_records"
@@ -162,17 +226,28 @@ def record_owner_rows(metadata: "MetaData", *, keys: Sequence[bytes] | None = No
         if name in SCAN_KIND_OWNERS and scan_kind is not None:
             selection = selection.where(table.c.scan_kind == literal(scan_kind, literal_execute=True))
         elif name in SCAN_KIND_OWNERS and kind is not None and kind.rstrip(" ") != "execution":
-            selection = selection.where(table.c.scan_kind == literal("k:" + kind, literal_execute=True))
+            if kind.rstrip(" ") == "task_graph":
+                selection = selection.where(table.c.scan_kind.in_(record_scan_kinds(kind)))
+            else:
+                selection = selection.where(table.c.scan_kind == literal("k:" + kind, literal_execute=True))
         selections.append(selection)
     return (selections[0] if len(selections) == 1 else union_all(*selections)).subquery("record_owners")
 
 
 def record_owner_values(name: str, values: Mapping[str, object]) -> dict[str, object]:
     """Validate and shape values for the record's physical owner."""
-    if name == "ai_execution_records" and "key" in values and "kind" in values:
-        key = values["key"]
-        if not isinstance(key, bytes) or values["kind"] != decode_key_components(key, RECORD_KEY_MAX_BYTES)[4]:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if name == "ai_execution_records":
+        if "key" in values and "kind" in values:
+            key = values["key"]
+            if not isinstance(key, bytes) or values["kind"] != decode_key_components(key, RECORD_KEY_MAX_BYTES)[4]:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if "sort_key" in values and (
+            type(values["sort_key"]) is not bytes or not 1 <= len(values["sort_key"]) <= EXECUTION_SORT_KEY_MAX_BYTES
+        ):
+            raise ValueError("execution sort key exceeds its bounded record ordering size")
+    lease_owner = values.get("lease_owner")
+    if lease_owner is not None:
+        validate_lease_owner(lease_owner)
     for key, value in _CONSTANTS.get(name, {}).items():
         if key in values and values[key] != value:
             raise ValueError(f"{name} requires {key}={value!r}")
@@ -182,5 +257,5 @@ def record_owner_values(name: str, values: Mapping[str, object]) -> dict[str, ob
 
 
 
-__all__ = ["EXECUTION_SHELL_KIND", "EXECUTION_AUTHORITY_COLUMNS", "record_scan_kind", "EXECUTION_SCAN_STATES", "record_scan_kinds", "record_owner_columns", "RUN_COUNTER_COLUMNS", "RECORD_OWNER_TABLES", "SCAN_KIND_OWNERS", "record_owner_table", "record_owner_edge", "record_owner_names", "record_owner_rows", "record_owner_values"]
+__all__ = ["EXECUTION_SHELL_KIND", "GRAPH_RECOVERY_STATES", "EXECUTION_AUTHORITY_COLUMNS", "record_scan_kind", "EXECUTION_SCAN_STATES", "record_scan_kinds", "record_owner_columns", "RUN_COUNTER_COLUMNS", "RUN_ADMISSION_KEY_MAX_BYTES", "is_run_admission_address", "RECORD_OWNER_TABLES", "SCAN_KIND_OWNERS", "record_owner_table", "record_owner_edge", "record_owner_names", "record_owner_rows", "record_owner_values"]
 

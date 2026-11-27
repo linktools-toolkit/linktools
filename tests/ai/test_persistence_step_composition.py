@@ -105,8 +105,7 @@ async def test_local_native_factory_runs_checkpointed_agent_and_reopens(tmp_path
             features.capability(StepPersistence(store=native, capture_frontier=True))
             features.agent("default", model="default", allow_tools=())
             async with Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
-                session = await runtime.agents.get().create_session("session")
-                execution = await session.start("question", idempotency_key="input")
+                execution = await runtime.agents.get().start("question", idempotency_key="input")
                 assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
                 with pytest.raises(AIError):
                     await persistence.close()
@@ -258,17 +257,19 @@ async def test_native_factory_uses_execution_route_in_split_plan(tmp_path: Path)
             await native.close()
     with sqlite3.connect(execution) as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-        assert {"ai_step_runs", "ai_step_events", "ai_step_snapshots", "ai_step_messages", "ai_step_sequences"} <= tables
+        assert {"ai_step_runs", "ai_step_events", "ai_step_snapshots", "ai_messages", "ai_message_sequences"} <= tables
         assert connection.execute("SELECT run_id FROM ai_step_runs").fetchall() == [("routed",)]
     with sqlite3.connect(conversation) as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-        assert {name for name in tables if name.startswith("ai_step_")} == {
-            "ai_step_runs", "ai_step_messages", "ai_step_sequences",
+        step_tables = {name for name in tables if name.startswith("ai_step_")}
+        message_tables = {"ai_messages", "ai_message_sequences"}
+        assert step_tables | (tables & message_tables) == {
+            "ai_step_runs", "ai_messages", "ai_message_sequences",
             "ai_step_run_admissions", "ai_step_tool_operations",
         }
         assert connection.execute("SELECT * FROM ai_step_runs").fetchall() == []
-        assert connection.execute("SELECT * FROM ai_step_messages").fetchall() == []
-        assert connection.execute("SELECT * FROM ai_step_sequences").fetchall() == []
+        assert connection.execute("SELECT * FROM ai_messages").fetchall() == []
+        assert connection.execute("SELECT * FROM ai_message_sequences").fetchall() == []
         assert connection.execute("SELECT * FROM ai_step_run_admissions").fetchall() == []
         assert connection.execute("SELECT * FROM ai_step_tool_operations").fetchall() == []
 
@@ -297,7 +298,7 @@ async def test_local_native_handoff_backup_recovers_same_execution(tmp_path: Pat
         native = await persistence.create_step_store()
         try:
             async with Runtime.open(persistence=persistence, features=features(native, blocked)) as owner:
-                execution = await (await owner.agents.get().create_session("session")).start("Remember blue", idempotency_key="first")
+                execution = await owner.agents.get().start("Remember blue", idempotency_key="first")
                 await asyncio.wait_for(entered.wait(), 5)
                 await asyncio.wait_for(owner.handoff(), 5)
             await asyncio.to_thread(_backup, source / "runtime.db", target / "runtime.db")
@@ -317,8 +318,7 @@ async def test_local_native_handoff_backup_recovers_same_execution(tmp_path: Pat
                 assert recovered.execution_id == execution.execution_id
                 await successor.executions.wait(recovered.execution_id, principal=principal, timeout_seconds=5)
                 assert (await successor.executions.inspect(recovered.execution_id, principal=principal)).status is ExecutionStatus.SUCCEEDED
-                session = successor.agents.get().session("session")
-                replay = await session.start("Remember blue", idempotency_key="first")
+                replay = await successor.agents.get().start("Remember blue", idempotency_key="first")
                 assert replay.execution_id == execution.execution_id
         finally:
             await native.close()

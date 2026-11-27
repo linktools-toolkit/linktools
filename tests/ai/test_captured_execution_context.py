@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-from linktools.ai.task import Task
+from linktools.ai.task import Task, TaskGraph, TaskNode, TaskStatus
 from linktools.ai.task.engine import TaskEngine
 
 from linktools.ai.persistence import Persistence
@@ -9,21 +9,47 @@ from ._runtime_test_helpers import is_tool_retry, model_features
 
 from ._runtime_test_helpers import workspace_features
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
+from pydantic_ai_harness.step_persistence import StepPersistence
 from linktools.ai.capability import ExecutionCapability, MemoryCapability
 
 import pytest
 from pydantic_ai.models.test import TestModel
 
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.core import ExecutionStatus, Principal
+from linktools.ai.core import AuthorizationAction, ExecutionStatus, Principal, ResourceRef, TenantAuthorizationPolicy
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import TraceCapability
-from linktools.ai.inputs import AgentTaskInputContext, CaptureInputRequest
+from linktools.ai.inputs import AgentTaskInput, AgentTaskInputContext, CaptureInputRequest
+from linktools.ai.session import CreateSessionRequest
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.memory import PersistentMemoryStore
 from linktools.ai.persistence import PersistenceDomain
 from .test_task_mixed_node_reliability import _TaskTestModelBinding
+
+
+class _HostAuthorization(TenantAuthorizationPolicy):
+    denied_session: str | None = None
+
+    async def authorize(self, principal: Principal, action: AuthorizationAction, resource: ResourceRef) -> None:
+        await super().authorize(principal, action, resource)
+        if action is AuthorizationAction.SESSION_READ and resource.id == self.denied_session:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+
+
+@asynccontextmanager
+async def _open_native_runtime(persistence: Persistence, group: RuntimeFeatures) -> AsyncIterator[Runtime]:
+    step = await persistence.create_step_store()
+    try:
+        group.capability(StepPersistence(store=step, capture_frontier=True), scope="runtime")
+        async with Runtime.open(persistence=persistence, features=model_features(_NoToolsModels(), group),
+                                authorization=_HostAuthorization()) as runtime:
+            yield runtime
+    finally:
+        await step.close()
 
 
 class _NoToolsBinding(_TaskTestModelBinding):
@@ -43,21 +69,27 @@ async def test_captured_session_context_ignores_later_turns_and_metadata(tmp_pat
     group.agent("default", model="default", system_prompt="original-only behavior", allow_tools=(), allow_skills=(), allow_subagents=())
     group.agent("candidate", model="default", system_prompt="candidate-only behavior", allow_tools=(), allow_skills=(), allow_subagents=())
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
-    async with Persistence.open('captured-session', storage=storage) as persistence_42, Runtime.open(persistence=persistence_42, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_42, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('captured-session', storage=storage) as persistence_42, _open_native_runtime(persistence_42, group) as runtime, TaskEngine.open(persistence=persistence_42, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("owner", runtime.tenant_id)
         agent = runtime.agents.get()
-        session = await agent.create_session("source-session", principal=principal, metadata={"note": "accepted metadata"})
-        first = await session.start("first historical turn")
-        await first.wait()
-        second = await session.start("second input")
-        await second.wait()
+        session = await runtime.sessions.create(CreateSessionRequest(
+            principal, "source-session", "create-session", metadata={"note": "accepted metadata"},
+        ))
+        first = await runtime.sessions.start(session.session_id, "first historical turn", agent=agent, principal=principal, idempotency_key="first")
+        assert (await first.wait_final()).status is ExecutionStatus.SUCCEEDED
+        task = Task.from_agent("context.agent", agent)
+        run = await runtime_engine.with_definitions(task).start(TaskGraph("context-source", (
+            TaskNode("agent", task=task, input=AgentTaskInput("second input", session_id=session.session_id)),
+        )), principal=principal, idempotency_key="second")
+        assert (await run.wait()).result.wait_status is TaskStatus.SUCCEEDED
+        second = await run.execution("agent")
         captured = await runtime_engine.inputs.capture_input(second.execution_id, CaptureInputRequest(principal, "context-session-0001"))
         value = await runtime_engine.inputs.read_agent(captured, principal=principal)
         assert value.input_context is not None
         assert "first historical turn" in value.input_context.history.decode()
         assert "second input" not in value.input_context.history.decode()
-        third = await session.start("later production turn")
-        await third.wait()
+        third = await runtime.sessions.start(session.session_id, "later production turn", agent=agent, principal=principal, idempotency_key="third")
+        assert (await third.wait_final()).status is ExecutionStatus.SUCCEEDED
         replay_principal = Principal("new-owner", runtime.tenant_id)
         replay = await runtime.agents.get("candidate").start(value.prompt, input_context=value.input_context, principal=replay_principal)
         assert (await replay.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -75,7 +107,7 @@ async def test_captured_session_context_ignores_later_turns_and_metadata(tmp_pat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("execution_id", ("e" * 128, "界" * 42 + "ab"))
+@pytest.mark.parametrize("execution_id", ("e" * 64, "界" * 21 + "a"))
 async def test_captured_memory_preserves_versions_in_new_execution_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, execution_id: str,
 ) -> None:
@@ -94,7 +126,7 @@ async def test_captured_memory_preserves_versions_in_new_execution_scope(
         value = await runtime_engine.inputs.read_agent(captured, principal=principal)
         assert value.input_context.memory["facts.txt"]["content"] == "old content"
         await memory.write("facts.txt", "new production content", expected_version=original.version)
-        ids = iter((execution_id, "f" * 128))
+        ids = iter((execution_id, "f" * 64))
         monkeypatch.setattr(runtime._execution_service, "_operation_ids", ids.__next__)
         replay = await runtime.agents.get().start(value.prompt, input_context=value.input_context, principal=principal)
         assert replay.execution_id == execution_id
@@ -120,31 +152,46 @@ async def test_captured_memory_preserves_versions_in_new_execution_scope(
 
 @pytest.mark.asyncio
 async def test_captured_agent_task_and_graph_restore_context_after_restart(tmp_path: Path) -> None:
-    from linktools.ai.inputs import AgentTaskInput, CaptureGraphRequest
-    from linktools.ai.task import TaskGraph, TaskNode
+    from linktools.ai.inputs import CaptureGraphRequest
 
     group = RuntimeFeatures("context-graph")
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     principal = Principal("owner", "default")
-    async with Persistence.open('captured-graph-context', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_109, Runtime.open(persistence=persistence_109, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_109, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('captured-graph-context', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_109, _open_native_runtime(persistence_109, group) as runtime, TaskEngine.open(persistence=persistence_109, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         agent = runtime.agents.get()
-        session = await agent.create_session("graph-session", principal=principal)
-        previous = await session.start("remember the earlier turn")
-        await previous.wait()
+        session = await runtime.sessions.create(CreateSessionRequest(principal, "graph-session", "create-session"))
+        previous = await runtime.sessions.start(session.session_id, "remember the earlier turn", agent=agent, principal=principal, idempotency_key="previous")
+        assert (await previous.wait_final()).status is ExecutionStatus.SUCCEEDED
         task = Task.from_agent("context.agent", agent)
         run = await runtime_engine.with_definitions(task).start(TaskGraph("context-source", (TaskNode("agent", task=task,
             input=AgentTaskInput("graph question", session_id="graph-session")),)), principal=principal, idempotency_key="context-graph-source")
-        await run.wait()
+        assert (await run.wait()).result.wait_status is TaskStatus.SUCCEEDED
         graph_capture = await runtime_engine.inputs.capture_graph("context-source", CaptureGraphRequest(principal, "context-graph-capture"))
         template = await runtime_engine.inputs.read_graph(graph_capture, principal=principal)
         assert template.context_policy == "captured"
-        assert template.nodes[0].input["capture_context"]["history"]
-        latest = await session.start("this later turn must not leak")
-        await latest.wait()
-    async with Persistence.open('captured-graph-context', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_124, Runtime.open(persistence=persistence_124, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_124, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+        captured_history = template.nodes[0].input["capture_context"]["history"]
+        assert "remember the earlier turn" in str(captured_history)
+        latest = await runtime.sessions.start(session.session_id, "this later turn must not leak", agent=agent, principal=principal, idempotency_key="latest")
+        assert (await latest.wait_final()).status is ExecutionStatus.SUCCEEDED
+    async with Persistence.open('captured-graph-context', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_124, _open_native_runtime(persistence_124, group) as runtime, TaskEngine.open(persistence=persistence_124, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         task = Task.from_agent("context.agent", runtime.agents.get())
         template = await runtime_engine.inputs.read_graph(graph_capture, principal=principal)
+        cold_capture = await runtime_engine.inputs.capture_graph(
+            "context-source", CaptureGraphRequest(principal, "context-graph-cold-capture"),
+        )
+        cold_template = await runtime_engine.inputs.read_graph(cold_capture, principal=principal)
+        assert cold_template.nodes[0].input["capture_context"]["history"] == captured_history
+        authorization = runtime._execution_service._authorization
+        authorization.denied_session = "graph-session"
+        try:
+            with pytest.raises(AIError) as denied:
+                await runtime_engine.inputs.capture_graph(
+                    "context-source", CaptureGraphRequest(principal, "context-graph-denied-capture"),
+                )
+            assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+        finally:
+            authorization.denied_session = None
         rerun = await runtime_engine.with_definitions(task).start(TaskGraph("context-replay", template.nodes), principal=principal, idempotency_key="context-graph-replay")
         await rerun.wait()
         execution = await rerun.execution("agent")
@@ -273,9 +320,6 @@ async def test_large_captured_context_survives_portable_storage_snapshot(tmp_pat
 
 @pytest.mark.asyncio
 async def test_reprojection_uses_captured_history_without_reopening_source_session(tmp_path: Path) -> None:
-    from linktools.ai.inputs import AgentTaskInput
-    from linktools.ai.task import TaskGraph, TaskNode, TaskStatus
-
     group = RuntimeFeatures("reproject-context")
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
@@ -286,11 +330,12 @@ async def test_reprojection_uses_captured_history_without_reopening_source_sessi
     async def replacement_builder(context: AgentTaskInputContext) -> str:
         return "replacement projected question"
 
-    async with Persistence.open('reproject-context', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_234, Runtime.open(persistence=persistence_234, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_234, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('reproject-context', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_234, _open_native_runtime(persistence_234, group) as runtime, TaskEngine.open(persistence=persistence_234, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("owner", runtime.tenant_id)
-        session = await runtime.agents.get().create_session("context-session", principal=principal)
-        first = await session.start("immutable earlier history")
-        await first.wait()
+        agent = runtime.agents.get()
+        session = await runtime.sessions.create(CreateSessionRequest(principal, "context-session", "create-session"))
+        first = await runtime.sessions.start(session.session_id, "immutable earlier history", agent=agent, principal=principal, idempotency_key="first")
+        assert (await first.wait_final()).status is ExecutionStatus.SUCCEEDED
         original = Task.from_agent("context.original", runtime.agents.get(), build_input=first_builder)
         candidate = Task.from_agent("context.candidate", runtime.agents.get(), build_input=replacement_builder)
         engine = runtime_engine.with_definitions(original, candidate)
@@ -300,6 +345,7 @@ async def test_reprojection_uses_captured_history_without_reopening_source_sessi
         source_execution = await source.execution("node")
         captured = await runtime_engine.inputs.capture_input(source_execution.execution_id, CaptureInputRequest(principal, "projected-context-capture"))
         source_value = await runtime_engine.inputs.read_agent(captured, principal=principal)
+        assert "immutable earlier history" in source_value.input_context.history.decode()
         capture = await runtime_engine.inputs.task_input(captured, principal=principal, input_mode="reproject_input")
         replay = await engine.start(TaskGraph("projected-replay", (TaskNode("node", task=candidate, input_capture=capture),)), principal=principal, idempotency_key="projected-context-replay")
         assert (await replay.wait()).result.wait_status is TaskStatus.SUCCEEDED

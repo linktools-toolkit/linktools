@@ -74,7 +74,7 @@ async def test_transcript_recovery_keeps_payloads_and_message_ranges(tmp_path: P
             from sqlalchemy import select
             from linktools.ai.persistence._step_schema import build_step_sql_metadata
 
-            table = build_step_sql_metadata().tables["ai_step_messages"]
+            table = build_step_sql_metadata().tables["ai_messages"]
             async with archive.state_store.context.engine.connect() as connection:
                 rows = (await connection.execute(select(table))).mappings().all()
             contents.extend(ContentRecord.from_native_row(row) for row in rows)

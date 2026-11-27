@@ -11,6 +11,7 @@ from collections import deque
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -452,7 +453,10 @@ async def test_convenience_wait_preserves_container_and_all_options(owner, metho
         starts.append(kwargs)
         return SimpleNamespace(wait=wait)
 
-    runtime = SimpleNamespace(_agent_execution_port=lambda *_args, derivations=(), observed_binding=None: SimpleNamespace(start=start))
+    runtime = SimpleNamespace(
+        _agent_execution_port=lambda *_args, derivations=(), observed_binding=None: SimpleNamespace(start=start),
+        sessions=SimpleNamespace(_uses_turn_sessions=False),
+    )
     handle = Agent(runtime, "agent", 1) if owner == "agent" else Session(runtime, "agent", 1, "session")
     callback = _ignore if observe else None
     result = await getattr(handle, method)(

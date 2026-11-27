@@ -20,15 +20,15 @@ from .test_execution_terminal_payload_runtime import _PayloadBuffer
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("outcome", "sessionless", "execution_buffered", "trace_buffered"), (
-    ("success", False, True, True), ("failure", False, True, True),
-    ("cancelled", False, True, True), ("success", True, True, True),
-    ("reject_before", False, True, True), ("reject_response", False, True, True),
-    ("cancel_reject", False, True, True), ("source_unknown", False, True, True),
-    ("success", False, True, False), ("success", False, False, True),
+@pytest.mark.parametrize(("outcome", "execution_buffered", "trace_buffered"), (
+    ("success", True, True), ("failure", True, True),
+    ("cancelled", True, True),
+    ("reject_before", True, True), ("reject_response", True, True),
+    ("cancel_reject", True, True), ("source_unknown", True, True),
+    ("success", True, False), ("success", False, True),
 ))
 async def test_pending_execution_and_trace_payloads_share_the_terminal_source_boundary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, sessionless: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
     execution_buffered: bool, trace_buffered: bool,
 ) -> None:
     entered, release = asyncio.Event(), asyncio.Event()
@@ -79,7 +79,7 @@ async def test_pending_execution_and_trace_payloads_share_the_terminal_source_bo
     async with Persistence.open("pending-trace-payload", storage=storage) as persistence:
         async with Runtime.open(persistence=persistence,
             features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None) as runtime:
-            target = runtime.agents.get() if sessionless else await runtime.agents.get().create_session("session")
+            target = runtime.agents.get()
             backend = runtime._execution_service.runtime_backend()
             if outcome == "source_unknown":
                 from linktools.ai.errors import AIError, ErrorCode
@@ -136,7 +136,7 @@ async def test_pending_execution_and_trace_payloads_share_the_terminal_source_bo
             source = await persistence.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
             assert source.status is expected
             head = await persistence.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
-            assert (head.history_seal_digest is not None) and head.history_seal_digest is not None
+            assert head.history_seal_digest is not None
             assert (await trace.get_agent_run(agent_run_id=run_id) is None) == (outcome == "reject_before")
         assert set(acknowledged) == set(accepted)
         assert set(execution_buffer.acknowledged) == set(execution_buffer.accepted)

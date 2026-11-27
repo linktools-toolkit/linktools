@@ -75,7 +75,13 @@ def test_web_cli_exits_cleanly_with_an_idle_observer(tmp_path: Path, replay_sign
             with opener.open(Request(f"http://127.0.0.1:{port}/api/session/events?session_id=idle",
                                      headers=headers), timeout=7) as stream:
                 assert stream.headers.get_content_type() == "text/event-stream"
-                assert stream.readline().startswith(b"data: ")
+                assert stream.readline() == b"id: 0\n"
+                assert stream.readline() == b"event: turn\n"
+                data = stream.readline()
+                assert data.startswith(b"data: ")
+                snapshot = json.loads(data[len(b"data: "):])
+                assert snapshot["type"] == "snapshot"
+                assert snapshot["session"]["session_id"] == "idle"
                 assert stream.readline() == b"\n"
                 process.send_signal(signal.SIGINT)
                 assert stream.read() == b""

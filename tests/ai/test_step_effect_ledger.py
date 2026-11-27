@@ -32,7 +32,7 @@ async def test_effect_ledger_is_the_only_physical_owner(tmp_path: Path, backend:
         if backend == "sqlite":
             async with store.context.engine.connect() as connection:
                 assert await connection.scalar(text("SELECT count(*) FROM ai_step_tool_operations")) == 1
-                assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 1
+                assert await connection.scalar(text("SELECT count(*) FROM ai_messages")) == 1
                 assert await connection.scalar(text("SELECT count(*) FROM ai_state_records WHERE kind='tool_operation'")) == 0
         else:
             assert store.storage_group.opened_archive is not None
@@ -76,3 +76,19 @@ async def test_subject_lookup_does_not_join_independent_owner_ids(tmp_path: Path
         selected = await store.read(lambda transaction: transaction.read_record_subjects(
             scope_key=current.scope_key, kind="tool_operation", subject_ids=(current.subject_id,)))
         assert tuple(record.key for record in selected) == (current.key,)
+
+
+def test_effect_ledger_key_width_preserves_opaque_records() -> None:
+    from linktools.ai.persistence._record_owner import record_owner_table
+    from linktools.ai.persistence.schema import PersistenceDomain, build_runtime_sql_metadata
+    from linktools.ai.persistence.state import record_key
+
+    metadata = build_runtime_sql_metadata(frozenset(PersistenceDomain))
+    assert metadata.tables["ai_step_tool_operations"].c.key.type.length == 234
+    identity = "界" * 21 + "a"
+    maximum = record_key("n" * 64, "t" * 64, "checkpoint", "tool_operation", (identity,))
+    assert len(maximum) == 234
+    assert record_owner_table(maximum) == "ai_step_tool_operations"
+    assert record_owner_table(record_key("n", "t", "checkpoint", "tool_operation", (identity + "b",))) == "ai_state_records"
+    assert record_owner_table(record_key("n", "t", "plugin", "tool_operation", (identity,))) == "ai_state_records"
+    assert record_owner_table(record_key("n", "t", "checkpoint", "tool_operation", ("id", "child"))) == "ai_state_records"

@@ -696,9 +696,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     source_session_id=source_session_id,
                     target=target,
                 )
-            source_stored = await transaction.get_record(
-                self._key("session", (source_session_id,))
-            )
+            source_stored = await transaction.get_record(self.session_record_key(source_session_id))
             if source_stored is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             source = await self._decode(source_stored, SessionRecord)
@@ -940,38 +938,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             existing_target.session_id,
         )
         return existing_target, True
-
-    async def capture_timeline_window(
-        self, session_id: str, *, tenant_id: str, before: int | None,
-        limit: int, pending: bool,
-    ) -> tuple[int, tuple[SessionTurnRef, ...]] | None:
-        """Capture a built-in SQL timeline page without separating its counter read."""
-        from ._sql import SqlStateStore
-        from .state import SqlStateSequenceReader
-
-        _require_repository_tenant(tenant_id, self._tenant_id)
-        if type(self._store) is not SqlStateStore:
-            return None
-
-        async def capture(transaction: StateTransaction):
-            if not isinstance(transaction, SqlStateSequenceReader):
-                return None
-            head, facts = await transaction.read_sequence_window(
-                self._timeline_stream(session_id), before=before, limit=limit,
-                include_next=pending,
-            )
-            display_head = head + int(pending)
-            page_end = display_head + 1 if before is None else before
-            if page_end < 1 or page_end > display_head + 1:
-                raise AIError(ErrorCode.CURSOR_INVALID)
-            start = max(1, page_end - limit)
-            start = min(start, head) if pending and head else start
-            end = min(page_end, head + 1)
-            if tuple(fact.sequence for fact in facts) != tuple(range(start, end)):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return head, tuple(self._decode_timeline_turn(session_id, fact) for fact in facts)
-
-        return await self._store.read(capture)
 
     async def timeline_head(self, session_id: str, *, tenant_id: str) -> int:
         _require_repository_tenant(tenant_id, self._tenant_id)
@@ -1449,21 +1415,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             if release and next_value.revision != value.revision:
                 await self._bump_list_generation(transaction, value.owner_principal_id)
             if not release:
-                stream = self._timeline_stream(session_id)
-                sequence = await transaction.next_sequence(stream)
-                await transaction.insert_fact(
-                    StoredFact(
-                        stream,
-                        sequence,
-                        self._key("session", (session_id,)),
-                        "session_turn",
-                        execution_id,
-                        None,
-                        {"version": 1, "execution_id": execution_id},
-                    )
-                )
-                if admitted_turn is not None:
-                    admitted_turn(SessionTurnRef(session_id, sequence, execution_id))
+                await self._record_admitted_turn(transaction, session_id, execution_id, admitted_turn)
             return next_value
 
         if transaction is not None:
@@ -1620,6 +1572,19 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         if committed.execution_id != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return committed
+
+    async def _record_admitted_turn(
+        self, transaction: StateTransaction, session_id: str, execution_id: str,
+        callback: Callable[[SessionTurnRef], None] | None,
+    ) -> None:
+        stream = self._timeline_stream(session_id)
+        sequence = await transaction.next_sequence(stream)
+        await transaction.insert_fact(StoredFact(
+            stream, sequence, self.session_record_key(session_id), "session_turn", execution_id, None,
+            {"version": 1, "execution_id": execution_id},
+        ))
+        if callback is not None:
+            callback(SessionTurnRef(session_id, sequence, execution_id))
 
     def session_record_key(self, session_id: str) -> bytes:
         return self._key("session", (session_id,))

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Protocol, TypeAlias, runtime_checkable
 
 from linktools.core import environ
 
+from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 
 SqlValue: TypeAlias = str | int | bool | bytes | datetime | None
@@ -112,6 +113,8 @@ class SqlAlchemyDialect(Protocol):
     async def database_now(self, session: "AsyncSession") -> datetime: ...
 
     async def database_current_time(self, session: "AsyncSession") -> datetime: ...
+
+    def set_json_member(self, column: "ColumnElement", key: str, value: JsonValue) -> "ColumnElement": ...
 
     async def insert_ignore_conflict(
         self,
@@ -217,6 +220,13 @@ class SqlAlchemyDialect(Protocol):
 
 
 class SQLiteDialect:
+    def set_json_member(self, column: "ColumnElement", key: str, value: JsonValue) -> "ColumnElement":
+        """Set one top-level JSON member without reserializing siblings in Python."""
+        from sqlalchemy import func
+
+        path = "$." + canonical_json_bytes(key).decode("utf-8")
+        return func.json_set(column, path, func.json(canonical_json_bytes(value).decode("utf-8")))
+
     @property
     def name(self) -> str:
         return "sqlite"
@@ -531,6 +541,15 @@ class SQLiteDialect:
 
 
 class PostgreSQLDialect(SQLiteDialect):
+    def set_json_member(self, column: "ColumnElement", key: str, value: JsonValue) -> "ColumnElement":
+        from sqlalchemy import JSON, Text, bindparam, cast, func
+        from sqlalchemy.dialects.postgresql import JSONB, array
+
+        return cast(func.jsonb_set(
+            cast(column, JSONB), array([key], type_=Text()),
+            cast(bindparam(None, canonical_json_bytes(value).decode("utf-8"), type_=Text()), JSONB),
+        ), JSON)
+
     @property
     def name(self) -> str:
         return "postgresql"
@@ -567,6 +586,12 @@ class PostgreSQLDialect(SQLiteDialect):
 
 
 class MySQLDialect(SQLiteDialect):
+    def set_json_member(self, column: "ColumnElement", key: str, value: JsonValue) -> "ColumnElement":
+        from sqlalchemy import func
+
+        path = "$." + canonical_json_bytes(key).decode("utf-8")
+        return func.json_set(column, path, func.json_extract(canonical_json_bytes(value).decode("utf-8"), "$"))
+
     @property
     def name(self) -> str:
         return "mysql"
@@ -987,6 +1012,39 @@ def sql_sort_key() -> "String":
             "mysql",
         )
     )
+
+
+def sql_binary_key(length: int) -> "LargeBinary":
+    from sqlalchemy import LargeBinary
+    from sqlalchemy.dialects.mysql import VARBINARY
+
+    return LargeBinary(length).with_variant(VARBINARY(length), "mysql")
+
+
+@lru_cache(maxsize=1)
+def sql_epoch_seconds() -> "ColumnElement[int]":
+    """Return the database statement clock for a lease predicate or write."""
+    from sqlalchemy import BigInteger
+    from sqlalchemy.ext.compiler import compiles
+    from sqlalchemy.sql.functions import FunctionElement
+
+    class EpochSeconds(FunctionElement[int]):
+        type = BigInteger()
+        inherit_cache = True
+
+    @compiles(EpochSeconds, "sqlite")
+    def compile_sqlite(element: object, compiler: object, **kwargs: object) -> str:
+        return "CAST(strftime('%s', 'now') AS BIGINT)"
+
+    @compiles(EpochSeconds, "mysql")
+    def compile_mysql(element: object, compiler: object, **kwargs: object) -> str:
+        return "UNIX_TIMESTAMP()"
+
+    @compiles(EpochSeconds, "postgresql")
+    def compile_postgresql(element: object, compiler: object, **kwargs: object) -> str:
+        return "CAST(floor(EXTRACT(epoch FROM statement_timestamp())) AS BIGINT)"
+
+    return EpochSeconds()
 
 
 def sql_blob() -> "LargeBinary":
@@ -1457,8 +1515,10 @@ __all__ = [
     "sql_audit_columns",
     "sql_audit_now",
     "sql_audit_indexes",
+    "sql_binary_key",
     "sql_blob",
     "sql_digest",
+    "sql_epoch_seconds",
     "sql_id_column",
     "sql_integer_id",
     "sql_query_index",

@@ -71,7 +71,7 @@ async def test_native_result_readonly_snapshot_and_last_owner_gc(tmp_path: Path)
         assert result.result.output == output
         store = repo.state_store
         async with store.storage_group.context.engine.connect() as connection:
-            before = await connection.scalar(sqltext("select count(*) from ai_step_messages"))
+            before = await connection.scalar(sqltext("select count(*) from ai_messages"))
         assert before > 0
         # Remove transcript owners so the compact result alone protects its body.
         for partition in await store.storage_group.scan_stores():
@@ -86,12 +86,12 @@ async def test_native_result_readonly_snapshot_and_last_owner_gc(tmp_path: Path)
                 await partition.mutate(lambda tx: tx.delete_fact_streams(owner))
         await restored.purge_unreferenced_objects((), exclusive=Guard())
         async with store.storage_group.context.engine.connect() as connection:
-            retained = await connection.scalar(sqltext("select count(*) from ai_step_messages"))
+            retained = await connection.scalar(sqltext("select count(*) from ai_messages"))
         assert retained > 0
         assert (await repo.get_result_record("execution", tenant_id="tenant", fresh=True)).result.output == output
         await store.mutate(lambda tx: tx.delete_records((repo.execution_record_key("execution"),)))
         await restored.purge_unreferenced_objects((), exclusive=Guard())
         async with store.storage_group.context.engine.connect() as connection:
-            after = await connection.scalar(sqltext("select count(*) from ai_step_messages"))
-            nodes = await connection.scalar(sqltext("select count(*) from ai_step_sequences"))
+            after = await connection.scalar(sqltext("select count(*) from ai_messages"))
+            nodes = await connection.scalar(sqltext("select count(*) from ai_message_sequences"))
         assert (after, nodes) == (0, 0)

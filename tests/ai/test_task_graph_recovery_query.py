@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Recovery pages merge physical owners without scanning terminal graph history."""
+"""Recovery pages use the State index without scanning terminal graph history."""
 
 from dataclasses import replace
 from hashlib import sha256
@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import String, create_engine, insert, text
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 
+from linktools.ai.persistence._record_owner import record_scan_kind
 from linktools.ai.persistence._sql import _record_query_statement
 from linktools.ai.persistence.schema import PersistenceDomain, build_runtime_sql_metadata
 from linktools.ai.persistence.state import RecordQuery, record_key
@@ -21,11 +22,14 @@ def _row(index: int, *, state: str, opaque: bool = False, store: bytes = b"parti
     scope = b"scope" if index % 2 else b"other-scope"
     parent = b"parent" if index % 3 else b"other-parent"
     order = b"x" * 128 + f"{index // 2:05}".encode()
-    return dict(store_key=store, key=key, key_locator=sha256(key).hexdigest(),
-                scope_key=scope, scope_locator=sha256(scope).hexdigest(),
-                parent_key=parent, parent_locator=sha256(parent).hexdigest(),
-                sort_key=order, sort_prefix=order[:128], state=state,
-                storage_revision=0, payload_json={"index": index}, lease_fence=0)
+    values = dict(store_key=store, key=key, key_locator=sha256(key).hexdigest(),
+                  sort_key=order, sort_prefix=order[:128], state=state,
+                  storage_revision=0, payload_json={"index": index}, lease_fence=0,
+                  kind="task_graph", scan_kind=record_scan_kind("task_graph", state))
+    if opaque:
+        values.update(scope_key=scope, scope_locator=sha256(scope).hexdigest(),
+                      parent_key=parent, parent_locator=sha256(parent).hexdigest())
+    return values
 
 
 @pytest.mark.parametrize("states", [None, frozenset(), frozenset({"PENDING"}),
@@ -36,7 +40,6 @@ def test_graph_pages_preserve_scopes_and_raw_tie_cursors(
     states: frozenset[str] | None, scope: bytes | None, parent: bytes | None, prefix: bytes | None,
 ) -> None:
     metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.TASK}))
-    graph = metadata.tables["ai_task_graphs"]
     generic = metadata.tables["ai_state_records"]
     engine = create_engine("sqlite://")
     metadata.create_all(engine)
@@ -44,15 +47,13 @@ def test_graph_pages_preserve_scopes_and_raw_tie_cursors(
                  store=b"other" if i % 13 == 0 else b"partition") for i in range(100)]
     with engine.begin() as connection:
         for row in rows:
-            opaque = row["key"].startswith(b"opaque")
-            connection.execute(insert(generic if opaque else graph),
-                               dict(row, kind="task_graph", scan_kind="k:task_graph") if opaque else row)
+            connection.execute(insert(generic), row)
         # A different kind in the fallback table cannot enter the graph page.
         connection.execute(insert(generic), dict(_row(200, state="PENDING", opaque=True), kind="other", scan_kind="k:other"))
         expected = sorted((row for row in rows if row["store_key"] == b"partition"
             and (states is None or row["state"] in states)
-            and (scope is None or row["scope_key"] == scope)
-            and (parent is None or row["parent_key"] == parent)
+            and (scope is None or row.get("scope_key") == scope)
+            and (parent is None or row.get("parent_key") == parent)
             and (prefix is None or row["sort_key"].startswith(prefix))),
             key=lambda row: (row["sort_prefix"], row["sort_key"], row["key"]))
         query = RecordQuery(kind="task_graph", states=states, scope_key=scope,
@@ -73,10 +74,9 @@ def test_graph_pages_preserve_scopes_and_raw_tie_cursors(
 
 def test_graph_page_does_not_split_overlapping_state_ranges() -> None:
     metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.TASK}))
-    graph = metadata.tables["ai_task_graphs"]
     # Reproduce the equality of MySQL's PAD SPACE state collation on SQLite.
-    for name in ("ai_task_graphs", "ai_state_records"):
-        metadata.tables[name].c.state.type = String(64, collation="PAD_SPACE")
+    records = metadata.tables["ai_state_records"]
+    records.c.state.type = String(64, collation="PAD_SPACE")
 
     def compare(left: str, right: str) -> int:
         left, right = left.rstrip(" "), right.rstrip(" ")
@@ -88,7 +88,7 @@ def test_graph_page_does_not_split_overlapping_state_ranges() -> None:
             connection.connection.driver_connection.create_collation("PAD_SPACE", compare)
             metadata.create_all(connection)
             rows = [_row(0, state="PENDING"), _row(1, state="PENDING ")]
-            connection.execute(insert(graph), rows)
+            connection.execute(insert(records), rows)
             query = RecordQuery(kind="task_graph", states=frozenset({"PENDING", "PENDING "}), limit=2)
             page = connection.execute(_record_query_statement(metadata, b"partition", query)).mappings().all()
             assert [row["key"] for row in page] == [row["key"] for row in rows]
@@ -100,7 +100,7 @@ def test_graph_page_does_not_split_overlapping_state_ranges() -> None:
 @pytest.mark.parametrize("terminal", [False, True])
 def test_graph_recovery_scan_is_bounded_by_state_page(analyze: bool, terminal: bool) -> None:
     metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.TASK}))
-    table = metadata.tables["ai_task_graphs"]
+    table = metadata.tables["ai_state_records"]
     engine = create_engine("sqlite://")
     metadata.create_all(engine)
     def make_row(index: int, state: str) -> dict:
@@ -122,6 +122,9 @@ def test_graph_recovery_scan_is_bounded_by_state_page(analyze: bool, terminal: b
             previous = size
             if analyze:
                 connection.execute(text("ANALYZE"))
+            plan_sql = statement.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True})
+            plan = connection.exec_driver_sql(f"EXPLAIN QUERY PLAN {plan_sql}").all()
+            assert any("ix_ai_state_records_store_key_scan_kind_sort_prefix" in row[3] and "scan_kind=?" in row[3] for row in plan)
             raw = connection.connection.driver_connection
             count = [0]
             def progress() -> int:

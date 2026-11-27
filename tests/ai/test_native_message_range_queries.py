@@ -66,7 +66,7 @@ def test_range_query_limits_paths_binds_sql_and_unselected_bodies(dialect) -> No
     plan = content.range_query((root,))
     compiled = str(plan.statement.compile(dialect=dialect)).upper()
     assert ("WITH RECURSIVE" in compiled) == (dialect.name != "mysql")
-    assert "LEFT OUTER JOIN AI_STEP_MESSAGES" in compiled
+    assert "LEFT OUTER JOIN AI_MESSAGES" in compiled
     assert "POSITION >=" in compiled and "POSITION <" in compiled
     assert plan.bind_parameters <= 900 and plan.sql_bytes <= 256 * 1024
     assert plan.path_units < 1023 if dialect.name != "mysql" else plan.path_units < 1023 * (plan.depth + 1)
@@ -155,9 +155,9 @@ async def test_immutable_content_insert_compares_winners_without_body_reads(dial
         assert all(name.upper() in sql for name in row)
         if dialect.name == "mysql":
             assert "ON DUPLICATE KEY UPDATE ID = CASE WHEN" in sql
-            assert "THEN AI_STEP_" in sql and ".ID ELSE CASE" in sql
+            assert f"THEN {table.name.upper()}.ID ELSE CASE" in sql
         else:
-            assert "DO UPDATE SET ID = AI_STEP_" in sql and ".ID WHERE" in sql
+            assert f"DO UPDATE SET ID = {table.name.upper()}.ID WHERE" in sql
         session.rowcount = 0
         with pytest.raises(AIError) as caught:
             await content._insert_rows(session, table, (row,))

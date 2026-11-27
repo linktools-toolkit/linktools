@@ -36,7 +36,7 @@ from linktools.ai.persistence.codec import (
 )
 from linktools.ai.persistence.contracts import ContextProjection, ConversationCursor, IdempotencyTerminalUpdate, OperationTerminalUpdate, StoredAgentRunCheckpoint, TranscriptMessageRef, TranscriptHeadRecord, TranscriptOwnerDomain, HistoryQuality
 from linktools.ai.persistence._step_contracts import AgentRunRecord, StepEvent
-from linktools.ai.persistence.state import RECORD_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, record_key, validate_record_key, operation_key, parent_key, scope_key
+from linktools.ai.persistence.state import RECORD_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, record_key, validate_record_key, operation_key, parent_key, scope_key, state_store_key
 from linktools.ai.task import TaskBindingContract
 from linktools.ai.steps import NativeStepSource
 from linktools.ai.persistence._message_root import NativeMessageRoot, NativeMessageSlice
@@ -441,7 +441,7 @@ def test_checkpoint_boundary_rejects_invalid_explicit_values(value: object) -> N
 
 
 @pytest.mark.parametrize("key", (b"x", b"x" * 32, b"x" * OPERATION_KEY_MAX_BYTES,
-                                 operation_key("界" * 42 + "ab", "é" * 64, "conversation", "界" * 42 + "ab")))
+                                 operation_key("界" * 21 + "a", "é" * 32, "conversation", "界" * 42 + "ab")))
 def test_operation_wire_roundtrips_bounded_binary_addresses(key: bytes) -> None:
     from linktools.ai.persistence.state import OperationScanCursor, StoredOperation
     value = StoredOperation(key, b"s" * 32, 1, "pending", True, {})
@@ -477,12 +477,16 @@ def test_record_tuple_is_injective_and_bounds_encoded_bytes() -> None:
         record_key("namespace", "tenant", "checkpoint", "r", (maximum + "x",))
     with pytest.raises(ValueError):
         record_key("namespace", "tenant", "checkpoint", "r", ("x" * 65536,))
-    assert len(operation_key("n" * 128, "t" * 128, "conversation", "o" * 128)) == 405
+    operation_scope = ("n" * 64, "t" * 64, "conversation")
+    operation_identity = "界" * 42 + "ab"
+    address = operation_key(*operation_scope, operation_identity)
+    assert len(address) == 163
+    assert address == b"\x01" + state_store_key(*operation_scope) + b"\x00\x80" + operation_identity.encode("utf-8")
 
 
 @pytest.mark.parametrize("key,kind", (
     (b"x", "golden"), (b"x" * 32, "golden"), (b"x" * RECORD_KEY_MAX_BYTES, "golden"),
-    (record_key("namespace", "tenant", "checkpoint", "tool_operation", ("é", "e\u0301")), "tool_operation"),
+    (record_key("namespace", "tenant", "checkpoint", "tool_operation", ("e\u0301",)), "tool_operation"),
 ))
 def test_record_binary_address_roundtrips_without_repr_disclosure(key: bytes, kind: str) -> None:
     record = replace(decode_record(_fixture()["stored_primitives"]["record"]), key=key, kind=kind)

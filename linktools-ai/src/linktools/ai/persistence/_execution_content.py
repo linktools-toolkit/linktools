@@ -5,14 +5,14 @@
 import json
 from collections import Counter
 from weakref import ref
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import replace
 
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
-from ..storage import StoredPayload
+from ..storage import ObjectRef, StoredPayload
 from ..execution import ExecutionRecord, ExecutionTimelineRecord, PendingToolContinuation, RecoveryTerminalHandoff, ResultRecord
-from ..model import StoredUserInput, capture_plain_text_input, plain_text_input_content
+from ..model import StoredUserInput, plain_text_input_content
 from ..agent import AgentBindingContract
 from ..task import TaskBindingContract
 from ._archive_read import ContentReferenceReader
@@ -24,7 +24,7 @@ from ._step_store import SqlStepStore
 from ..model.messages import decode_model_messages
 from pydantic_ai.messages import ModelRequest, UserPromptPart, ModelResponse, TextPart, ToolCallPart
 from .codec import (decode_execution_terminal_details,  binding_reference, decode_envelope, encode_envelope, _encode_persisted_domain,
-    pending_operation_reference, encode_execution_content, decode_execution_content, decode_execution_payload, execution_payload_reference, decode_domain, execution_payload_slots, payload_reference, native_user_input_reference, validate_native_user_input, native_text_reference, validate_native_text_payload, map_execution_payload_slots)
+    pending_operation_reference, encode_execution_content, decode_execution_content, decode_execution_payload, execution_payload_reference, decode_domain, execution_payload_slots, payload_reference, native_user_input_reference, validate_native_user_input, restore_native_user_input, native_text_reference, validate_native_text_payload, map_execution_payload_slots)
 from .state import GroupRecordReader, StateStorageGroup, StateStore, StateTransaction, StoredRecord, active_state_scope
 
 from ._execution_policy_content import (POLICY_CODEC, policy_reference, policy_values, encode_policy, decode_policy, expand_policy, expand_policy_records)
@@ -189,21 +189,6 @@ def restore_native_text_payload(reference: NativeTextReference, raw: bytes) -> S
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-def restore_native_user_input(reference: NativeUserInputReference, raw: bytes) -> StoredUserInput:
-    """Authenticate a canonical text or ordered-text capture from a fixed prompt."""
-    try:
-        messages = decode_model_messages(raw)
-        if (len(messages) != 1 or not isinstance(messages[0], ModelRequest)
-                or reference.part_index >= len(messages[0].parts)):
-            raise ValueError("native input source is not a request part")
-        part = messages[0].parts[reference.part_index]
-        if not isinstance(part, UserPromptPart):
-            raise ValueError("native input source is not ordinary prompt text")
-        return validate_native_user_input(reference, capture_plain_text_input(part.content))
-    except (TypeError, ValueError, KeyError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-
-
 def expand_native_execution_content(
     record: StoredRecord, payloads: Mapping[NativeTextReference | NativeUserInputReference, StoredPayload | StoredUserInput | PendingToolContinuation | RecoveryTerminalHandoff | ResultRecord | Mapping],
 ) -> StoredRecord:
@@ -224,11 +209,16 @@ class ExecutionContent:
         self._store, self._namespace, self._tenant_id = store, namespace, tenant_id
         self._pending_source = store
         self._content_archive: ContentArchive | None = None
+        self._archive_object_reader: Callable[[ObjectRef], Awaitable[bytes]] | None = None
         self._share_content = True
         # This cache saves immutable encoding work, never proves source existence.
         self._payload_encodings: dict[int, tuple[ref, ArchiveContentInput | tuple[str, bytes]]] = {}
         self._binding_encodings: dict[int, tuple[ref, ArchiveContentInput]] = {}
         self._projections: dict[int, tuple[ref, StoredRecord]] = {}
+
+    def bind_archive_object_reader(self, reader: Callable[[ObjectRef], Awaitable[bytes]]) -> None:
+        """Bind native attachment reads to this storage group's archive."""
+        self._archive_object_reader = reader
 
     def bind_pending_operation_source(self, source: StateStore) -> None:
         if source.storage_group is not self._store.storage_group:
@@ -262,7 +252,8 @@ class ExecutionContent:
         # Immutable Execution bodies stay in the database for atomic publication
         # and complete offline snapshot validation before state is admitted.
         self._content_archive = ContentArchive(store, scope, namespace=self._namespace,
-                                               tenant_id=self._tenant_id, object_store=None)
+                                               tenant_id=self._tenant_id, object_store=None,
+                                               object_reader=self._archive_object_reader)
 
     async def _archive(self, *, create: bool = False) -> ContentArchive:
         active = active_state_scope()
@@ -557,6 +548,7 @@ class ExecutionContent:
 
     async def encode(self, value: ExecutionRecord, *, previous: StoredRecord | None = None,
                      result_source: NativeTextReference | None = None,
+                     _admitted_input_source: NativeUserInputReference | None = None,
                      observed_value: ExecutionRecord | None = None,
                      verified_native_previous: ExecutionRecord | None = None) -> JsonValue:
         """Publish new immutable bodies with the same transaction as their owner."""
@@ -607,7 +599,13 @@ class ExecutionContent:
                     or opened is None or result_source.root.group_id != opened[0]
                     or result_source.root.store_key != native_store_key(self._namespace, self._tenant_id)):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        input_source = None
+        input_source = _admitted_input_source
+        if input_source is not None:
+            opened = self._store.storage_group.opened_archive
+            if (previous is not None or opened is None or input_source.root.group_id != opened[0]
+                    or input_source.root.store_key != native_store_key(self._namespace, self._tenant_id)):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            validate_native_user_input(input_source, value.stored_user_input)
         if previous is not None:
             for path, payload in _payloads(previous):
                 if path == ("stored_user_input",):
@@ -1019,5 +1017,5 @@ class ExecutionContent:
         return tuple(_map_payloads(record, expand) for record in records)
 
 
-__all__ = ["restore_native_user_input", "restore_native_text_payload", "expand_native_execution_content", "ExecutionContent", "expand_snapshot_execution_content", "expand_retained_execution_content", "snapshot_execution_content_size",
+__all__ = ["restore_native_text_payload", "expand_native_execution_content", "ExecutionContent", "expand_snapshot_execution_content", "expand_retained_execution_content", "snapshot_execution_content_size",
            ]

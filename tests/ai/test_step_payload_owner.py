@@ -26,7 +26,7 @@ async def test_execution_payload_content_has_one_step_owner(tmp_path: Path, back
         await archive.prepare_content((("execution-payload", raw), ("execution-binding", raw)), prepared)
         await store.mutate(lambda transaction: archive.publish(transaction, prepared))
         keys = archive.content_record_keys((("execution-payload", raw), ("execution-binding", raw)))
-        assert record_owner_table(keys[0], store_key=STATE_GROUP_ARCHIVE_KEY) == "ai_step_messages"
+        assert record_owner_table(keys[0], store_key=STATE_GROUP_ARCHIVE_KEY) == "ai_messages"
         assert record_owner_table(keys[1]) == "ai_state_records"
         records = await store.read_records(keys)
         assert len(records) == 2
@@ -39,7 +39,7 @@ async def test_execution_payload_content_has_one_step_owner(tmp_path: Path, back
             assert set(values) == set(keys)
         if backend == "sqlite":
             async with store.context.engine.connect() as connection:
-                assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 1
+                assert await connection.scalar(text("SELECT count(*) FROM ai_messages")) == 1
                 assert await connection.scalar(text("SELECT count(*) FROM ai_state_records WHERE kind='archive_content'")) == 1
         else:
             assert len(store._record_owners.payload_rows) == 1

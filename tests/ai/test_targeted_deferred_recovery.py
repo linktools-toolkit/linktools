@@ -61,9 +61,8 @@ async def test_targeted_deferred_recovery_waits_retries_and_preserves_identity(
     async with _runtime(database, model, checked, restart_checkpoints=restart,
                         authorization=_RecoveryAuthorization()) as (runtime, persistence, _steps):
         executions = []
-        for session_id in ("selected", "unrelated"):
-            session = await runtime.agents.get().create_session(session_id, principal=owner)
-            execution = await session.start("question", principal=owner, idempotency_key=session_id)
+        for request_key in ("selected", "unrelated"):
+            execution = await runtime.agents.get().start("question", principal=owner, idempotency_key=request_key)
             executions.append(execution)
             await _wait_for_committed(
                 lambda: persistence.execution.executions.get(execution.execution_id, tenant_id="default"),

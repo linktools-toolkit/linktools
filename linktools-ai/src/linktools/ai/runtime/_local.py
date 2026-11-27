@@ -7,16 +7,19 @@ import asyncio
 from ._handoff import ExecutionHandoffScope, execution_handoff_scope
 import json
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from time import monotonic_ns
-from typing import Protocol, TypeVar, cast
+from functools import partial
+from typing import TYPE_CHECKING, Protocol, TypeVar, cast
 
 from linktools.core import environ
 from ..steps import NativeStepSource
 from pydantic import ValidationError
 from pydantic_ai.messages import (
+    BinaryContent,
     ModelMessage,
     ModelRequest,
     ToolCallPart,
@@ -24,6 +27,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.tools import (
     DeferredToolRequests,
+    ToolApproved,
 )
 
 from ..asset import AssetStoreReader
@@ -52,6 +56,7 @@ from ..inputs import (
 )
 from ..capability.planning import PlanningStore
 from ..persistence.durability import CommitObservation, DurableCommitState
+from ..persistence import MessageArchive
 from ..persistence.runs import NativeCheckpoint
 from ..persistence.planning import PlanStateStore
 from ._execution_payload import _materialize_execution_payloads
@@ -100,7 +105,10 @@ from ..execution import tool_operation_id, tool_operation_references
 from ..execution.events import ExecutionDelta, LiveExecutionEventBroker
 from ..execution.model_progress import encode_model_progress
 from ..history import project_committed_model_progress
-from ._execution import CancelEffectOutcome, ExecutionStartIdentity, _GroupedTurnStart, _TerminalMetricDelivery
+from ._execution import (
+    _require_atomic_execution_trace,
+    CancelEffectOutcome, ExecutionStartIdentity, _GroupedTurnStart, _TerminalMetricDelivery, _execution_cancel_actor,
+)
 from ..observe.service import (
     capture_execution_terminal,
     record_metric_observation,
@@ -117,12 +125,14 @@ from ._tool import (
     RuntimeToolOperationBridge,
     _ToolOperationRuntimeRepository,
 )
+from ._tool_boundary import _NativeDelegateInterruption
 from ..execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
 from ._budget import RunBudgetContext
 from ..execution import ExecutionRequest
 from ._conversation_service import ConversationService
 from ..persistence import PersistenceDomain
 from ..persistence.commands import StateCommands
+from ..persistence.graph_turns import GraphCancelOwner, GraphDeferredWait
 from ..persistence.turns import ExecutionAuthority, SourceTurnRevoked, SourceTurnWriteFence
 from ..persistence.repositories import ExecutionRepositoryImpl
 from ..persistence.repositories import SessionRepositoryImpl
@@ -149,7 +159,6 @@ from ..persistence.contracts import (
     RecoveryConversationIntent,
     RecoveryTerminalHandoff,
     RecoveryTerminalOutcome,
-    RepositoryInstructionBarrier,
     SessionRepository,
     ToolOperationRecord,
 )
@@ -228,12 +237,23 @@ from ._agent_run import (
     _AgentRunLifecycle,
     _WorkerFailure,
 )
-from ._recovery_coordinator import _DeferredResume, _RecoveryCoordinator
+from ._recovery_coordinator import _DeferredResume, _RecoveryCoordinator, _is_standalone_prepared_terminal
 from ._repository_instructions import (
     _RepositoryInstructionBoundary,
     _repository_instructions_contain,
-    _validate_repository_instruction_frontier,
+    _validate_repository_instruction_overlay,
 )
+
+if TYPE_CHECKING:
+    from ..core import AuthorizationPolicy
+    from ..persistence.turns import SessionTurnKey, SqlSessionTurns
+    from ..persistence import NativeMessageRoot
+    from ..persistence.contracts import TaskRepository
+    from ..task import TaskGraphAdmission, TaskLease, TaskNodeInvocation
+    from ._regenerable_turn import _RegenerableTurnRunner
+    from ._regenerable_turn import _AttachedGraphTurn
+    from ._native_subagent import NativeSubagentAdmission
+
 
 _logger = environ.get_logger("ai.runtime.local")
 
@@ -270,12 +290,32 @@ class _InitialAttemptCapture:
     session: SessionRecord | None = None
 
 
+@dataclass(slots=True, kw_only=True)
+class _ChildWorkerScope:
+    stopping: bool = False
+    children: dict[str, "_OwnedExecutionTurn"] = field(default_factory=dict)
+    delegated_children: set[str] = field(default_factory=set)
+    admissions: set[asyncio.Future[None]] = field(default_factory=set)
+
+
 @dataclass(slots=True)
-class _OwnedExecutionTurn:
+class _OwnedNativeParent(_ChildWorkerScope):
+    key: "SessionTurnKey"
+    generation: int
+    principal: Principal
+    stop_children: Callable[[], Awaitable[frozenset[str] | None]]
+    child_stop: asyncio.Task[frozenset[str] | None] | None = None
+    child_approvals: dict[str, "NativeSubagentAdmission"] = field(default_factory=dict)
+    parked_cancels: dict[str, tuple[int, int]] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class _OwnedExecutionTurn(_ChildWorkerScope):
     reservation: ExecutionStartReservation
     coordination: TurnCoordination | None
     principal: Principal
     scope: TurnScope | None = None
+    native_parent: "NativeSubagentAdmission | None" = None
     admitting: bool = True
     notice_admitted: bool = False
     notice_recovery_terminal: bool = False
@@ -287,14 +327,21 @@ class _OwnedExecutionTurn:
     tool_admission: Callable[..., Awaitable[object]] | None = None
     tool_terminal: Callable[..., Awaitable[object]] | None = None
     tool_unknown: Callable[..., Awaitable[object]] | None = None
-    stopping: bool = False
     cancel_requested: bool = False
     lifetime: asyncio.Task[object] | None = None
     closed: asyncio.Event = field(default_factory=asyncio.Event)
-    children: dict[str, "_OwnedExecutionTurn"] = field(default_factory=dict)
-    delegated_children: set[str] = field(default_factory=set)
-    admissions: set[asyncio.Future[None]] = field(default_factory=set)
     admission: asyncio.Future[ExecutionHandle] | None = None
+    graph_turn: "_AttachedGraphTurn | None" = None
+    graph_turns: "SqlSessionTurns | None" = None
+    graph_terminal_notice: Callable[..., None] | None = None
+    graph_step_checkpoint: tuple[SqlStepStore, str, str, str, int] | None = None
+    graph_step_terminal_marker: "tuple[SqlStepStore, NativeLifecycleEvent] | None" = None
+    graph_step_alias: "tuple[str, NativeMessageRoot, Sequence[ModelMessage]] | None" = None
+    graph_producer_stopped: "Callable[[_AttachedGraphTurn], None] | None" = None
+    graph_terminal_confirmed: bool = False
+    graph_wait_owner: "tuple[TaskRepository, TaskLease] | None" = None
+    graph_interrupted_step: tuple[SqlStepStore, str, str, str] | None = None
+    graph_wait_confirmed: bool = False
 
 
 _TurnActionT = TypeVar("_TurnActionT")
@@ -344,7 +391,9 @@ class LocalExecutionBackend:
         trace_commit: CommitPolicy | None = None,
         pending_turns: _PendingExecutionTurns | None = None,
         pending_cancel: Callable[[str, Principal], Awaitable[object]] | None = None,
+        execution_trace_atomic: bool = True,
     ) -> None:
+        self._execution_trace_atomic = execution_trace_atomic
         if not isinstance(commit, CommitPolicy) or commit.mode not in {"sync", "terminal"}:
             raise ValueError("Execution requires sync or terminal commit")
         self._turn_observers: set[Callable[[SessionTurnNotice], None]] = set()
@@ -354,7 +403,13 @@ class LocalExecutionBackend:
         self._pending_turns = pending_turns or _PendingExecutionTurns()
         self._pending_cancel = pending_cancel
         self._turn_monitors: dict[str, asyncio.Task[None]] = {}
+        self._has_graph_execution_link: Callable[[str], Awaitable[bool]] | None = None
+        self._queue_deferred_graph: Callable[[ExecutionRecord], Awaitable[bool]] | None = None
+        self._resolve_graph_cancel_link: Callable[
+            [ExecutionRecord, Principal | None], Awaitable[tuple["SqlSessionTurns", "SessionTurnKey", int] | None]
+        ] | None = None
         self._turn_owners: dict[str, _OwnedExecutionTurn] = {}
+        self._native_parents: dict[str, _OwnedNativeParent] = {}
         self._conversation = conversation
         self._execution = execution_state
         self._checkpoint = checkpoint
@@ -417,8 +472,8 @@ class LocalExecutionBackend:
         execution_run_store = self._run_stores[PersistenceDomain.TRACE]
         conversation_run_store = self._run_stores[PersistenceDomain.CONVERSATION]
         execution_repository: ExecutionRepository = self._execution.executions
-        session_repository: SessionRepository = self._conversation.sessions
-        self._session_state_store = session_repository.state_store
+        session_repository = self._conversation.sessions
+        self._session_state_store = self._conversation.histories.state_store
         self._execution_state_store = execution_repository.state_store
         self._runtime_commands = StateCommands(
             execution_repository,
@@ -470,6 +525,7 @@ class LocalExecutionBackend:
         return await self._execution_binding(execution, binding)
 
     async def validate_recovery_inputs(self, execution: ExecutionRecord, *, binding: AgentBinding | None = None) -> AgentBinding:
+        _require_atomic_execution_trace(execution.durable_trace, self._execution_trace_atomic)
         binding = await self._execution_binding(execution, binding)
         await self._executor.validate_recovery_inputs(binding, execution.tool_response_ref)
         return binding
@@ -488,8 +544,14 @@ class LocalExecutionBackend:
             lambda _transaction: repository.get(execution_id, tenant_id=tenant_id)
         )
 
+    def _legacy_sessions(self) -> SessionRepository:
+        sessions = self._conversation.sessions
+        if sessions is None:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        return sessions
+
     async def _load_session(self, session_id: str, *, tenant_id: str) -> SessionRecord | None:
-        repository = self._conversation.sessions
+        repository = self._legacy_sessions()
         return await repository.state_store.read(
             lambda _transaction: repository.get(session_id, tenant_id=tenant_id)
         )
@@ -529,7 +591,7 @@ class LocalExecutionBackend:
             result = await self._execution.executions.get_result(execution.execution_id, tenant_id=self._tenant_id)
             await self._runtime_commands.finish_conversation_turn(execution, result)
             return
-        await self._conversation.sessions.release_execution(
+        await self._legacy_sessions().release_execution(
             execution.session_id,
             tenant_id=self._tenant_id,
             execution_id=execution.execution_id,
@@ -556,7 +618,6 @@ class LocalExecutionBackend:
                 identity.idempotency_key,
                 identity.request_digest,
                 datetime.now(timezone.utc),
-                identity.request_identity_version,
             ),
             session_id=execution.session_id,
             expected_cursor=expected,
@@ -693,6 +754,7 @@ class LocalExecutionBackend:
                 self._tenant_id,
             )
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        _require_atomic_execution_trace(execution.durable_trace, self._execution_trace_atomic)
         await self._execution_binding(execution, request.resolved_binding)
         if (
             request.mode != execution.mode
@@ -909,6 +971,42 @@ class LocalExecutionBackend:
             if current is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             pending = await self._source_audit_prefix(commit.execution_id)
+            link = await self._graph_cancel_link(current)
+            if link is not None:
+                turns, key, generation = link
+                if current.status is ExecutionStatus.WAITING_DEFERRED:
+                    if pending:
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    row = await turns.get_turn(key)
+                    checkpoint = await self._execution.executions.get_recovery(
+                        commit.execution_id, tenant_id=self._tenant_id,
+                    )
+                    result = None if row is None else row["result_json"]
+                    checkpoint_id = result.get("checkpoint_id") if isinstance(result, Mapping) else None
+                    if (row is None or row["generation"] != generation or row["state"] != "waiting"
+                            or not isinstance(checkpoint_id, str) or not checkpoint_id
+                            or checkpoint is None or checkpoint.recovery_state is not ExecutionRecoveryState.WAITING
+                            or checkpoint.recovery.pending_tools is None):
+                        raise AIError(ErrorCode.STORAGE_CONFLICT)
+                    committed = await self._runtime_commands.commit_deferred_cancel_checkpoint(
+                        replace(commit, expected_revision=current.revision, expected_event_seq=current.event_seq),
+                        expected_pending_tools=checkpoint.recovery.pending_tools,
+                        background_tasks=self._execution_task_set(commit.execution_id),
+                        _graph_wait=(turns, key, generation, checkpoint_id),
+                    )
+                else:
+                    committed = await self._runtime_commands._request_canonical_graph_cancel(
+                        commit, turns=turns, key=key, generation=generation,
+                        expected_status=expected_status,
+                        producer_generation=(None if expected_status is ExecutionStatus.PENDING_START
+                                             else current.producer_generation),
+                        audit_events=pending,
+                    )
+                self._confirm_source_audits(current.execution_id, len(pending))
+                self._confirm_committed_events(
+                    current.execution_id, pending_count=len(pending), durable_seq=committed.event_seq,
+                )
+                return committed
             # Deferred and recovery boundaries settle earlier local audit tails
             # before admitting another producer. Retained runs may span attempts.
             producer_generation = self._agent_run_lifecycle.latest_local_producer_generation(
@@ -958,12 +1056,19 @@ class LocalExecutionBackend:
                         expected_revision=current.revision,
                         expected_event_seq=current.event_seq,
                     )
+                parent = self._native_parents.get(current.parent_execution_id)
+                proof = None if parent is None or not parent.stopping else parent.child_approvals.get(commit.execution_id)
+                if proof is not None:
+                    proof.require_deferred_child(current)
                 committed = await self._runtime_commands.commit_deferred_cancel_checkpoint(
                     effective_commit,
-
                     expected_pending_tools=checkpoint.recovery.pending_tools,
                     background_tasks=self._execution_task_set(commit.execution_id),
                 )
+                if proof is not None and committed.status is ExecutionStatus.CANCELLING:
+                    # This exact WAITING predecessor CAS proves that no child
+                    # continuation crossed its resume fence before Stop.
+                    parent.parked_cancels[commit.execution_id] = (committed.revision, committed.producer_generation)
             elif (
                 current.status is expected_status
                 and current.revision == commit.expected_revision
@@ -1042,10 +1147,11 @@ class LocalExecutionBackend:
                 or execution.requires_task_invocation_capture
                 or execution.input_context is not None or execution.agent_run_seq != 0
                 or type(self._execution.executions) is not ExecutionRepositoryImpl
-                or type(self._conversation.sessions) is not SessionRepositoryImpl):
+                or (execution.session_id is not None
+                    and type(self._conversation.sessions) is not SessionRepositoryImpl)):
             return False
         stores = (self._execution.executions.state_store,
-                  self._conversation.sessions.state_store, self._execution.executions.state_store)
+                  self._session_state_store, self._execution.executions.state_store)
         if any(store.storage_group is not stores[0].storage_group for store in stores):
             return False
         binding = await self._execution_binding(execution, binding)
@@ -1122,8 +1228,7 @@ class LocalExecutionBackend:
                 session_id=session.session_id if session is not None else None,
             )
             if existing is not None:
-                if (existing.request_digest != identity.request_digest
-                        or existing.request_identity_version != identity.request_identity_version):
+                if existing.request_digest != identity.request_digest:
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
                 if existing.status is IdempotencyStatus.START_UNKNOWN:
                     raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
@@ -1154,10 +1259,7 @@ class LocalExecutionBackend:
             turn.promotion_claim_id = coordination.owner_id
             if self._execution_buffer is not None:
                 await self._execution_buffer.append(_ExecutionPayloadCapture(turn.execution, turn.reservation))
-            await coordinator.publish(
-                turn.execution, coordination,
-                request_identity_version=reservation.idempotency.request_identity_version,
-            )
+            await coordinator.publish(turn.execution, coordination)
             if not self._accepting:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             self._live_broker.prepare_local_producer(execution.execution_id)
@@ -1210,8 +1312,68 @@ class LocalExecutionBackend:
                                     or turn.execution.status is ExecutionStatus.CANCELLING):
             raise asyncio.CancelledError
 
-    def _parent_turn(self, reservation: ExecutionStartReservation) -> _OwnedExecutionTurn | None:
-        return self._parent_execution_turn(reservation.execution, reservation.parent_producer_generation)
+    def begin_native_child_stop(self, key: "SessionTurnKey", generation: int) -> None:
+        """Start draining children independently of the parent provider's cancellation."""
+        parent = self._native_parents.get(key.turn_id)
+        if parent is None or parent.key != key or parent.generation != generation:
+            return
+        parent.stopping = True
+        if parent.child_stop is None:
+            parent.child_stop = asyncio.create_task(
+                parent.stop_children(), name=f"ai-native-child-stop-{key.turn_id}",
+            )
+
+    @asynccontextmanager
+    async def canonical_subagent_parent(
+        self, key: "SessionTurnKey", generation: int, principal: Principal,
+        *, stop_children: Callable[[], Awaitable[frozenset[str] | None]],
+    ) -> AsyncIterator[_OwnedNativeParent]:
+        """Stop durable children before abandoning their local owners on explicit cancellation."""
+        identity = key.turn_id
+        if principal.tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if identity in self._native_parents or identity in self._turn_owners:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        parent = _OwnedNativeParent(key, generation, principal, stop_children)
+        self._native_parents[identity] = parent
+        waiting_for_stop = False
+        try:
+            yield parent
+        except (_NativeDelegateInterruption, asyncio.CancelledError) as error:
+            self.begin_native_child_stop(key, generation)
+            assert parent.child_stop is not None
+            waiting_for_stop = True
+            children, _ = await self._await_checkpoint_task(parent.child_stop, label="native child stop")
+            if (isinstance(error, _NativeDelegateInterruption)
+                    and children is not None and error.call_id in children):
+                raise asyncio.CancelledError from error
+            raise
+        finally:
+            parent.stopping = True
+            try:
+                if parent.child_stop is not None and not waiting_for_stop:
+                    await self._await_checkpoint_task(parent.child_stop, label="native child stop")
+            finally:
+                self._stop_child_workers(parent)
+                drain = asyncio.create_task(self._drain_child_workers(parent), name=f"ai-native-child-drain-{identity}")
+                try:
+                    _, interrupted = await self._await_checkpoint_task(drain, label="native child drain")
+                finally:
+                    self._native_parents.pop(identity)
+            if interrupted is not None:
+                raise interrupted
+
+    def _parent_turn(
+        self, reservation: ExecutionStartReservation, native: "NativeSubagentAdmission | None" = None,
+    ) -> "_OwnedExecutionTurn | _OwnedNativeParent | None":
+        if native is None:
+            return self._parent_execution_turn(reservation.execution, reservation.parent_producer_generation)
+        native.require_child(reservation.execution, native.principal, reservation.parent_producer_generation)
+        parent = self._native_parents.get(native.key.turn_id)
+        if (parent is None or parent.stopping or
+                (parent.key, parent.generation, parent.principal) != (native.key, native.generation, native.principal)):
+            raise AIError(ErrorCode.STORAGE_CONFLICT, safe_details={"phase": "subagent_parent_unavailable"})
+        return parent
 
     def _parent_execution_turn(
         self, execution: ExecutionRecord, parent_generation: int | None,
@@ -1226,7 +1388,11 @@ class LocalExecutionBackend:
         self._require_turn_dispatch(parent)
         return parent
 
-    def _require_turn_dispatch(self, owner: _OwnedExecutionTurn) -> None:
+    def _require_turn_dispatch(self, owner: "_OwnedExecutionTurn | _OwnedNativeParent") -> None:
+        if isinstance(owner, _OwnedNativeParent):
+            if owner.stopping or self._native_parents.get(owner.key.turn_id) is not owner:
+                raise asyncio.CancelledError
+            return
         if (owner.stopping
                 or self._turn_owners.get(owner.reservation.execution.execution_id) is not owner):
             raise asyncio.CancelledError
@@ -1240,15 +1406,19 @@ class LocalExecutionBackend:
     async def run_turn(
         self, reservation: ExecutionStartReservation, principal: Principal,
         admit: Callable[[TurnCoordination | None], Awaitable[ExecutionHandle]],
-        grouped: _GroupedTurnStart | None = None,
+        grouped: _GroupedTurnStart | None = None, *, _existing_owner: bool = False,
+        _native_parent: "NativeSubagentAdmission | None" = None,
+        _graph_claim: "tuple[_AttachedGraphTurn, SqlSessionTurns, Observed[ExecutionRecord], Callable[..., None], Callable[[_AttachedGraphTurn], None], TaskRepository, TaskLease] | None" = None,
     ) -> ExecutionHandle:
-        parent = self._parent_turn(reservation)
+        if _native_parent is not None:
+            _native_parent.require_child(reservation.execution, principal, reservation.parent_producer_generation)
+        parent = self._parent_turn(reservation, _native_parent)
         admission = asyncio.get_running_loop().create_future()
         entered = asyncio.get_running_loop().create_future() if parent is not None else None
         if parent is not None:
             parent.admissions.add(entered)
         task = asyncio.create_task(
-            self._turn_lifetime(reservation, principal, admit, admission, parent, entered, grouped),
+            self._turn_lifetime(reservation, principal, admit, admission, parent, entered, grouped, existing_owner=_existing_owner, graph_claim=_graph_claim, native_parent=_native_parent),
             name=f"ai-turn-owner-{reservation.execution.execution_id}",
         )
         self._track_checkpoint_task(task, "turn_lifetime")
@@ -1256,7 +1426,7 @@ class LocalExecutionBackend:
 
     async def _run_owned_action(
         self, execution: ExecutionRecord, parent_generation: int | None,
-        action: Callable[[], Awaitable[_TurnActionT]],
+        action: Callable[[], Awaitable[_TurnActionT]], *, native_parent: "NativeSubagentAdmission | None" = None,
     ) -> _TurnActionT:
         identity = await self._recovery_idempotency(execution)
         result: list[_TurnActionT] = []
@@ -1269,7 +1439,8 @@ class LocalExecutionBackend:
 
         await self.run_turn(ExecutionStartReservation(
             execution, identity, parent_producer_generation=parent_generation,
-        ), Principal(execution.principal_id, self._tenant_id, execution.principal_kind), admit)
+        ), Principal(execution.principal_id, self._tenant_id, execution.principal_kind), admit,
+            _existing_owner=True, _native_parent=native_parent)
         return result[0]
 
     async def run_existing_turn(
@@ -1279,14 +1450,14 @@ class LocalExecutionBackend:
         owner = self._turn_owners.get(execution.execution_id)
         if owner is not None:
             if owner.lifetime is asyncio.current_task():
-                self._parent_turn(owner.reservation)
+                self._parent_turn(owner.reservation, owner.native_parent)
                 self._require_turn_dispatch(owner)
                 await action()
                 return
             if (owner.stopping
                     or owner.reservation.parent_producer_generation != parent_producer_generation):
                 raise AIError(ErrorCode.STORAGE_CONFLICT, safe_details={"phase": "turn_recovery_busy"})
-            self._parent_turn(owner.reservation)
+            self._parent_turn(owner.reservation, owner.native_parent)
             self._require_turn_dispatch(owner)
             entered = asyncio.get_running_loop().create_future()
             owner.admissions.add(entered)
@@ -1374,12 +1545,15 @@ class LocalExecutionBackend:
     async def _turn_lifetime(
         self, reservation: ExecutionStartReservation, principal: Principal,
         admit: Callable[[TurnCoordination | None], Awaitable[ExecutionHandle]],
-        admission: asyncio.Future[ExecutionHandle], parent: _OwnedExecutionTurn | None,
+        admission: asyncio.Future[ExecutionHandle], parent: "_OwnedExecutionTurn | _OwnedNativeParent | None",
         entered: asyncio.Future[None] | None, grouped: _GroupedTurnStart | None,
+        *, existing_owner: bool = False,
+        native_parent: "NativeSubagentAdmission | None" = None,
+        graph_claim: "tuple[_AttachedGraphTurn, SqlSessionTurns, Observed[ExecutionRecord], Callable[..., None], Callable[[_AttachedGraphTurn], None], TaskRepository, TaskLease] | None" = None,
     ) -> None:
         execution = reservation.execution
         identity = reservation.idempotency
-        coordinator = self._pending_turns.coordination
+        coordinator = None if graph_claim is not None else self._pending_turns.coordination
         owner: _OwnedExecutionTurn | None = None
 
         def finish_admission() -> None:
@@ -1406,18 +1580,26 @@ class LocalExecutionBackend:
                 return
             if scope is not None:
                 scope.require_active()
-            if execution.execution_id in self._turn_owners:
+            if execution.execution_id in self._turn_owners or execution.execution_id in self._native_parents:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             owner = _OwnedExecutionTurn(reservation, coordination, principal, scope=scope,
-                                        lifetime=asyncio.current_task(), admission=admission)
+                                        lifetime=asyncio.current_task(), admission=admission, native_parent=native_parent)
+            if graph_claim is not None:
+                (owner.graph_turn, owner.graph_turns, owner.observed, owner.graph_terminal_notice,
+                 owner.graph_producer_stopped, graph_task_repository, graph_task_lease) = graph_claim
+                owner.graph_wait_owner = (graph_task_repository, graph_task_lease)
+                owner.producer_generation = execution.producer_generation
             self._turn_owners[execution.execution_id] = owner
             if grouped is not None:
                 self._capture_reserved_start(owner, grouped.receipt)
             if parent is not None:
                 parent.children[execution.execution_id] = owner
                 parent.delegated_children.add(execution.execution_id)
-            if scope is not None:
-                monitor = asyncio.create_task(self._watch_turn(owner), name=f"ai-turn-control-{execution.execution_id}")
+                if isinstance(parent, _OwnedNativeParent) and native_parent is not None:
+                    parent.child_approvals[execution.execution_id] = native_parent
+            if scope is not None or graph_claim is not None:
+                watch = self._watch_turn(owner) if graph_claim is None else self._watch_attached_graph(owner)
+                monitor = asyncio.create_task(watch, name=f"ai-turn-control-{execution.execution_id}")
                 self._turn_monitors[execution.execution_id] = monitor
             try:
                 result = await admit(coordination)
@@ -1445,7 +1627,8 @@ class LocalExecutionBackend:
                                else f"request:{request_key}")
                 owner_id = uuid.uuid4().hex
                 if grouped is None:
-                    scope = coordinator.enter(
+                    enter = coordinator._enter_existing_owner if existing_owner else coordinator.enter
+                    scope = enter(
                         session_key=session_key, request_key=request_key, request_digest=identity.request_digest,
                         execution_id=execution.execution_id, owner_id=owner_id,
                     )
@@ -1473,6 +1656,24 @@ class LocalExecutionBackend:
                 owner.closed.set()
                 if parent is not None and parent.children.get(execution.execution_id) is owner:
                     parent.children.pop(execution.execution_id)
+                changed = self._pending_turns.session_changed
+                if owner.coordination is not None and execution.session_id is not None and changed is not None:
+                    # Notify after the enclosing TurnScope releases its admission lease.
+                    try:
+                        changed(execution.session_id, tenant_id=principal.tenant_id)
+                    except Exception as error:
+                        _logger.warning("Session owner release notification failed: %s", type(error).__name__)
+
+    def _stop_child_workers(self, owner: _ChildWorkerScope) -> None:
+        for child in tuple(owner.children.values()):
+            self._stop_owned_turn(child)
+
+    async def _drain_child_workers(self, owner: _ChildWorkerScope) -> None:
+        while owner.admissions:
+            await asyncio.wait(tuple(owner.admissions))
+        children = tuple(owner.children.values())
+        if children:
+            await asyncio.gather(*(child.closed.wait() for child in children))
 
     def _stop_owned_turn(self, owner: _OwnedExecutionTurn) -> None:
         if owner.stopping:
@@ -1484,8 +1685,7 @@ class LocalExecutionBackend:
         scope = self._handoff_scopes.get(execution_id)
         if scope is not None:
             scope.stop()
-        for child in tuple(owner.children.values()):
-            self._stop_owned_turn(child)
+        self._stop_child_workers(owner)
         worker = self._tasks.get(execution_id)
         if worker is not None and worker is not asyncio.current_task():
             self._request_worker_shutdown(execution_id, worker)
@@ -1496,11 +1696,7 @@ class LocalExecutionBackend:
         if worker is not None:
             await self._drain_worker_task(execution_id, worker)
         self._stop_owned_turn(owner)
-        while owner.admissions:
-            await asyncio.wait(tuple(owner.admissions))
-        children = tuple(owner.children.values())
-        if children:
-            await asyncio.gather(*(child.closed.wait() for child in children))
+        await self._drain_child_workers(owner)
         while True:
             recovery = self._recovery_reconcile_tasks.get(execution_id)
             pending = tuple(task for task in (*self._execution_task_map().get(execution_id, ()), recovery)
@@ -1857,13 +2053,43 @@ class LocalExecutionBackend:
             await self._expected_session_cursor(reservation.execution, session=session)
             if reservation.execution.session_id is not None else None
         )
+        owner = self._turn_owners.get(reservation.execution.execution_id)
         result = await self._runtime_commands.reserve_start_checkpoint(
             reservation, expected_cursor=expected, expected_session=session, authority=authority,
         )
-        owner = self._turn_owners.get(reservation.execution.execution_id)
         if owner is not None:
             self._capture_reserved_start(owner, result)
         return result
+
+    async def start_recovered_native_child(
+        self, execution: ExecutionRecord, proof: "NativeSubagentAdmission",
+    ) -> None:
+        """Install only the producer for an unchanged, already-reserved child."""
+        if (proof.original is None or execution.status is not ExecutionStatus.PENDING_START
+                or execution.session_id is not None or execution.stored_user_input is None
+                or execution.requires_task_invocation_capture):
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+
+        async def start() -> None:
+            owner = self._turn_owners.get(execution.execution_id)
+            if owner is None or owner.native_parent is not proof:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            identity = owner.reservation.idempotency
+            if identity.scope != "execution.subagent" or identity.status is not IdempotencyStatus.RESERVED:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            request = ExecutionRequest(
+                user_prompt=await self.restore_user_input(execution), principal=proof.principal,
+                idempotency_key=identity.idempotency_key, memory_scope=execution.memory_scope,
+                mode=execution.mode, planning=execution.planning, thinking=execution.thinking,
+                correlation=execution.correlation, tool_response_ref=execution.tool_response_ref,
+                tool_effects=execution.tool_effects, session_context=execution.session_context,
+            )
+            started = await self.prepare_start(
+                request, execution, ExecutionStartIdentity(identity.scope, identity.idempotency_key, identity.request_digest),
+            )
+            await self.launch(request, started)
+
+        await self._run_owned_action(execution, proof.generation, start, native_parent=proof)
 
     async def prepare_start(
         self,
@@ -1875,26 +2101,26 @@ class LocalExecutionBackend:
         if execution.status is not ExecutionStatus.PENDING_START:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await self._execution_binding(execution, request.resolved_binding)
-        now = datetime.now(timezone.utc)
-        expected = (
-            await self._expected_session_cursor(execution)
-            if execution.session_id is not None
-            else None
+        claim = ExecutionStartClaim(
+            execution.execution_id, execution.revision, execution.event_seq,
+            identity.scope, identity.idempotency_key, identity.request_digest, datetime.now(timezone.utc),
         )
-        started = await self._runtime_commands.commit_start_attempt_checkpoint(
-            ExecutionStartClaim(
-                execution.execution_id,
-                execution.revision,
-                execution.event_seq,
-                identity.scope,
-                identity.idempotency_key,
-                identity.request_digest,
-                now,
-                identity.request_identity_version,
-            ),
-            session_id=execution.session_id,
-            expected_cursor=expected, expected_session=identity.expected_session,
-        )
+        owner = self._turn_owners.get(execution.execution_id)
+        if owner is not None and owner.native_parent is not None:
+            self._require_turn_dispatch(owner)
+            native = owner.native_parent
+            native.require_child(execution, request.principal, owner.reservation.parent_producer_generation)
+            self._parent_turn(owner.reservation, native)
+            started = await native.commit_start(self._runtime_commands, claim)
+            self._require_turn_dispatch(owner)
+            self._parent_turn(owner.reservation, native)
+        else:
+            started = await self._runtime_commands.commit_start_attempt_checkpoint(
+                claim, session_id=execution.session_id,
+                expected_cursor=(await self._expected_session_cursor(execution)
+                                 if execution.session_id is not None else None),
+                expected_session=identity.expected_session,
+            )
         _logger.info(
             "execution start checkpoint committed: execution=%s", execution.execution_id
         )
@@ -1950,7 +2176,7 @@ class LocalExecutionBackend:
                     raise AIError(ErrorCode.SESSION_BUSY)
                 if released_stale_owner:
                     raise AIError(ErrorCode.SESSION_BUSY)
-                await self._conversation.sessions.release_execution(
+                await self._legacy_sessions().release_execution(
                     execution.session_id,
                     tenant_id=self._tenant_id,
                     execution_id=owner_id,
@@ -1966,7 +2192,7 @@ class LocalExecutionBackend:
                 continue
             if session.continuation != expected:
                 raise AIError(ErrorCode.SESSION_BUSY)
-            await self._conversation.sessions.admit_execution(
+            await self._legacy_sessions().admit_execution(
                 execution.session_id,
                 tenant_id=self._tenant_id,
                 execution_id=execution.execution_id,
@@ -1979,6 +2205,447 @@ class LocalExecutionBackend:
             )
             return
         raise AIError(ErrorCode.SESSION_BUSY)
+
+    async def _hydrate_attached_graph_recovery(
+        self, execution: ExecutionRecord, key: "SessionTurnKey", generation: int, *,
+        runner: "_RegenerableTurnRunner", principal: Principal, authorization: "AuthorizationPolicy", ready: bool = False,
+    ) -> "_AttachedGraphTurn":
+        """Restore the originally admitted prefix, without reopening mutable workspace inputs."""
+        from ..core import AuthorizationAction, ImmutableJsonMapping, ResourceRef
+        from ..persistence.turns import decode_session_lineage
+        from ._regenerable_turn import _AttachedGraphTurn, _TURN_BYTES, _TERMINAL_RESERVE
+
+        if (execution.execution_id != key.turn_id or execution.session_id is not None
+                or not execution.requires_task_invocation_capture or (not ready and execution.producer_generation != 0)
+                or principal.tenant_id != self._tenant_id
+                or (principal.principal_id, principal.kind) != (execution.principal_id, execution.principal_kind)):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        await authorization.authorize(principal, AuthorizationAction.EXECUTION_RECOVER,
+            ResourceRef(ResourceKind.EXECUTION, key.turn_id, self._tenant_id, execution.principal_id))
+        await authorization.authorize(principal, AuthorizationAction.SESSION_READ,
+            ResourceRef(ResourceKind.SESSION, key.session_id, self._tenant_id))
+        turns = runner._store
+        session = await turns.get_session(key.session_id)
+        if session is None or session["active_turn_id"] != key.turn_id.encode("utf-8"):
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        lineage = decode_session_lineage(session["lineage_json"])
+        await runner._authorize_lineage(lineage, principal=principal, tenant_id=self._tenant_id, authorization=authorization)
+        row = await turns.get_turn_for_recovery(key)
+        if row is None or row["state"] != ("ready" if ready else "accepted") or row["generation"] != generation:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        request = row["request_json"]
+        if (request.get("graph_execution") != key.turn_id or "cwd" not in request
+                or "repository_instructions" not in request or request.get("principal") != {
+                    "principal_id": principal.principal_id, "tenant_id": self._tenant_id, "kind": principal.kind,
+                }
+                or not isinstance(execution.binding, AgentBindingContract)
+                or row["binding_json"] != execution.binding.to_payload()):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _require_atomic_execution_trace(execution.durable_trace, self._execution_trace_atomic)
+        cwd = request["cwd"]
+        if cwd is not None:
+            if self._workspace is None:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, "The admitted workspace is unavailable")
+            # Validate the stored relative path lexically. Do not resolve it
+            # through the mutable workspace or discover the instruction files again.
+            try:
+                self._workspace.validate_path(cwd)
+            except ValueError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        frozen_instructions = request["repository_instructions"]
+        instructions = None if frozen_instructions is None else RepositoryInstructions.from_payload(frozen_instructions)
+        # This read resolves the admitted immutable native prompt, not the
+        # request supplied by the current caller or its workspace.
+        projection = await turns.get_history_turn(key, lineage=())
+        if (projection is None or projection["graph_execution"] != key.turn_id
+                or projection["generation"] != generation):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        prompt = projection["prompt"]
+        stored_input = projection["stored_input"]
+        stored = runner._stored_input({"input": stored_input}) if stored_input is not None else None
+        if stored is not None and stored != execution.stored_user_input:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        restored = await runner._restore_prompt(prompt, stored)
+        if stored is None and prompt != await self.restore_user_input(execution):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        context_from, through = row["context_from"], row["context_through"]
+        session_context = request.get("session_context", "all")
+        if (session_context != execution.session_context or through != row["turn_no"] - 1
+                or through != session["last_turn_no"]):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        # Recreate the accepted byte budget; durable native reference framing is
+        # not a second logical request body and was not charged at admission.
+        accepted_request = {name: value for name, value in request.items() if name not in {"input", "graph_execution"}}
+        accepted_request["prompt"] = prompt
+        if stored_input is not None:
+            accepted_request["input"] = stored_input
+        terminal_bytes = _TURN_BYTES - len(canonical_json_bytes({**accepted_request, "binding": row["binding_json"]}))
+        if terminal_bytes < _TERMINAL_RESERVE:
+            raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
+        history = await runner._read_admitted_history(
+            key, context_from=context_from, context_through=through, lineage=lineage,
+            session_context=execution.session_context, prompt=prompt, stored=stored,
+        )
+        return _AttachedGraphTurn(
+            key, generation, row["turn_no"], prompt, tuple(history), terminal_bytes, session["revision"], cwd,
+            context_from, through, ImmutableJsonMapping(request["session_metadata"]), execution.session_context,
+            repository_instructions=instructions, stored_input=stored_input, model_prompt=None if isinstance(restored, str) else tuple(restored),
+            attachments=() if stored is None else stored_input_attachment_views(stored),
+        )
+
+    async def _recover_undispatched_attached_graph(
+        self, execution: ExecutionRecord, *, runner: "_RegenerableTurnRunner",
+        authorization: "AuthorizationPolicy", task_repository: "TaskRepository",
+        task_invocation: "TaskNodeInvocation", recovery_operation: OperationLedgerRecord,
+        record_task_invocation: Callable[[str, "TaskNodeInvocation"], Awaitable[None]],
+    ) -> ExecutionHandle | None:
+        """Restore only an expired, never-dispatched Graph turn owned by this Task lease."""
+        from ._regenerable_turn import _LEASE_SECONDS
+
+        if execution.session_id is not None or not execution.requires_task_invocation_capture:
+            return None
+        turns = runner._store
+        linked = await turns._linked_graph_turn(execution.execution_id)
+        if linked is None:
+            return None
+        key, generation = linked
+        lease = task_invocation.task_lease
+        principal = task_invocation.principal
+        if (lease is None or task_invocation.execution_id != execution.execution_id
+                or execution.producer_generation != 0 or execution.agent_run_seq != 0
+                or execution.producer_claim_id is not None
+                or not (execution.durable_trace or execution.restart_checkpoints)
+                or self._execution_buffer is not None
+                or execution.status is not ExecutionStatus.STARTED
+                or execution.recovery_state is not ExecutionRecoveryState.ADMITTED):
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        if not self._accepting or self.worker_installed(execution.execution_id):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        turn = await self._hydrate_attached_graph_recovery(
+            execution, key, generation, runner=runner, principal=principal, authorization=authorization,
+        )
+        identity = await self._recovery_idempotency(execution)
+        if identity.status is not IdempotencyStatus.STARTED or execution.mode is None or execution.planning is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        binding = await self._execution_binding(execution)
+        step_store = (self._require_attached_graph_step_launch(execution, runner, binding)
+                      if execution.restart_checkpoints else None)
+        request = ExecutionRequest(
+            turn.model_prompt or turn.prompt, principal, identity.idempotency_key, execution.memory_scope, execution.mode,
+            execution.planning, execution.thinking, correlation=execution.correlation,
+            tool_effects=execution.tool_effects, tool_response_ref=execution.tool_response_ref,
+            session_context=execution.session_context, resolved_binding=binding,
+        )
+        await self._validate_start(request, execution)
+        started, generation = await self._runtime_commands._claim_expired_undispatched_graph_turn(
+            execution, turns=turns, key=key, generation=generation, task_repository=task_repository,
+            task_lease=lease, recovery_operation=recovery_operation, lease_seconds=_LEASE_SECONDS,
+            _native_step=step_store,
+        )
+        return await self._dispatch_attached_graph(
+            request, started, identity, replace(turn, generation=generation), runner=runner,
+            task_repository=task_repository, task_invocation=task_invocation,
+            record_task_invocation=record_task_invocation,
+        )
+
+    async def _resume_ready_attached_graph(
+        self, execution: ExecutionRecord, *, runner: "_RegenerableTurnRunner",
+        authorization: "AuthorizationPolicy", graph: GraphDeferredWait,
+        task_invocation: "TaskNodeInvocation", recovery_operation: OperationLedgerInput | None,
+    ) -> ExecutionHandle | None:
+        """Reacquire only the original READY Graph turn and its settled checkpoint."""
+        from ..model.messages import native_checkpoint_messages
+        from ._regenerable_turn import _LEASE_SECONDS
+
+        principal = task_invocation.principal
+        if (graph.turns is not runner._store or graph.task_lease != task_invocation.task_lease
+                or task_invocation.execution_id != execution.execution_id
+                or execution.status is not ExecutionStatus.WAITING_DEFERRED
+                or execution.recovery_state is not ExecutionRecoveryState.WAITING
+                or execution.recovery is None or execution.recovery.pending_tools is None):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if not self._accepting or self.worker_installed(execution.execution_id):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        self._require_attached_graph_step_source(execution, graph.turns)
+        turn = await self._hydrate_attached_graph_recovery(
+            execution, graph.key, graph.generation, runner=runner, principal=principal,
+            authorization=authorization, ready=True,
+        )
+        continuation = execution.recovery.pending_tools
+        resolved = await self._recovery_coordinator._load_deferred_results(
+            execution, continuation, settled_only=True,
+        )
+        if resolved is None:
+            return None
+        state = self._execution.executions.state_store
+        source: tuple[NativeMessageRoot, str, int] | None = None
+
+        def capture_source(root: NativeMessageRoot, digest: str, size: int) -> None:
+            nonlocal source
+            source = root, digest, size
+
+        async def capture(group):
+            return await group.transaction(state).run_sql(
+                graph.turns._context,
+                lambda sql: graph.step_store.capture_turn_checkpoint(
+                    sql, run_id=continuation.source_agent_run_id, conversation_id=graph.step_conversation_id,
+                    replay_key=graph.checkpoint_id, source=capture_source,
+                ),
+            )
+
+        hydrate = await state.storage_group.read_many((state,), capture)
+        if hydrate is None:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        snapshot = NativeCheckpoint.decode(await hydrate())
+        if not isinstance(snapshot, NativeCheckpoint) or snapshot.state != "interrupted":
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        history = tuple(native_checkpoint_messages(snapshot.messages, restore=True))
+        if source is None:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        digest, size = MessageArchive().snapshot(history).encoded_digest()
+        if (source[1:] != (digest, size) or source[0].count != len(history)
+                or history[:len(turn.history)] != turn.history
+                or not graph.step_store.can_reuse_message_root(source[0], raw_digest=digest, raw_size=size)):
+            # The original checkpoint is the only authority for the earlier
+            # attempt. Do not copy or synthesize a new Trace prefix.
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        identity = await self._recovery_idempotency(execution)
+        if identity.status is not IdempotencyStatus.STARTED or execution.mode is None or execution.planning is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        binding = await self.validate_recovery_inputs(execution)
+        request = ExecutionRequest(
+            turn.model_prompt or turn.prompt, principal, identity.idempotency_key, execution.memory_scope, execution.mode,
+            execution.planning, execution.thinking, correlation=execution.correlation,
+            tool_effects=execution.tool_effects, tool_response_ref=execution.tool_response_ref,
+            session_context=execution.session_context, resolved_binding=binding,
+        )
+        await self._validate_start(request, execution)
+        resumed = await self._runtime_commands.claim_deferred_resume_checkpoint(
+            execution_id=execution.execution_id, tenant_id=self._tenant_id,
+            expected_execution_revision=execution.revision, expected_event_seq=execution.event_seq,
+            expected_agent_run_seq=execution.agent_run_seq, expected_pending_tools=continuation,
+            background_tasks=self._execution_task_set(execution.execution_id),
+            recovery_operation=recovery_operation, _graph_ready=(graph, _LEASE_SECONDS),
+        )
+        observed = await self._execution.executions.get_observed(execution.execution_id, tenant_id=self._tenant_id)
+        if observed is None or observed.value != resumed:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        resume = _DeferredResume(
+            resumed, history, resolved, resumed.producer_generation, binding,
+            snapshot.output_retries_used,
+        )
+        return await self._launch_attached_graph(
+            request, identity, observed, replace(turn, generation=graph.generation + 1), graph.turns,
+            principal=principal, terminal_notice=runner._terminal, producer_stopped=runner._producer_stopped,
+            task_repository=graph.task_repository, task_lease=graph.task_lease, resume=resume, graph_resume_source=source,
+        )
+
+    def _require_attached_graph_step_source(self, execution: ExecutionRecord, turns: "SqlSessionTurns") -> SqlStepStore:
+        binding = turns._transcript_write_binding
+        if (not isinstance(self._run_store, RuntimeAgentRunStore) or binding is None
+                or execution.durable_trace and not self._run_store._shares_graph_step_projection()):
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        store, _, transcript_source = binding
+        native = self._run_store.step_store
+        state = self._execution.executions.state_store
+        if (not isinstance(native, SqlStepStore) or native.backup_source is None
+                or execution.native_step_source != native.backup_source
+                or transcript_source.storage_context.engine is not native.storage_context.engine
+                or transcript_source.store_key != native.store_key
+                or store.storage_group is not state.storage_group):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+        return native
+
+    def _require_attached_graph_step_launch(
+        self, execution: ExecutionRecord, runner: "_RegenerableTurnRunner", binding: AgentBinding,
+    ) -> SqlStepStore:
+        native = self._require_attached_graph_step_source(execution, runner._store)
+        if (self._queue_deferred_graph is None
+                or execution.durable_trace and not runner._observes_turn_trace(binding)):
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        policy = _runtime_feature_policy(binding.compiled_agent.runtime_contributions)
+        if any(leaf.commit.mode == "terminal" or leaf.commit.buffer is not None or leaf.record_http_bodies
+               for feature in policy.capabilities for leaf in runtime_feature_leaves(feature)
+               if isinstance(leaf, TraceCapability)):
+            # Native Step and Trace must publish through the shared synchronous
+            # boundary, not an independently sealed buffer.
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        return native
+
+    async def _start_attached_graph(
+        self, request: ExecutionRequest, reservation: ExecutionStartReservation, *,
+        session_id: str, session_row: Mapping[str, object],
+        runner: "_RegenerableTurnRunner", authorization: "AuthorizationPolicy",
+        task_repository: "TaskRepository", task_admission: "TaskGraphAdmission",
+        task_invocation: "TaskNodeInvocation", dependency_hold_id: str | None,
+        record_task_invocation: Callable[[str, "TaskNodeInvocation"], Awaitable[None]],
+    ) -> ExecutionHandle:
+        """Claim a real Graph-bound canonical turn before entering local lifecycle."""
+        execution = reservation.execution
+        if (request.files
+                or not (execution.durable_trace or execution.restart_checkpoints)
+                or self._execution_buffer is not None):
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        binding = await self._execution_binding(execution, request.resolved_binding)
+        if execution.restart_checkpoints:
+            self._require_attached_graph_step_launch(execution, runner, binding)
+        request = replace(request, resolved_binding=binding)
+        await self._validate_start(request, execution)
+        lease = task_invocation.task_lease
+        if lease is None:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        identity = reservation.idempotency
+        if dependency_hold_id is not None:
+            if not dependency_hold_id.strip():
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            reservation = replace(reservation, execution=replace(
+                execution, dependency_hold_ids=(dependency_hold_id,),
+            ))
+        receipt, turn = await runner._reserve_attached_graph_turn(
+            self._runtime_commands, reservation, session_id=session_id, session=session_row,
+            request_key=canonical_sha256([identity.scope, identity.idempotency_key]),
+            prompt=request.user_prompt, principal=request.principal, tenant_id=self._tenant_id,
+            authorization=authorization, task_repository=task_repository,
+            task_admission=task_admission, task_invocation=task_invocation, binding=binding,
+        )
+        if receipt.idempotency.request_digest != identity.request_digest:
+            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+        if not receipt.created:
+            if (receipt.execution.status is ExecutionStatus.PENDING_START
+                    or receipt.execution.status is ExecutionStatus.STARTED
+                    and receipt.execution.producer_generation == 0):
+                # No confirmed producer: replay is only observation, not permission
+                # to install a new worker or advance the Graph turn generation.
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            if dependency_hold_id is not None and dependency_hold_id not in receipt.execution.dependency_hold_ids:
+                await self._execution.executions.acquire_dependency_hold(
+                    receipt.execution.execution_id, tenant_id=self._tenant_id, hold_id=dependency_hold_id,
+                )
+            return ExecutionHandle(receipt.execution.execution_id)
+        assert turn is not None
+        runner._admitted(turn)
+        return await self._dispatch_attached_graph(
+            request, receipt.execution, receipt.idempotency, turn, runner=runner,
+            task_repository=task_repository, task_invocation=task_invocation,
+            record_task_invocation=record_task_invocation,
+        )
+
+    async def _dispatch_attached_graph(
+        self, request: ExecutionRequest, started: ExecutionRecord, identity: IdempotencyRecord,
+        turn: "_AttachedGraphTurn", *, runner: "_RegenerableTurnRunner",
+        task_repository: "TaskRepository", task_invocation: "TaskNodeInvocation",
+        record_task_invocation: Callable[[str, "TaskNodeInvocation"], Awaitable[None]],
+    ) -> ExecutionHandle:
+        turns = runner._store
+        lease = task_invocation.task_lease
+        if (lease is None or started.status is not ExecutionStatus.STARTED
+                or started.producer_generation != 0 or identity.status is not IdempotencyStatus.STARTED):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        graph_launch = (turns, turn.key, turn.generation, task_repository, lease)
+        # The Task runner otherwise records this only after start returns, when
+        # the provider can already be running. A failed capture must not dispatch.
+        await record_task_invocation(started.execution_id, task_invocation)
+        try:
+            claimed = await self._runtime_commands.commit_agent_attempt_checkpoint(
+                AgentAttemptClaim(
+                    execution_id=started.execution_id, expected_execution_revision=started.revision,
+                    expected_agent_run_seq=started.agent_run_seq, expected_recovery_state=started.recovery_state,
+                ),
+                _graph_launch=graph_launch,
+            )
+        except AIError as error:
+            if error.code not in {ErrorCode.STORAGE_CONFLICT, ErrorCode.EXECUTION_CANCELLED}:
+                # In particular an unknown commit stays unknown: never rerun the
+                # producer CAS or route into ordinary launch.
+                raise
+            state = await self._runtime_commands._observe_canonical_graph_turn(
+                turns=turns, key=turn.key, generation=turn.generation,
+            )
+            if state is not None and state[1] in {"cancelling", "cancelled", "succeeded", "failed"}:
+                return ExecutionHandle(state[0].execution_id, task_invocation_captured=True)
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+        handle = await self._launch_attached_graph(
+            request, identity, claimed, turn, turns, principal=request.principal,
+            terminal_notice=runner._terminal, producer_stopped=runner._producer_stopped,
+            task_repository=task_repository, task_lease=lease,
+        )
+        return replace(handle, task_invocation_captured=True)
+
+    async def _launch_attached_graph(
+        self, request: ExecutionRequest, identity: IdempotencyRecord,
+        claimed: Observed[ExecutionRecord], turn: "_AttachedGraphTurn", turns: "SqlSessionTurns",
+        *, principal: Principal, terminal_notice: Callable[..., None],
+        producer_stopped: "Callable[[_AttachedGraphTurn], None]",
+        task_repository: "TaskRepository", task_lease: "TaskLease",
+        resume: _DeferredResume | None = None,
+        graph_resume_source: "tuple[NativeMessageRoot, str, int] | None" = None,
+    ) -> ExecutionHandle:
+        """Take local ownership only after the native and Execution attempt claims committed."""
+        execution = claimed.value
+        if (identity.resource_id != turn.key.turn_id or identity.status is not IdempotencyStatus.STARTED
+                or execution.execution_id != turn.key.turn_id
+                or not execution.requires_task_invocation_capture or execution.session_id is not None
+                or execution.status is not ExecutionStatus.STARTED
+                or execution.recovery_state is not ExecutionRecoveryState.ACTIVE
+                or execution.producer_claim_id is None
+                or self._execution_buffer is not None
+                or request.principal != principal or principal.tenant_id != self._tenant_id
+                or (principal.principal_id, principal.kind) != (execution.principal_id, execution.principal_kind)):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if not self._accepting:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        binding = await self._execution_binding(execution, request.resolved_binding)
+        request = replace(request, user_prompt=turn.model_prompt or turn.prompt, files=(), resolved_binding=binding)
+        await self._validate_start(request, execution)
+
+        async def admit(_coordination: TurnCoordination | None) -> ExecutionHandle:
+            self._live_broker.register_local_producer(execution.execution_id, execution.event_seq)
+            self._terminal_events[execution.execution_id] = asyncio.Event()
+            worker = asyncio.create_task(self._run(
+                request, execution, resume=resume, graph_resume_source=graph_resume_source, initial_attempt=_InitialAttemptCapture(execution, None),
+                producer_generation=execution.producer_generation,
+            ), name=f"ai-execution-{execution.execution_id}")
+            self._tasks[execution.execution_id] = worker
+            worker.add_done_callback(lambda completed: self._task_done(execution.execution_id, completed))
+            return ExecutionHandle(execution.execution_id)
+
+        return await self.run_turn(
+            ExecutionStartReservation(execution, identity), principal, admit,
+            _graph_claim=(turn, turns, claimed, terminal_notice, producer_stopped, task_repository, task_lease),
+        )
+
+    async def _watch_attached_graph(self, owner: _OwnedExecutionTurn) -> None:
+        from ._regenerable_turn import _LEASE_SECONDS
+
+        turn, turns = owner.graph_turn, owner.graph_turns
+        assert turn is not None and turns is not None
+        cancelling = False
+        try:
+            while True:
+                await asyncio.sleep(_LEASE_SECONDS / 3)
+                if await self._runtime_commands._renew_canonical_graph_turn(
+                    turns=turns, key=turn.key, generation=turn.generation,
+                    lease_seconds=_LEASE_SECONDS, cancelling=cancelling,
+                ):
+                    continue
+                if not cancelling and await self._runtime_commands._renew_canonical_graph_turn(
+                    turns=turns, key=turn.key, generation=turn.generation,
+                    lease_seconds=_LEASE_SECONDS, cancelling=True,
+                ):
+                    cancelling = True
+                    worker = self._tasks.get(turn.key.turn_id)
+                    if worker is not None:
+                        scope = self._handoff_scopes.get(turn.key.turn_id)
+                        if scope is not None:
+                            scope.cancel_tools()
+                        self._request_worker_cancel(turn.key.turn_id, worker)
+                    continue
+                self._stop_owned_turn(owner)
+                return
+        except Exception:
+            self._stop_owned_turn(owner)
+            raise
 
     async def launch(
         self,
@@ -2146,7 +2813,7 @@ class LocalExecutionBackend:
             await self._reconcile_handoff(current)
             return
         if current.session_id is not None:
-            released = await self._conversation.sessions.release_execution(
+            released = await self._legacy_sessions().release_execution(
                 current.session_id,
                 tenant_id=self._tenant_id,
                 execution_id=current.execution_id,
@@ -2180,6 +2847,21 @@ class LocalExecutionBackend:
         event = self._terminal_events.get(execution_id)
         if event is not None:
             event.set()
+        owner = self._turn_owners.get(execution_id)
+        if (owner is not None and owner.graph_turn is not None
+                and not (owner.graph_terminal_confirmed or owner.graph_wait_confirmed)):
+            # No joint receipt means neither stream nor task can claim a terminal
+            # outcome. Do not let generic handoff/restart run this provider twice.
+            if not isinstance(error, AIError) or error.code not in {
+                ErrorCode.STORAGE_COMMIT_UNKNOWN, ErrorCode.STORAGE_RECOVERY_REQUIRED, ErrorCode.TOOL_EFFECT_UNKNOWN,
+            }:
+                error = AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                                safe_details={"phase": "graph_producer_stopped"})
+            self._record_worker_failure(execution_id, error)
+            self._live_broker.handoff(execution_id)
+            if owner.graph_producer_stopped is not None:
+                owner.graph_producer_stopped(owner.graph_turn)
+            return
         agent_run_only = execution_id in self._agent_run_only_worker_exits
         self._agent_run_only_worker_exits.discard(execution_id)
         if error is None:
@@ -2318,6 +3000,19 @@ class LocalExecutionBackend:
         task = self._tasks.get(execution_id)
         return task is not None and not task.done()
 
+    def owns_native_child(
+        self, execution_id: str, *, key: "SessionTurnKey", principal: Principal, original: ToolOperationRecord,
+    ) -> bool:
+        owner = self._turn_owners.get(execution_id)
+        native = None if owner is None else owner.native_parent
+        return (
+            native is not None and native.key == key and native.principal == principal
+            and native.generation == original.producer_generation and native.invocation_id == original.tool_call_id
+            and native.decision.operation_id == original.tool_operation_id and native.decision.fence == original.fence
+            and (original.owner is None or original.owner == native.decision.owner)
+            and self.worker_installed(execution_id)
+        )
+
     def owns_execution(self, execution_id: str, *, tenant_id: str) -> bool:
         return tenant_id == self._tenant_id and self.worker_installed(execution_id)
 
@@ -2344,6 +3039,22 @@ class LocalExecutionBackend:
     def live_broker(self) -> LiveExecutionEventBroker:
         return self._live_broker
 
+    async def _graph_cancel_link(
+        self, execution: ExecutionRecord,
+    ) -> "tuple[SqlSessionTurns, SessionTurnKey, int] | None":
+        if not execution.requires_task_invocation_capture or execution.session_id is not None:
+            return None
+        resolve = self._resolve_graph_cancel_link
+        if resolve is None:
+            owner = self._turn_owners.get(execution.execution_id)
+            if owner is not None and owner.graph_turn is not None:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            return None
+        actor = _execution_cancel_actor.get()
+        principal = (actor[1] if actor is not None and actor[0] == execution.execution_id
+                     and actor[1].tenant_id == self._tenant_id else None)
+        return await resolve(execution, principal)
+
     async def cancel(self, execution: ExecutionRecord, *, force: bool = False) -> CancelEffectOutcome:
         self._worker_shutdown_requests.discard(execution.execution_id)
         current = await self.load_execution(
@@ -2356,9 +3067,22 @@ class LocalExecutionBackend:
                 execution.execution_id,
             )
             return CancelEffectOutcome.CONFIRMED
+        link = None if current is None else await self._graph_cancel_link(current)
+
+        def has_parked_stop(record: ExecutionRecord | None) -> bool:
+            if record is None or record.status is not ExecutionStatus.CANCELLING:
+                return False
+            parent = self._native_parents.get(record.parent_execution_id)
+            return (parent is not None and parent.stopping
+                    and parent.parked_cancels.get(record.execution_id) == (record.revision, record.producer_generation))
+
         task = self._tasks.get(execution.execution_id)
         if task is None:
-            return await self._confirm_cancel_effects(current, force=force)
+            if link is not None:
+                # A remote immutable cancel intent does not prove worker effects
+                # settled. Never let the generic manager write a standalone terminal.
+                return CancelEffectOutcome.UNKNOWN
+            return await self._confirm_cancel_effects(current, force=force, parked_cancel_committed=has_parked_stop(current))
         scope = self._handoff_scopes.get(execution.execution_id)
         if scope is not None:
             scope.cancel_tools()
@@ -2368,12 +3092,22 @@ class LocalExecutionBackend:
             execution.execution_id,
             tenant_id=self._tenant_id,
         )
-        return await self._confirm_cancel_effects(current, force=force, producer_drained=True)
+        if link is not None:
+            return (CancelEffectOutcome.CONFIRMED
+                    if current is not None and current.status in {
+                        ExecutionStatus.CANCELLED, ExecutionStatus.FAILED, ExecutionStatus.SUCCEEDED,
+                    } else CancelEffectOutcome.UNKNOWN)
+        # A parked worker can still be unwinding after the initial WAITING
+        # commit. The precise Stop receipt remains valid only if the same
+        # cancelling revision/generation is still present after the drain.
+        return await self._confirm_cancel_effects(
+            current, force=force, producer_drained=True, parked_cancel_committed=has_parked_stop(current),
+        )
 
     async def _confirm_cancel_effects(
         self,
         execution: ExecutionRecord | None,
-        *, force: bool = False, producer_drained: bool = False,
+        *, force: bool = False, producer_drained: bool = False, parked_cancel_committed: bool = False,
     ) -> CancelEffectOutcome:
         if execution is None:
             return CancelEffectOutcome.UNKNOWN
@@ -2384,7 +3118,9 @@ class LocalExecutionBackend:
             ExecutionStatus.FINALIZING,
         }:
             return CancelEffectOutcome.CONFIRMED
-        revoke = (force and not execution.restart_checkpoints
+        # Native parked Stop already holds the exact WAITING predecessor
+        # receipt; its parent need not be a standalone Execution row.
+        revoke = (force and not parked_cancel_committed and not execution.restart_checkpoints
                   and execution.binding_kind == "agent"
                   and not execution.requires_task_invocation_capture)
         if revoke and execution.root_execution_id != execution.execution_id:
@@ -2424,7 +3160,8 @@ class LocalExecutionBackend:
         # prevents a remote model response from publishing afterward.
         return (
             CancelEffectOutcome.CONFIRMED
-            if execution.status is ExecutionStatus.CANCELLING and (execution.agent_run_seq == 0 or revoke)
+            if execution.status is ExecutionStatus.CANCELLING
+            and (execution.agent_run_seq == 0 or revoke or parked_cancel_committed)
             else CancelEffectOutcome.UNKNOWN
         )
 
@@ -2444,6 +3181,43 @@ class LocalExecutionBackend:
     ) -> None:
         execution = await self.load_execution(execution_id, tenant_id=tenant_id)
         if execution is None or execution.status is not ExecutionStatus.WAITING_DEFERRED:
+            return
+        if self._queue_deferred_graph is not None and await self._queue_deferred_graph(execution):
+            return
+        native = self._native_parents.get(execution.parent_execution_id)
+        if native is not None:
+            proof = native.child_approvals.get(execution_id)
+            pending = None if execution.recovery is None else execution.recovery.pending_tools
+            if proof is None or pending is None or not pending.approvals or pending.calls:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            def parent_stopped() -> bool:
+                return native.stopping or self._native_parents.get(native.key.turn_id) is not native
+
+            if parent_stopped():
+                return
+            proof.require_deferred_child(execution)
+            old_owner = self._turn_owners.get(execution_id)
+            if old_owner is not None:
+                # The paused worker can still be unwinding its durable park.
+                await old_owner.closed.wait()
+            if parent_stopped():
+                return
+            try:
+                await self._run_owned_action(
+                    execution, native.generation,
+                    lambda: self._reconcile_deferred_owned(execution_id, tenant_id=tenant_id), native_parent=proof,
+                )
+            except asyncio.CancelledError:
+                # A concurrent Stop may have withdrawn the local producer.
+                # The explicit approval decision is already durable; preserve
+                # independent caller cancellation rather than masking it.
+                caller = asyncio.current_task()
+                if not parent_stopped() or caller is not None and caller.cancelling():
+                    raise
+            except AIError as error:
+                if not (parent_stopped() and error.code is ErrorCode.STORAGE_CONFLICT
+                        and error.safe_details.get("phase") == "subagent_parent_unavailable"):
+                    raise
             return
         await self.run_recovery_turn(
             execution_id, lambda: self._reconcile_deferred_owned(execution_id, tenant_id=tenant_id),
@@ -2476,6 +3250,10 @@ class LocalExecutionBackend:
             session_context=current.session_context,
             resolved_binding=decision.binding,
         )
+        owner = self._turn_owners.get(current.execution_id)
+        if owner is not None and owner.native_parent is not None:
+            self._require_turn_dispatch(owner)
+            self._parent_turn(owner.reservation, owner.native_parent)
         if not self._prepare_recovery_relaunch(current.execution_id):
             return
         await self.launch(request, current, resume=decision)
@@ -2507,7 +3285,6 @@ class LocalExecutionBackend:
         call: ToolCallPart,
         metadata: Mapping[str, object],
         *,
-        repository_instruction_frontier: str | None = None,
         capability_ref: CapabilityRef | None = None,
         operation_id: str | None,
     ) -> PendingDeferredCall:
@@ -2544,17 +3321,6 @@ class LocalExecutionBackend:
                 for key, value in raw_metadata.items()
                 if key != "linktools"
             }
-        if repository_instruction_frontier is not None:
-            if (
-                len(repository_instruction_frontier) != 64
-                or any(character not in "0123456789abcdef" for character in repository_instruction_frontier)
-            ):
-                raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-            # This reserved evidence comes from the runtime's observation point,
-            # never from tool-authored metadata or the later approval decision.
-            raw_metadata["linktools"] = {
-                "repository_instruction_frontier": repository_instruction_frontier,
-            }
         operation_id = operation_id or tool_operation_id(
             tenant_id=self._tenant_id, execution_id=execution.execution_id,
             agent_run_id=source_agent_run_id, tool_call_id=call.tool_call_id,
@@ -2579,6 +3345,19 @@ class LocalExecutionBackend:
         *,
         producer_generation: int | None = None,
     ) -> ExecutionRecord:
+        owner = self._turn_owners.get(execution.execution_id)
+        graph_wait = None
+        if owner is not None and owner.graph_turn is not None:
+            if owner.graph_turns is None or owner.graph_wait_owner is None or owner.graph_interrupted_step is None:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            native, run_id, conversation_id, checkpoint_id = owner.graph_interrupted_step
+            if continuation.source_agent_run_id != run_id:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            task_repository, task_lease = owner.graph_wait_owner
+            graph_wait = GraphDeferredWait(
+                owner.graph_turns, owner.graph_turn.key, owner.graph_turn.generation, native,
+                conversation_id, checkpoint_id, task_repository, task_lease, owner.graph_turn.terminal_bytes,
+            )
         if not execution.restart_checkpoints and (execution.conversation or not execution.durable_trace):
             # Deferred input retains its interrupted context even when public
             # history is disabled. It does not enable native restart checkpoints.
@@ -2609,9 +3388,12 @@ class LocalExecutionBackend:
                     occurred_at=occurred_at,
                     background_tasks=self._execution_task_set(execution.execution_id),
                     producer_generation=producer_generation,
-                    turn_fence=self._source_turn_fence(self._turn_owners.get(execution.execution_id)),
+                    turn_fence=self._source_turn_fence(owner),
+                    _graph_wait=graph_wait,
                 )
             )
+            if graph_wait is not None and committed.status is ExecutionStatus.WAITING_DEFERRED:
+                owner.graph_wait_confirmed = True
             if self._execution_buffer is not None:
                 self._execution_buffer.confirm(execution.execution_id, payload_ids)
             self._confirm_source_audits(execution.execution_id, len(pending_audit))
@@ -2698,6 +3480,11 @@ class LocalExecutionBackend:
     ) -> ExecutionRecord:
         if execution.recovery is None or execution.recovery.pending_tools is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        owner = self._turn_owners.get(execution.execution_id)
+        native = None if owner is None else owner.native_parent
+        if native is not None:
+            self._require_turn_dispatch(owner)
+            self._parent_turn(owner.reservation, native)
         resumed = await self._runtime_commands.claim_deferred_resume_checkpoint(
             execution_id=execution.execution_id,
             tenant_id=self._tenant_id,
@@ -2706,8 +3493,11 @@ class LocalExecutionBackend:
             expected_agent_run_seq=execution.agent_run_seq,
             expected_pending_tools=execution.recovery.pending_tools,
             background_tasks=self._execution_task_set(execution.execution_id),
-            recovery_operation=recovery_operation,
+            recovery_operation=recovery_operation, _native_child=native,
         )
+        if native is not None:
+            self._require_turn_dispatch(owner)
+            self._parent_turn(owner.reservation, native)
         if recovery_operation is not None:
             receipt = await self._recovery_receipt(recovery_operation)
             if receipt is None:
@@ -3011,6 +3801,7 @@ class LocalExecutionBackend:
     async def _reconcile_handoff(
         self, checkpoint: ExecutionRecord
     ) -> ExecutionRecord:
+        _require_atomic_execution_trace(checkpoint.durable_trace, self._execution_trace_atomic)
         handoff = checkpoint.recovery.terminal_handoff
         if handoff is None:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
@@ -3126,16 +3917,28 @@ class LocalExecutionBackend:
             async def finish_handoff(execution: ExecutionRecord) -> ExecutionRecord:
                 await self._validate_committed_handoff(checkpoint)
                 if execution.session_id is not None:
-                    if execution.conversation and execution.status is not ExecutionStatus.SUCCEEDED:
-                        await self._runtime_commands.finish_conversation_turn(execution, execution.result)
-                    else:
-                        await self._conversation.sessions.release_execution(
-                            execution.session_id,
-                            tenant_id=self._tenant_id,
-                            execution_id=execution.execution_id,
-                            history_unavailable=execution.invalidates_session_history,
-                            require_turn_commit=execution.conversation,
-                        )
+                    try:
+                        if execution.conversation and execution.status is not ExecutionStatus.SUCCEEDED:
+                            await self._runtime_commands.finish_conversation_turn(execution, execution.result)
+                        else:
+                            await self._legacy_sessions().release_execution(
+                                execution.session_id,
+                                tenant_id=self._tenant_id,
+                                execution_id=execution.execution_id,
+                                history_unavailable=execution.invalidates_session_history,
+                                require_turn_commit=execution.conversation,
+                            )
+                    except AIError as error:
+                        if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                            raise
+                        # Execution is already durable here. An unconfirmed
+                        # Conversation must keep the handoff PREPARED, not turn
+                        # this into a retry of the Execution terminal write.
+                        raise AIError(
+                            ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                            safe_details={"phase": "split_conversation_unconfirmed",
+                                          "execution_id": execution.execution_id},
+                        ) from error
                 completed = await self._complete_handoff(execution)
                 self._publish_terminal_event(
                     execution.execution_id,
@@ -3284,7 +4087,7 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         async def commit_conversation(transaction) -> None:
-            current = await self._conversation.sessions.get_in_transaction(
+            current = await self._legacy_sessions().get_in_transaction(
                 transaction,
                 intent.session_id,
                 tenant_id=self._tenant_id,
@@ -3298,7 +4101,7 @@ class LocalExecutionBackend:
                 or current.continuation != intent.expected_cursor
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await self._conversation.sessions.advance_continuation_in_transaction(
+            await self._legacy_sessions().advance_continuation_in_transaction(
                 transaction,
                 intent.session_id,
                 tenant_id=self._tenant_id,
@@ -3312,7 +4115,7 @@ class LocalExecutionBackend:
 
         try:
             if session.continuation != effective_next_cursor:
-                await self._conversation.sessions.state_store.mutate(commit_conversation)
+                await self._legacy_sessions().state_store.mutate(commit_conversation)
         except AIError as error:
             if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
                 raise
@@ -4231,10 +5034,13 @@ class LocalExecutionBackend:
         *,
         producer_generation: int | None = None,
         initial_attempt: _InitialAttemptCapture | None = None,
+        graph_resume_source: "tuple[NativeMessageRoot, str, int] | None" = None,
     ) -> None:
         execution_id = original.execution_id
         handoff_scope = ExecutionHandoffScope()
         owner = self._turn_owners.get(execution_id)
+        graph_turn = None if owner is None else owner.graph_turn
+        graph_turns = None if owner is None else owner.graph_turns
         if self._handoff_requested or owner is not None and owner.stopping:
             handoff_scope.stop()
         self._handoff_scopes[execution_id] = handoff_scope
@@ -4244,6 +5050,7 @@ class LocalExecutionBackend:
         agent_run_id: str | None = None
         recovery_history_agent_run_id: str | None = None
         recovery_operation_ids: dict[str, str] = {}
+        graph_pending_approvals: frozenset[str] = frozenset()
         metric_recorder = self._metric_recorder
         metric_id = uuid.uuid4().hex if metric_recorder is not None else None
         metric_started = monotonic_ns() if metric_id is not None else None
@@ -4326,6 +5133,7 @@ class LocalExecutionBackend:
             compiled_agent = binding.compiled_agent
             accepted_context = await self.load_input_context(current.input_context)
             initial_repository_instructions = (
+                graph_turn.repository_instructions if graph_turn is not None else
                 await self.load_repository_instructions(current.repository_instructions)
                 if accepted_context is None else (
                     None if accepted_context.repository_instructions is None
@@ -4335,7 +5143,7 @@ class LocalExecutionBackend:
             repository_overlay = await self.load_repository_instructions(
                 checkpoint.recovery.repository_instruction_overlay
             )
-            _validate_repository_instruction_frontier(checkpoint, repository_overlay)
+            _validate_repository_instruction_overlay(checkpoint, repository_overlay)
             agent_run_id = (make_agent_run_id(
                 namespace=self._namespace, tenant_id=self._tenant_id,
                 execution_id=execution_id, agent_run_seq=current.agent_run_seq + 1,
@@ -4355,7 +5163,9 @@ class LocalExecutionBackend:
                 await self._load_session(current.session_id, tenant_id=self._tenant_id))
             if current.session_id is not None and session is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            session_metadata: Mapping[str, JsonValue] = {} if session is None else session.metadata
+            session_metadata: Mapping[str, JsonValue] = (
+                graph_turn.session_metadata if graph_turn is not None else {} if session is None else session.metadata
+            )
             initial_scopes = tuple(sorted({
                 document.scope for document in (
                     () if initial_repository_instructions is None else initial_repository_instructions.documents
@@ -4365,7 +5175,7 @@ class LocalExecutionBackend:
                 # Keep scope knowledge outside admission CAS: concurrent starts
                 # must still converge through the existing idempotency owner.
                 await self.promote_pending_execution(execution_id)
-                sessions = self._conversation.sessions
+                sessions = self._legacy_sessions()
                 session = await sessions.state_store.mutate(
                     lambda transaction: sessions.remember_repository_instruction_scopes_in_transaction(
                         transaction, session.session_id, tenant_id=self._tenant_id,
@@ -4439,8 +5249,33 @@ class LocalExecutionBackend:
                                     or recovery_operation_ids.get(operation.tool_call_id) != operation.tool_operation_id):
                                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                             operations[operation.tool_operation_id] = operation
-                    unresolved = tuple(operation for operation in operations.values()
-                        if operation.status not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED})
+                    if graph_turn is not None and resume is not None:
+                        pending = checkpoint.recovery.pending_tools
+                        if pending is None or pending.source_agent_run_id != recovery_history_agent_run_id:
+                            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                        approved = tuple(item for item in pending.approvals
+                                         if isinstance(resume.results.approvals.get(item.tool_call_id), ToolApproved))
+                        for item in approved:
+                            operation = operations.get(item.operation_id)
+                            if (operation is None
+                                    or recovery_operation_ids.get(item.tool_call_id) != item.operation_id
+                                    or operation.status not in {ToolOperationStatus.PENDING,
+                                                                ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}
+                                    or operation.status is ToolOperationStatus.PENDING and operation.owner is not None):
+                                raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+                        graph_pending_approvals = frozenset(item.operation_id for item in approved
+                            if operations[item.operation_id].status is ToolOperationStatus.PENDING)
+                        settled = {item.operation_id for item in pending.approvals if item not in approved}
+                        if any(operation.tool_operation_id not in graph_pending_approvals
+                               and (operation.status not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}
+                                    and not (operation.status is ToolOperationStatus.CANCELLED
+                                             and operation.tool_operation_id in settled))
+                               for operation in operations.values()):
+                            raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+                        unresolved = ()
+                    else:
+                        unresolved = tuple(operation for operation in operations.values()
+                            if operation.status not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED})
                     if unresolved:
                         try:
                             await self._reconcile_unresolved_tool_operations(
@@ -4473,7 +5308,10 @@ class LocalExecutionBackend:
                 and history_id is not None
             )
             with runtime_object_source_reads():
-                if source_replay_history is not None:
+                if graph_turn is not None:
+                    history = list(graph_turn.history) if source_replay_history is None else source_replay_history
+                    loaded_context = LoadedModelContext(tuple(LoadedContextMessage(message, None) for message in history))
+                elif source_replay_history is not None:
                     history = source_replay_history
                 elif recovery_history_agent_run_id is not None:
                     output_retries_used = recovery_history_checkpoint.output_retries_used
@@ -4504,6 +5342,11 @@ class LocalExecutionBackend:
                 )
                 deferred_tool_results = resume.results
                 resumed_deferred_attempt = True
+            if graph_resume_source is not None:
+                root, digest, _ = graph_resume_source
+                loaded_context = LoadedModelContext(
+                    tuple(LoadedContextMessage(message, None) for message in history), root, digest,
+                )
             session_history_start = (
                 accepted_context.replace_history_system_prompt if accepted_context is not None
                 else current.lineage_kind is ExecutionLineageKind.SESSION_RESUME and bool(history)
@@ -4596,7 +5439,7 @@ class LocalExecutionBackend:
                         prepared = await self._context_archive.prepare(accepted_context, history_root=loaded_context.archive_root, history_digest=loaded_context.archive_digest)
                         prepared_context = prepared.reference
                         context_write = (prepared.archive, prepared.records)
-                else:
+                elif graph_turn is None:
                     current, accepted_context = await self._persist_input_context(
                         current, accepted_context, loaded_context, owner=owner,
                     )
@@ -4633,10 +5476,7 @@ class LocalExecutionBackend:
                                         audit_events=tuple(self._pending_audit_events.get(execution_id, ())),
                                     ))
                                 assert self._pending_turns.coordination is not None and pending.coordination is not None
-                                await self._pending_turns.coordination.publish(
-                                    current, pending.coordination,
-                                    request_identity_version=pending.reservation.idempotency.request_identity_version,
-                                )
+                                await self._pending_turns.coordination.publish(current, pending.coordination)
                             else:
                                 if context_write is None:
                                     prepared = await self._context_archive.prepare(accepted_context, history_root=loaded_context.archive_root, history_digest=loaded_context.archive_digest)
@@ -4746,15 +5586,20 @@ class LocalExecutionBackend:
                     agent_run_id, loaded_context,
                     source_run=(recovery_run if current.restart_checkpoints and recovery_history_agent_run_id is not None else None),
                 )
+                if graph_resume_source is not None and current.durable_trace:
+                    self._run_store.confirm_graph_step_trace_source(
+                        agent_run_id, producer_generation, graph_resume_source[0], history, resumed=True,
+                    )
                 if owner is not None:
-                    await self._bind_native_boundary(owner, current, agent_run_id)
+                    await self._bind_native_boundary(owner, current, agent_run_id,
+                                                     graph_pending_approvals=graph_pending_approvals)
             repository_boundary = _RepositoryInstructionBoundary(
-                self._recovery_coordinator,
-                current,
+                partial(
+                    self._recovery_coordinator.check_repository_instructions,
+                    execution=current, producer_generation=producer_generation,
+                ),
                 initial_repository_instructions,
                 repository_overlay,
-                producer_generation=producer_generation,
-                approved_frontiers=(None if resume is None else resume.repository_instruction_approvals),
             )
             if current.producer_generation != producer_generation or current.producer_claim_id is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -4785,10 +5630,12 @@ class LocalExecutionBackend:
                 if tool_repository is not None
                 else None
             )
-            if (tool_operations is not None and owner is not None
-                    and owner.tool_admission is not None and owner.tool_terminal is not None):
-                tool_operations.prepare_boundaries(admission=owner.tool_admission, terminal=owner.tool_terminal,
-                                                   unknown=owner.tool_unknown)
+            if tool_operations is not None and owner is not None:
+                if owner.graph_turn is not None and not current.restart_checkpoints:
+                    self._bind_attached_graph_tool_boundary(owner, tool_operations)
+                elif owner.tool_admission is not None and owner.tool_terminal is not None:
+                    tool_operations.prepare_boundaries(admission=owner.tool_admission, terminal=owner.tool_terminal,
+                                                       unknown=owner.tool_unknown)
 
             if current.context_imported:
                 session_metadata = accepted_context.session_metadata
@@ -4819,17 +5666,17 @@ class LocalExecutionBackend:
                 input_context=accepted_context,
                 original_input=stored_user_input_view(original_input),
             )
-            plan_store = PlanningStore(PlanStateStore(
-                self._session_state_store
-                if current.session_id is not None
-                else self._execution_state_store,
-                namespace=self._namespace,
-                tenant_id=self._tenant_id,
-                owner_kind="session" if current.session_id is not None else "execution",
-                owner_id=current.session_id or current.execution_id,
-            ))
             deferred_capability_refs: dict[str, CapabilityRef] = {}
             try:
+                plan_store = PlanningStore(PlanStateStore(
+                    self._session_state_store
+                    if current.session_id is not None
+                    else self._execution_state_store,
+                    namespace=self._namespace,
+                    tenant_id=self._tenant_id,
+                    owner_kind="session" if current.session_id is not None else "execution",
+                    owner_id=current.session_id or current.execution_id,
+                ))
                 result = await self._executor.execute(
                     _AgentRunScope(
                         binding=binding,
@@ -5018,6 +5865,24 @@ class LocalExecutionBackend:
                         exc_info=True,
                     )
                 return
+            if graph_turn is not None and not isinstance(result, DeferredToolRequests):
+                assert graph_turns is not None
+                if agent_run_id is None or producer_generation is None:
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                try:
+                    committed = await self._commit_attached_graph_success(
+                        current, binding, result.output, result.usage, agent_run_id,
+                        messages=result.messages, turn=graph_turn, turns=graph_turns,
+                        producer_generation=producer_generation,
+                    )
+                except AIError as error:
+                    if error.code is not ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE:
+                        raise
+                    committed = await self._commit_failure(
+                        current, error, agent_run_id=agent_run_id, producer_generation=producer_generation,
+                    )
+                metric_status, metric_error_code = committed.status.value, committed.error_code
+                return
             if isinstance(result, DeferredToolRequests):
                 if owner is not None:
                     owner.attempt = None
@@ -5032,7 +5897,6 @@ class LocalExecutionBackend:
                         paused_at=datetime.now(timezone.utc),
                         capability_refs=deferred_capability_refs,
                         producer_generation=producer_generation,
-                        repository_instruction_frontiers=repository_boundary.approval_frontiers(result.approvals),
                     )
                 except AIError as error:
                     if error.code is ErrorCode.EXECUTION_CANCELLED:
@@ -5176,6 +6040,26 @@ class LocalExecutionBackend:
                     agent_run_id,
                 )
         except asyncio.CancelledError as error:
+            if graph_turn is not None:
+                observed = await self.load_execution(execution_id, tenant_id=self._tenant_id)
+                if observed is not None and observed.status is ExecutionStatus.CANCELLING:
+                    assert graph_turns is not None
+                    if producer_generation is None:
+                        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                    await self._reconcile_cancelled_tool_claims(observed)
+                    effects, active_claims = await self._reconcile_tool_effects(
+                        execution_id, tenant_id=self._tenant_id,
+                    )
+                    if effects or active_claims:
+                        raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN if effects else ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    settled = await self._commit_attached_graph_error(
+                        observed, ExecutionStatus.CANCELLED, self._captured_usage.get(execution_id, UsageMetrics()),
+                        turn=graph_turn, turns=graph_turns, producer_generation=producer_generation,
+                        error_code=ErrorCode.EXECUTION_CANCELLED.value, safe_error_details={},
+                        agent_run_id=agent_run_id,
+                    )
+                    metric_status, metric_error_code = settled.status.value, settled.error_code
+                raise
             # Cancellation can arrive outside the backend's request path. Once
             # settlement starts, a later control request must only drain it.
             if self._tasks.get(execution_id) is asyncio.current_task():
@@ -5676,14 +6560,334 @@ class LocalExecutionBackend:
             tool_operations=tool_operations,
         )
 
+    async def _settle_cold_graph_cancel(
+        self, current: ExecutionRecord, *, turns: "SqlSessionTurns", key: "SessionTurnKey",
+        generation: int, turn_no: int, task_repository: "TaskRepository",
+        node_id: str, operation: OperationLedgerRecord,
+    ) -> ExecutionRecord:
+        """Finish cold Stop from the existing Graph cancellation authority."""
+        from ._regenerable_turn import _LEASE_SECONDS
+
+        owner = GraphCancelOwner(node_id, operation)
+        step = None
+        if current.restart_checkpoints:
+            self._require_attached_graph_step_source(current, turns)
+            if current.agent_run_seq < 1:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            step = (
+                self._run_store.step_store,
+                make_agent_run_id(namespace=self._namespace, tenant_id=self._tenant_id,
+                                  execution_id=key.turn_id, agent_run_seq=current.agent_run_seq),
+                make_agent_conversation_id(namespace=self._namespace, tenant_id=self._tenant_id, execution_id=key.turn_id),
+            )
+        current, generation = await self._runtime_commands._claim_expired_linked_graph_cancellation(
+            current, turns=turns, key=key, generation=generation,
+            task_repository=task_repository, task_lease=owner, lease_seconds=_LEASE_SECONDS, _cold_step=step,
+        )
+        now = datetime.now(timezone.utc)
+        code = ErrorCode.EXECUTION_CANCELLED.value
+        terminal = await self._runtime_commands._commit_canonical_graph_terminal(
+            ExecutionTerminalCommit(
+                current.revision, current.event_seq,
+                _terminal_record(current, ExecutionStatus.CANCELLED, now, error_code=code),
+                ResultRecord(None, StopReason.CANCELLED, UsageMetrics(), now),
+                ExecutionEventType.EXECUTION_CANCELLED, {"error_code": code},
+                producer_generation=current.producer_generation,
+            ),
+            expected_execution=current, turns=turns, key=key, generation=generation, turn_no=turn_no,
+            _cold_graph_task=(task_repository, owner),
+            _graph_step_checkpoint=None if step is None else (*step, None, 0),
+        )
+        return terminal.execution
+
+    async def _commit_attached_graph_success(
+        self,
+        current: ExecutionRecord,
+        binding: AgentBinding,
+        output: JsonValue,
+        usage: UsageMetrics,
+        agent_run_id: str,
+        *,
+        messages: Sequence[ModelMessage],
+        turn: "_AttachedGraphTurn",
+        turns: "SqlSessionTurns",
+        producer_generation: int,
+    ) -> ExecutionRecord:
+        """Settle a proven attached producer using one normalized transcript."""
+        from ..model.messages import canonical_structured_output_reference
+        from ._regenerable_transcript import prepare_native_turn_transcript
+
+        spec = binding.binding_contract.agent_spec
+        structured = binding.output_binding.mode == "structured"
+        context_messages, transcript, binding_refs = prepare_native_turn_transcript(
+            turn.model_prompt or turn.prompt, turn.history, messages, output,
+            instructions=spec.instructions, system_prompt=spec.system_prompt, structured=structured,
+        )
+        shared_source = current.durable_trace or current.restart_checkpoints
+        output_ref = canonical_structured_output_reference(
+            messages[len(turn.history):] if shared_source else transcript,
+        ) if structured else None
+        encoded_body = len(encode_model_messages(transcript))
+        if output_ref is not None:
+            encoded_body += len(canonical_json_bytes({"output_ref": list(output_ref)}))
+        encoded_refs = len(canonical_json_bytes([list(item) for item in binding_refs])) if binding_refs else 0
+        if encoded_body + encoded_refs > turn.terminal_bytes:
+            raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
+
+        now = datetime.now(timezone.utc)
+        commit = ExecutionTerminalCommit(
+            current.revision,
+            current.event_seq,
+            _terminal_record(current, ExecutionStatus.SUCCEEDED, now, error_code=None),
+            ResultRecord(StoredPayload.inline_json(output), StopReason.END_TURN, usage, now),
+            ExecutionEventType.EXECUTION_SUCCEEDED,
+            {"agent_run_id": agent_run_id},
+            producer_generation=producer_generation,
+        )
+        return await self._settle_attached_graph(
+            current, commit, turn=turn, turns=turns, producer_generation=producer_generation,
+            transcript=None if shared_source else transcript,
+            binding_refs=() if shared_source else binding_refs, output_ref=output_ref,
+            trace_run_id=agent_run_id, trace_messages=messages if shared_source else None,
+            notice_messages=context_messages,
+        )
+
+    async def _commit_attached_graph_error(
+        self,
+        current: ExecutionRecord,
+        status: ExecutionStatus,
+        usage: UsageMetrics,
+        *,
+        turn: "_AttachedGraphTurn",
+        turns: "SqlSessionTurns",
+        producer_generation: int,
+        error_code: str,
+        safe_error_details: Mapping[str, JsonValue],
+        error_diagnostics: ErrorDiagnostics | None = None,
+        agent_run_id: str | None = None,
+    ) -> ExecutionRecord:
+        """Settle an attached local failure or a durable cancellation claim without a body."""
+        if status is ExecutionStatus.CANCELLED:
+            if (current.status is not ExecutionStatus.CANCELLING
+                    or error_code != ErrorCode.EXECUTION_CANCELLED.value or error_diagnostics is not None):
+                raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
+            event_type, stop_reason = ExecutionEventType.EXECUTION_CANCELLED, StopReason.CANCELLED
+        elif status is ExecutionStatus.FAILED and current.status is ExecutionStatus.STARTED and error_code:
+            event_type, stop_reason = ExecutionEventType.EXECUTION_FAILED, StopReason.ERROR
+        else:
+            raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
+        now = datetime.now(timezone.utc)
+        commit = ExecutionTerminalCommit(
+            current.revision,
+            current.event_seq,
+            _terminal_record(current, status, now, error_code=error_code,
+                             safe_error_details=safe_error_details, error_diagnostics=error_diagnostics),
+            ResultRecord(None, stop_reason, usage, now),
+            event_type,
+            _terminal_error_payload(error_code, safe_error_details, error_diagnostics),
+            producer_generation=producer_generation,
+        )
+        return await self._settle_attached_graph(
+            current, commit, turn=turn, turns=turns, producer_generation=producer_generation,
+            trace_run_id=agent_run_id,
+        )
+
+    async def _settle_attached_graph(
+        self,
+        current: ExecutionRecord,
+        commit: ExecutionTerminalCommit,
+        *,
+        turn: "_AttachedGraphTurn",
+        turns: "SqlSessionTurns",
+        producer_generation: int,
+        transcript: Sequence[ModelMessage] | None = None,
+        binding_refs: tuple[tuple[int, int | None], ...] = (),
+        output_ref: tuple[int, int] | None = None,
+        trace_run_id: str | None = None,
+        trace_messages: Sequence[ModelMessage] | None = None,
+        notice_messages: tuple[ModelMessage, ...] = (),
+    ) -> ExecutionRecord:
+        if current.durable_trace and (
+            not isinstance(self._agent_run_lifecycle, RuntimeAgentRunStore)
+            or self._execution_buffer is not None
+        ):
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        plan: ExecutionTerminalSealPlan | None = None
+        trace_root = None
+        raw_suffix = None
+        step_suffix = None
+        committed = None
+        owner = self._turn_owners.get(current.execution_id)
+        step_alias = None if owner is None else owner.graph_step_alias
+        status = commit.execution.status
+        if current.restart_checkpoints and status is ExecutionStatus.SUCCEEDED and step_alias is None:
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        try:
+            if current.durable_trace:
+                trace = self._agent_run_lifecycle
+                plan = await trace.prepare_execution_terminal_seal(
+                    execution_id=current.execution_id,
+                    agent_run_ids=() if trace_run_id is None else (trace_run_id,),
+                    binding_digest=current.binding_digest,
+                    **({} if step_alias is None else {"native_alias": step_alias}),
+                )
+                if commit.execution.status is ExecutionStatus.SUCCEEDED:
+                    if trace_run_id is None or trace_messages is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    trace_root = await trace.capture_attached_trace_suffix(
+                        plan, execution_id=current.execution_id, agent_run_id=trace_run_id,
+                        producer_generation=producer_generation, approved_prefix=turn.history,
+                        result_messages=trace_messages,
+                        native_alias=None if step_alias is None else step_alias[1],
+                    )
+                    raw_suffix = tuple(trace_messages[len(turn.history):])
+            elif current.restart_checkpoints and status is ExecutionStatus.SUCCEEDED:
+                assert step_alias is not None
+                step_run, root, recorded = step_alias
+                prefix = len(turn.history)
+                prompt = turn.model_prompt
+                media = prompt is not None and not isinstance(prompt, str) and any(
+                    isinstance(item, BinaryContent) for item in prompt
+                )
+                if (trace_run_id != step_run or trace_messages is None or root.count != len(recorded)
+                        or root.count <= prefix or (not media and tuple(trace_messages) != tuple(recorded))):
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                # The complete Step owns the context projection; its consumed
+                # attachments need not match the live provider representation.
+                # Grouped settlement verifies the exact root and terminal output.
+                recorded_suffix = tuple(recorded[prefix:])
+                if output_ref is not None:
+                    from ..model.messages import canonical_structured_output_reference
+
+                    output_ref = canonical_structured_output_reference(recorded_suffix)
+                step_suffix = (root.slice(prefix, root.count), recorded_suffix)
+            async with self._audit_lock(current.execution_id):
+                owner = self._turn_owners.get(current.execution_id)
+                if owner is None or owner.producer_generation != producer_generation:
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                if commit.execution.status is not ExecutionStatus.CANCELLED:
+                    self._require_turn_dispatch(owner)
+                checkpoint: tuple[SqlStepStore, str, str, str | None, int] | None = owner.graph_step_checkpoint
+                if current.restart_checkpoints and status is not ExecutionStatus.SUCCEEDED:
+                    if (current.recovery is None or current.recovery.pending_tools is not None
+                            or current.recovery_state is not ExecutionRecoveryState.ACTIVE):
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    marker = owner.graph_step_terminal_marker
+                    if marker is None or marker[1].outcome != status.value.lower():
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    native, event = marker
+                    if trace_run_id != event.run_id or event.conversation_id is None:
+                        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                    if checkpoint is None:
+                        # Failed/cancelled native runs can supply a committed
+                        # lifecycle marker with no COMPLETE transcript snapshot.
+                        checkpoint = (
+                            native, event.run_id, event.conversation_id, None, len(turn.history),
+                        )
+                if current.restart_checkpoints != (checkpoint is not None):
+                    raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+                pending = await self._source_audit_prefix(current.execution_id)
+                committed = await self._runtime_commands._commit_canonical_graph_terminal(
+                    commit, expected_execution=current, turns=turns, key=turn.key,
+                    generation=turn.generation, turn_no=turn.number, transcript=transcript,
+                    binding_refs=binding_refs, output_ref=output_ref, pending_events=pending,
+                    _graph_trace_plan=plan, _graph_trace_suffix=trace_root,
+                    _graph_trace_messages=raw_suffix, _graph_step_checkpoint=checkpoint,
+                    **({} if step_suffix is None else {"_native_step_suffix": step_suffix}),
+                    start_identity=(owner.reservation.idempotency
+                                    if owner.reservation.idempotency.status is IdempotencyStatus.STARTED else None),
+                )
+                owner.graph_terminal_confirmed = True
+                self._confirm_source_audits(current.execution_id, len(pending))
+                self._confirm_committed_events(
+                    current.execution_id, pending_count=len(pending), durable_seq=committed.execution.event_seq,
+                )
+        except BaseException as error:
+            if committed is not None:
+                _logger.error("attached Graph local audit finalization failed after durable commit: execution=%s",
+                              current.execution_id, exc_info=True)
+            elif plan is not None and not (
+                isinstance(error, AIError) and error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
+            ):
+                await self._agent_run_lifecycle.discard_execution_terminal_seal(plan)
+            if committed is None:
+                # An unknown acknowledgment retains the exact sealed attempt;
+                # neither a fallback terminal write nor local success is valid.
+                raise
+        if plan is not None:
+            try:
+                await self._agent_run_lifecycle.finalize_execution_terminal_seal(plan)
+            except BaseException:
+                _logger.error("attached Graph Trace finalization failed after durable commit: execution=%s",
+                              current.execution_id, exc_info=True)
+                try:
+                    await asyncio.shield(self._agent_run_lifecycle.reconcile_execution_terminal_seal(plan))
+                except BaseException:
+                    _logger.error("attached Graph Trace reconciliation remains unsettled: execution=%s",
+                                  current.execution_id, exc_info=True)
+        terminal_notice = owner.graph_terminal_notice
+        if terminal_notice is not None:
+            try:
+                payload = commit.result.output
+                terminal_notice(
+                    turn, committed.execution.status.value.lower(),
+                    output=None if payload is None else payload.decode(),
+                    messages=notice_messages, error_code=committed.execution.error_code,
+                    output_ref=output_ref,
+                )
+            except Exception:
+                _logger.exception("attached Graph session terminal notice failed: execution=%s", current.execution_id)
+        self._publish_terminal_event(
+            current.execution_id, event_type=commit.terminal_event_type,
+            payload=dict(commit.terminal_event_payload), durable_seq=committed.execution.event_seq,
+        )
+        return committed.execution
+
     def _source_turn_fence(self, owner: _OwnedExecutionTurn | None) -> "SourceTurnWriteFence | None":
         coordinator = self._pending_turns.coordination
         if owner is None or owner.coordination is None or coordinator is None:
             return None
         return coordinator.durable_write_fence(owner.coordination, self._execution.executions.state_store)
 
+    def _bind_attached_graph_tool_boundary(
+        self, owner: _OwnedExecutionTurn, bridge: RuntimeToolOperationBridge,
+    ) -> None:
+        """Admit effects under both native Graph and Execution producer authority."""
+        turn, turns = owner.graph_turn, owner.graph_turns
+        assert turn is not None and turns is not None
+        store, require_graph = self._runtime_commands._canonical_graph_producer_boundary(
+            turns=turns, key=turn.key, generation=turn.generation,
+        )
+        repository = self._execution.executions
+
+        async def admit_tool(request, *, observed, event, known_new):
+            async with owner.boundary:
+                self._require_turn_dispatch(owner)
+                if owner.observed is None:
+                    owner.observed = await repository.get_observed(turn.key.turn_id, tenant_id=self._tenant_id)
+                if owner.observed is None:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                receipt = await self._runtime_commands.commit_tool_admission_boundary(
+                    request, execution=owner.observed, observed=observed, known_new=known_new,
+                    stores=(store,), write=require_graph,
+                )
+                owner.observed = receipt.execution
+                return receipt.operation
+
+        async def settle_tool(operation_id, *, tenant_id, owner: str, fence, observed, event,
+                              result_payload=None, error_code=None, error_payload=None):
+            # The exact effect receipt, not the live producer, owns a certain
+            # result. Trace publishes from the original run; do not add a Step event.
+            return await self._runtime_commands.commit_tool_terminal(
+                operation_id, tenant_id=tenant_id, owner=owner, fence=fence, observed=observed,
+                result_payload=result_payload, error_code=error_code, error_payload=error_payload,
+            )
+
+        bridge.bind_boundaries(admission=admit_tool, terminal=settle_tool)
+
     async def _bind_native_boundary(
-        self, owner: _OwnedExecutionTurn, execution: ExecutionRecord, agent_run_id: str,
+        self, owner: _OwnedExecutionTurn, execution: ExecutionRecord, agent_run_id: str, *,
+        graph_pending_approvals: frozenset[str] = frozenset(),
     ) -> None:
         if not execution.restart_checkpoints or not isinstance(self._run_store, RuntimeAgentRunStore):
             return
@@ -5698,6 +6902,19 @@ class LocalExecutionBackend:
         repository = self._execution.executions
         turn_fence = self._source_turn_fence(owner)
         participants = (state,) if turn_fence is None or turn_fence.store is state else (state, turn_fence.store)
+        graph_guard = graph_cancel_guard = None
+        if owner.graph_turn is not None:
+            if owner.graph_turns is None or turn_fence is not None:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            self._require_attached_graph_step_source(execution, owner.graph_turns)
+            graph_store, graph_guard = self._runtime_commands._canonical_graph_producer_boundary(
+                turns=owner.graph_turns, key=owner.graph_turn.key, generation=owner.graph_turn.generation,
+            )
+            _, graph_cancel_guard = self._runtime_commands._canonical_graph_producer_boundary(
+                turns=owner.graph_turns, key=owner.graph_turn.key, generation=owner.graph_turn.generation,
+                cancelling=True,
+            )
+            participants = tuple(dict.fromkeys((*participants, graph_store)))
         if owner.observed is None or owner.observed.value != execution:
             owner.observed = await repository.get_observed(execution.execution_id, tenant_id=self._tenant_id)
         if owner.observed is None or owner.observed.value != execution:
@@ -5742,6 +6959,9 @@ class LocalExecutionBackend:
 
         async def publish_boundary(*, run=None, events=(), snapshot=None, joint=False) -> StepWriteReceipt | None:
             terminal = any(isinstance(event, NativeLifecycleEvent) for event in events)
+            graph_cancelling = (graph_cancel_guard is not None
+                                and any(isinstance(event, NativeLifecycleEvent) and event.outcome == "cancelled"
+                                        for event in events))
 
             def require_publication() -> None:
                 if not terminal:
@@ -5781,8 +7001,14 @@ class LocalExecutionBackend:
                 receipt = await repository.commit_boundary_in_transaction(
                     transaction, observed, next_record=next_record,
                     expected_producer_generation=generation, expected_producer_claim_id=claim_id,
-                    allow_cancelling=terminal, turn_fence=turn_fence,
+                    allow_cancelling=terminal if graph_guard is None else graph_cancelling,
+                    turn_fence=turn_fence,
                 )
+                if graph_cancelling:
+                    assert graph_cancel_guard is not None
+                    await graph_cancel_guard(group)
+                elif graph_guard is not None:
+                    await graph_guard(group)
                 source_receipt = (self._run_store.step_event_receipt(agent_run_id)
                                   if managed or terminal else None)
                 written = (await native.write_prepared_step(transaction, prepared, confirmed=source_receipt)
@@ -5877,6 +7103,26 @@ class LocalExecutionBackend:
             if written is None:
                 raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
             native.confirm_prepared_step(written)
+            if owner.graph_turn is not None and terminal:
+                for event in native.events_from_receipt(written):
+                    if (isinstance(event, NativeLifecycleEvent) and event.run_id == agent_run_id
+                            and event.outcome in {"failed", "cancelled"}):
+                        owner.graph_step_terminal_marker = native, event
+            if (owner.graph_turn is not None and snapshot is not None
+                    and snapshot.run_id == agent_run_id and snapshot.idempotency_key is not None
+                    and written.native_messages is not None and written.native_messages.prepared is not None):
+                root = native.message_root(written.native_messages.prepared.root)
+                if execution.durable_trace:
+                    self._run_store.confirm_graph_step_trace_source(snapshot.run_id, generation, root, snapshot.messages)
+                if snapshot.state == "complete":
+                    owner.graph_step_checkpoint = (
+                        native, snapshot.run_id, snapshot.conversation_id, snapshot.idempotency_key,
+                        len(owner.graph_turn.history),
+                    )
+                    owner.graph_step_alias = (snapshot.run_id, root, snapshot.messages)
+                elif snapshot.state == "interrupted":
+                    owner.graph_interrupted_step = (native, snapshot.run_id, snapshot.conversation_id,
+                                                    snapshot.idempotency_key)
             source = native.run_from_receipt(written)
             if source is not None:
                 self._run_store.confirm_step_run(source, receipt=written)
@@ -5886,16 +7132,18 @@ class LocalExecutionBackend:
 
         initial_observed = owner.observed
 
-        async def event_writer(event):
+        async def event_writer(event, *, require_graph: bool = False):
             prepared = await native.prepare_step(events=(event,), fixed_error_sources=event.kind == "tool_call_failed")
             async def write(group):
+                if require_graph and graph_guard is not None:
+                    await graph_guard(group)
                 await native.write_prepared_step(group.transaction(state), prepared)
             async def readback():
                 return any(item == event for item in await native.list_events(run_id=event.run_id))
             return write, readback
 
         async def admit_tool(request, *, observed, event, known_new):
-            write, readback = await event_writer(event)
+            write, readback = await event_writer(event, require_graph=True)
             async with owner.boundary:
                 self._require_turn_dispatch(owner)
                 if owner.observed is None or owner.attempt is None:
@@ -5905,6 +7153,8 @@ class LocalExecutionBackend:
                 receipt = await self._runtime_commands.commit_tool_admission_boundary(
                     request, execution=owner.observed, observed=observed,
                     write=write, readback_write=readback, known_new=known_new, turn_fence=turn_fence,
+                    stores=participants if graph_guard is not None else (),
+                    _graph_approval=request.tool_operation_id in graph_pending_approvals,
                 )
                 owner.observed = receipt.execution
                 session = captured_session if owner.attempt is None else owner.attempt.session
@@ -6356,6 +7606,9 @@ class LocalExecutionBackend:
     ) -> ExecutionRecord:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if self._has_graph_execution_link is not None and await self._has_graph_execution_link(execution_id):
+            # This entry has no Task lease or graph-recovery receipt.
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         if recovery_operation is not None:
             task = asyncio.create_task(self._recover_keyed_execution(
                 execution_id, expected_revision, recovery_operation,
@@ -6445,13 +7698,13 @@ class LocalExecutionBackend:
         if receipt is not None:
             current = await self.load_execution(execution_id, tenant_id=self._tenant_id)
             if (receipt.status is OperationStatus.RUNNING and receipt.result_ref is None
-                    and current is not None and current.status in {
-                        ExecutionStatus.FINALIZING, ExecutionStatus.SUCCEEDED,
-                        ExecutionStatus.CANCELLED, ExecutionStatus.FAILED,
-                    }):
-                if current.status is not ExecutionStatus.FINALIZING:
+                    and current is not None):
+                if current.status in (ExecutionStatus.SUCCEEDED, ExecutionStatus.CANCELLED, ExecutionStatus.FAILED):
                     return await self._finish_terminal_recovery(current, receipt)
-                expected_revision = current.revision
+                if current.status is ExecutionStatus.FINALIZING or _is_standalone_prepared_terminal(current):
+                    expected_revision = current.revision
+                else:
+                    return await self._replay_recovery(receipt)
             else:
                 return await self._replay_recovery(receipt)
         if not self._accepting:
@@ -6818,11 +8071,10 @@ class LocalExecutionBackend:
             instructions, source_domain=PersistenceDomain.CHECKPOINT,
         )
 
-    async def commit_repository_instruction_barrier(
+    async def commit_repository_instruction_overlay(
         self,
         execution: ExecutionRecord,
         overlay: RepositoryInstructions,
-        barrier: RepositoryInstructionBarrier,
         *,
         producer_generation: int | None = None,
     ) -> ExecutionRecord:
@@ -6832,34 +8084,9 @@ class LocalExecutionBackend:
         if owner is not None:
             owner.attempt = None
         await self.promote_pending_execution(execution.execution_id)
-        existing = tuple(
-            item
-            for item in execution.recovery.repository_instruction_barriers
-            if item.agent_run_id == barrier.agent_run_id
-            and item.tool_call_id == barrier.tool_call_id
-        )
-        if existing:
-            if existing[0] != barrier:
-                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            current = await self._execution.executions.get_recovery(
-                execution.execution_id,
-                tenant_id=self._tenant_id,
-            )
-            if current is None or current.recovery is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            current_overlay = await self.load_repository_instructions(
-                current.recovery.repository_instruction_overlay
-            )
-            _validate_repository_instruction_frontier(current, current_overlay)
-            if (
-                current_overlay is None
-                or not _repository_instructions_contain(current_overlay, overlay)
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return current
         if execution.session_id is not None:
-            sessions = self._conversation.sessions
-            # Discovery knowledge can outlive a failed barrier. Persist it first
+            sessions = self._legacy_sessions()
+            # Discovery knowledge can outlive an unsuccessful overlay commit. Persist it first
             # so a committed execution pin never loses its Session scope memory,
             # including when conversation and recovery use different stores.
             await sessions.state_store.mutate(
@@ -6877,7 +8104,6 @@ class LocalExecutionBackend:
             execution,
             recovery=replace(
                 execution.recovery, repository_instruction_overlay=overlay_reference,
-                repository_instruction_barriers=(*execution.recovery.repository_instruction_barriers, barrier),
             ),
             revision=execution.revision + 1, updated_at=datetime.now(timezone.utc),
         )
@@ -6919,24 +8145,14 @@ class LocalExecutionBackend:
             )
             if current is None or current.recovery is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            matching = tuple(
-                item
-                for item in current.recovery.repository_instruction_barriers
-                if item.agent_run_id == barrier.agent_run_id
-                and item.tool_call_id == barrier.tool_call_id
+            if (current.recovery_state is not ExecutionRecoveryState.ACTIVE
+                    or current.recovery.agent_run_id != execution.recovery.agent_run_id):
+                raise
+            current_overlay = await self.load_repository_instructions(
+                current.recovery.repository_instruction_overlay
             )
-            if matching:
-                if matching[0] != barrier:
-                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
-                current_overlay = await self.load_repository_instructions(
-                    current.recovery.repository_instruction_overlay
-                )
-                _validate_repository_instruction_frontier(current, current_overlay)
-                if (
-                    current_overlay is None
-                    or not _repository_instructions_contain(current_overlay, overlay)
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            _validate_repository_instruction_overlay(current, current_overlay)
+            if _repository_instructions_contain(current_overlay, overlay):
                 return current
             raise
 
@@ -7005,6 +8221,19 @@ class LocalExecutionBackend:
             return current
         if current.status is ExecutionStatus.RECOVERY_REQUIRED:
             return current
+        owner = self._turn_owners.get(current.execution_id)
+        if owner is not None and owner.graph_turn is not None:
+            if (owner.graph_turns is None or producer_generation is None or output is not None
+                    or status not in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} or not error_code):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            if current.status is ExecutionStatus.CANCELLING:
+                status, error_code, error_diagnostics = ExecutionStatus.CANCELLED, ErrorCode.EXECUTION_CANCELLED.value, None
+            return await self._commit_attached_graph_error(
+                current, status, usage or self._captured_usage.get(current.execution_id, UsageMetrics()),
+                turn=owner.graph_turn, turns=owner.graph_turns, producer_generation=producer_generation,
+                error_code=error_code, safe_error_details=safe_error_details or {}, error_diagnostics=error_diagnostics,
+                agent_run_id=agent_run_id,
+            )
         turn_fence = self._source_turn_fence(self._turn_owners.get(current.execution_id))
         if turn_fence is not None and not self._same_terminal_storage_group(
             current, status=status, agent_run_id=agent_run_id,
@@ -7618,7 +8847,7 @@ class LocalExecutionBackend:
             self._execution.executions.state_store,
         ]
         if execution.session_id is not None:
-            stores.append(self._conversation.sessions.state_store)
+            stores.append(self._legacy_sessions().state_store)
         if agent_run_id is not None:
             if execution.durable_trace:
                 archive = self._run_stores[PersistenceDomain.TRACE]

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Rule overlays retain Asset history without changing accepted barrier semantics."""
+"""Rule overlays retain Asset history without changing accepted overlay semantics."""
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -17,14 +17,14 @@ from linktools.ai.asset import AssetKey, AssetStore, SqlAssetBackend
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import ExecutionStatus, canonical_json_bytes, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.execution import ExecutionRecord, ExecutionRecoveryDetail, RepositoryInstructionBarrier
+from linktools.ai.execution import ExecutionRecord, ExecutionRecoveryDetail
 from linktools.ai.migrate import provision_asset_database
-from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
+from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.snapshots import SnapshotLimits
 from linktools.ai.runtime import Runtime
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.inputs import RepositoryInstructionPayload
-from linktools.ai.runtime._repository_instructions import _RepositoryInstructionBoundary, _validate_repository_instruction_frontier
+from linktools.ai.runtime._repository_instructions import _validate_repository_instruction_overlay
 from linktools.ai.spec import RepositoryInstructionDocument, RepositoryInstructions
 from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, StorageOverlay, StoredPayload
 from linktools.ai.workspace import Workspace
@@ -41,7 +41,7 @@ pytestmark = pytest.mark.asyncio
 class _OverlayPort:
     load_repository_instructions = LocalExecutionBackend.load_repository_instructions
     _store_repository_instructions = LocalExecutionBackend._store_repository_instructions
-    commit_repository_instruction_barrier = LocalExecutionBackend.commit_repository_instruction_barrier
+    commit_repository_instruction_overlay = LocalExecutionBackend.commit_repository_instruction_overlay
 
     def __init__(self, state: Persistence, assets: AssetStore) -> None:
         self._context_archive = _archive(state, {"rules": assets})
@@ -52,16 +52,6 @@ class _OverlayPort:
 
     async def promote_pending_execution(self, execution_id: str) -> None:
         assert execution_id == "execution"
-
-
-def _barrier(identity: str = "call") -> RepositoryInstructionBarrier:
-    return RepositoryInstructionBarrier("run", identity, canonical_sha256({"path": "pkg/file.txt"}))
-
-
-def _frontier(execution: ExecutionRecord, overlay: RepositoryInstructions) -> str:
-    boundary = _RepositoryInstructionBoundary(None, execution, None, overlay)
-    boundary.render_overlay()
-    return boundary.approval_frontiers((ToolCallPart("read_file", {"path": "pkg/file.txt"}, "call"),))["call"]
 
 
 async def _create_execution(state: Persistence) -> ExecutionRecord:
@@ -86,8 +76,7 @@ async def test_overlay_keeps_fixed_assets_and_all_original_semantic_digests(tmp_
         overlay = await _mixed_overlay(assets)
         execution = await _create_execution(state)
         port = _OverlayPort(state, assets)
-        barrier = _barrier()
-        committed = await port.commit_repository_instruction_barrier(execution, overlay, barrier)
+        committed = await port.commit_repository_instruction_overlay(execution, overlay)
         reference = committed.recovery.repository_instruction_overlay
         wire = reference.payload.decode()
         assert wire["semantic_digest"] == canonical_sha256(overlay.to_payload())
@@ -98,11 +87,7 @@ async def test_overlay_keeps_fixed_assets_and_all_original_semantic_digests(tmp_
         assert {item["content"] for item in wire["instructions"]["documents"] if "content" in item} == {
             "accepted Workspace text", "accepted custom text",
         }
-        assert committed.recovery.repository_instruction_barriers == (barrier,)
-        expected_frontier = canonical_sha256({"initial": [], "overlay": [
-            [document.source, document.scope, document.content] for document in overlay.documents
-        ]})
-        assert _frontier(committed, overlay) == expected_frontier
+        _validate_repository_instruction_overlay(committed, overlay)
         await assets.put(key, b"changed Rule")
         await assets.delete(key)
         await state.purge_unreferenced_objects((), exclusive=Offline())
@@ -110,11 +95,10 @@ async def test_overlay_keeps_fixed_assets_and_all_original_semantic_digests(tmp_
         retained = await state.execution.executions.get_recovery("execution", tenant_id="tenant")
         restored = await cold.load_repository_instructions(retained.recovery.repository_instruction_overlay)
         assert restored.to_payload() == overlay.to_payload()
-        _validate_repository_instruction_frontier(retained, restored)
-        assert _frontier(retained, restored) == expected_frontier
+        _validate_repository_instruction_overlay(retained, restored)
 
 
-@pytest.mark.parametrize("outcome", ("acknowledgement_lost", "conflict", "historical_barrier"))
+@pytest.mark.parametrize("outcome", ("acknowledgement_lost", "conflict", "historical_overlay"))
 async def test_overlay_commit_uses_durable_readback_without_replacing_a_newer_frontier(
     monkeypatch: pytest.MonkeyPatch, outcome: str,
 ) -> None:
@@ -123,7 +107,6 @@ async def test_overlay_commit_uses_durable_readback_without_replacing_a_newer_fr
         first = await _rules(assets)
         execution = await _create_execution(state)
         port = _OverlayPort(state, assets)
-        barrier = _barrier()
         repository = state.execution.executions
         if outcome == "acknowledgement_lost":
             original = repository.compare_and_swap
@@ -135,22 +118,24 @@ async def test_overlay_commit_uses_durable_readback_without_replacing_a_newer_fr
                 raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
 
             monkeypatch.setattr(repository, "compare_and_swap", committed_then_lost)
-            committed = await port.commit_repository_instruction_barrier(execution, first, barrier)
-            assert committed.recovery.repository_instruction_barriers == (barrier,)
+            committed = await port.commit_repository_instruction_overlay(execution, first)
             assert (await port.load_repository_instructions(committed.recovery.repository_instruction_overlay)).to_payload() == first.to_payload()
         else:
-            committed = await port.commit_repository_instruction_barrier(execution, first, barrier)
+            committed = await port.commit_repository_instruction_overlay(execution, first)
             if outcome == "conflict":
                 with pytest.raises(AIError) as failure:
-                    await port.commit_repository_instruction_barrier(execution, first, _barrier("different-call"))
+                    other = RepositoryInstructions((*first.documents,
+                        RepositoryInstructionDocument("rule:uncommitted", "pkg", "uncommitted text"),
+                    ))
+                    await port.commit_repository_instruction_overlay(execution, other)
                 assert failure.value.code is ErrorCode.STORAGE_CONFLICT
                 assert (await repository.get_recovery("execution", tenant_id="tenant")).recovery == committed.recovery
             else:
                 latest = RepositoryInstructions((*first.documents,
                     RepositoryInstructionDocument("rule:later", "pkg/deep", "later accepted custom text"),
                 ))
-                extended = await port.commit_repository_instruction_barrier(committed, latest, _barrier("later-call"))
-                replayed = await port.commit_repository_instruction_barrier(committed, first, barrier)
+                extended = await port.commit_repository_instruction_overlay(committed, latest)
+                replayed = await port.commit_repository_instruction_overlay(committed, first)
                 assert replayed.recovery == extended.recovery
                 assert (await port.load_repository_instructions(replayed.recovery.repository_instruction_overlay)).to_payload() == latest.to_payload()
 
@@ -206,9 +191,8 @@ async def test_overlay_snapshot_keeps_asset_references_and_accepted_inline_bodie
         async with Persistence.open("overlay-snapshot", storage=configuration, tenant_id="tenant") as state:
             overlay = await _mixed_overlay(assets)
             port = _OverlayPort(state, assets)
-            committed = await port.commit_repository_instruction_barrier(await _create_execution(state), overlay, _barrier())
+            committed = await port.commit_repository_instruction_overlay(await _create_execution(state), overlay)
             await state.purge_unreferenced_objects((), exclusive=Offline())
-            expected_frontier = _frontier(committed, overlay)
     finally:
         await assets.close()
     transport = InMemoryObjectStore("overlay-snapshot")
@@ -227,8 +211,7 @@ async def test_overlay_snapshot_keeps_asset_references_and_accepted_inline_bodie
             port = _OverlayPort(state, reopened)
             restored = await port.load_repository_instructions(retained.recovery.repository_instruction_overlay)
             assert restored.to_payload() == overlay.to_payload()
-            _validate_repository_instruction_frontier(retained, restored)
-            assert _frontier(retained, restored) == expected_frontier
+            _validate_repository_instruction_overlay(retained, restored)
             assert RepositoryInstructionPayload.from_reference(retained.recovery.repository_instruction_overlay).semantic_digest == canonical_sha256(overlay.to_payload())
     finally:
         await reopened.close()

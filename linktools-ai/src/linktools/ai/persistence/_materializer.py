@@ -32,16 +32,19 @@ from ._memory import InMemoryStateStore
 from ._object_router import _RuntimeObjectRouter, build_runtime_object_router
 from ._plan import PersistenceDomain, PersistencePlan
 from .repositories import (
+    ExecutionRepositoryImpl,
     OperationLedgerRepositoryImpl,
+    SessionRepositoryImpl,
     ToolRepositoryImpl,
     RepositoryBase,
     build_repository_bundle,
 )
 from ._resource_scope import (
-    MemoryResource, StorageResourceRequest, StorageResourceScope,
+    MemoryResource, SqlResource, StorageResourceRequest, StorageResourceScope,
 )
 from ._retention import RuntimeRetentionController
 from ._sql import SqlStateStore
+from ._session_turn_sql import SqlSessionTurnReader, SqlSessionTurns
 from ._step_materializer import build_runtime_agent_run_store
 from .runs import RuntimeAgentRunStore
 from .state import StateStore, state_store_key
@@ -75,6 +78,7 @@ _logger = environ.get_logger("ai.runtime.state.materializer")
 @dataclass(frozen=True, slots=True)
 class _MaterializedRuntimeStorage:
     conversation: ConversationRepositories
+    session_turn_reader: SqlSessionTurnReader | None
     execution: ExecutionRepositories
     memory: MemoryRepositories
     artifact: ArtifactRepositories
@@ -126,6 +130,10 @@ async def materialize_runtime_storage(
             name=domain.value,
             route=plan.route(domain),
             configure_schema=partial(configure_schema, domain),
+            defer_write_access_probe=(
+                not read_only and domain is PersistenceDomain.TRACE
+                and plan.route(PersistenceDomain.CONVERSATION).kind in {"sqlite", "sql"}
+            ),
             native_content_index=domain in {
                 PersistenceDomain.CONVERSATION, PersistenceDomain.EXECUTION,
                 PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT,
@@ -157,6 +165,7 @@ async def materialize_runtime_storage(
         requests, namespace=namespace, tenant_id=tenant_id, read_only=read_only,
     )
     cleanups.append(resources.close)
+    session_turn_reader = None
     for domain, resource in zip(PersistenceDomain, resources.resources):
         selected = plan.route(domain).cache
         cache = selected if isinstance(selected, CacheBackend) else None
@@ -175,6 +184,9 @@ async def materialize_runtime_storage(
                 store_key=state_store_key(namespace, tenant_id, domain.value),
             )
             sql_contexts[domain] = resource.context
+        if domain is PersistenceDomain.CONVERSATION and isinstance(resource, SqlResource):
+            turn_store = SqlSessionTurnReader if read_only else SqlSessionTurns
+            session_turn_reader = turn_store(resource.context, resource.metadata, namespace=namespace, tenant_id=tenant_id)
         stores[domain] = store
         cleanups.append(store.close)
         register_cleanup((store.close,))
@@ -197,13 +209,19 @@ async def materialize_runtime_storage(
         await store.initialize()
 
     execution_store = stores[PersistenceDomain.EXECUTION]
-    atomic_domains = {PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}
-    for domain in atomic_domains:
-        if stores[domain].storage_group is not execution_store.storage_group:
-            raise AIError(
-                ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
-                f"{domain.value} and execution must share a StateStorageGroup",
-            )
+    execution_group = execution_store.storage_group
+    if stores[PersistenceDomain.CHECKPOINT].storage_group is not execution_group:
+        raise AIError(
+            ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+            "checkpoint and execution must share a StateStorageGroup",
+        )
+    trace_store = stores[PersistenceDomain.TRACE]
+    if (trace_store.storage_group is not execution_group
+            and (session_turn_reader is None or not isinstance(trace_store, SqlStateStore))):
+        raise AIError(
+            ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+            "A separate Trace route requires SQL Conversation and Trace storage",
+        )
 
     bundles: dict[PersistenceDomain, dict[str, RepositoryBase]] = {
         domain: build_repository_bundle(
@@ -212,6 +230,10 @@ async def materialize_runtime_storage(
         for domain in PersistenceDomain
         if domain not in {PersistenceDomain.TASK, PersistenceDomain.TRACE}
     }
+    if session_turn_reader is None:
+        bundles[PersistenceDomain.CONVERSATION]["sessions"] = SessionRepositoryImpl(
+            stores[PersistenceDomain.CONVERSATION], namespace=namespace, tenant_id=tenant_id,
+        )
     task_store = stores[PersistenceDomain.TASK]
     bundles[PersistenceDomain.TASK] = {
         "operations": OperationLedgerRepositoryImpl(
@@ -256,6 +278,9 @@ async def materialize_runtime_storage(
         namespace=namespace, tenant_id=tenant_id,
     )
     register_cleanup((objects.drain_reads, objects.preflight_close))
+    executions = repositories.execution.executions
+    if type(executions) is ExecutionRepositoryImpl:
+        executions.bind_archive_object_reader(partial(objects.read_archive_object, PersistenceDomain.EXECUTION))
     tools = repositories.checkpoint.tools
     if type(tools) is ToolRepositoryImpl:
         tools.bind_archive_object_reader(partial(objects.read_archive_object, PersistenceDomain.CHECKPOINT))
@@ -271,6 +296,16 @@ async def materialize_runtime_storage(
     )
     register_cleanup((run_store.preflight_close, run_store.close))
     await run_store.initialize()
+    if session_turn_reader is not None:
+        transcript = run_store.conversation_persistence.archive.transcript_repository
+        native = transcript._native_messages
+        if native is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY, "SQL session turns require native message storage")
+        conversation_store = stores[PersistenceDomain.CONVERSATION]
+        session_turn_reader.bind_transcript_reader(conversation_store, transcript.content_archive, native.capture_message_roots)
+        session_turn_reader.bind_input_reader(partial(objects.read_object, PersistenceDomain.EXECUTION))
+        if isinstance(session_turn_reader, SqlSessionTurns):
+            session_turn_reader.bind_transcript_writer(conversation_store, transcript.content_archive, native)
     retention = RuntimeRetentionController(
         conversation=repositories.conversation,
         execution=repositories.execution,
@@ -296,6 +331,7 @@ async def materialize_runtime_storage(
     )
     return _MaterializedRuntimeStorage(
         conversation=repositories.conversation,
+        session_turn_reader=session_turn_reader,
         execution=repositories.execution,
         memory=repositories.memory,
         artifact=repositories.artifact,
@@ -318,7 +354,7 @@ def _repositories(
     try:
         return _RuntimeRepositories(
             conversation=ConversationRepositories(
-                cast("SessionRepository", bundles[PersistenceDomain.CONVERSATION]["sessions"]),
+                cast("SessionRepository | None", bundles[PersistenceDomain.CONVERSATION].get("sessions")),
                 cast("ConversationHistoryRepository", bundles[PersistenceDomain.CONVERSATION]["histories"]),
                 cast("OperationLedgerRepository", bundles[PersistenceDomain.CONVERSATION]["operations"]),
             ),

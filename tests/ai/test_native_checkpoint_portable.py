@@ -105,7 +105,7 @@ async def test_native_checkpoint_roundtrip_keeps_retry_occurrences_and_tombstone
     sequence_parameters = []
 
     def check_restore_binds(connection, cursor, statement, parameters, context, executemany):
-        if statement.startswith("INSERT INTO ai_step_sequences "):
+        if statement.startswith("INSERT INTO ai_message_sequences "):
             assert not executemany
             assert len(parameters) <= 999
             sequence_parameters.append(len(parameters))
@@ -167,8 +167,7 @@ async def test_runtime_default_checkpoint_owner_remains_native_after_restore(tmp
     async with Persistence.open("portable-runtime", storage=storage) as state:
         async with Runtime.open(persistence=state,
             features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
-            session = await runtime.agents.get().create_session("session")
-            execution = await session.start("question", idempotency_key="question")
+            execution = await runtime.agents.get().start("question", idempotency_key="question")
             assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
     objects = InMemoryObjectStore("portable")
     async with Persistence.open("portable-runtime", storage=storage, read_only=True) as reader:

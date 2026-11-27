@@ -21,14 +21,16 @@ from pydantic_ai.messages import (
     VideoUrl,
 )
 
-from ..core import JsonValue, normalize_json_value
+from ..core import JsonValue, canonical_json_bytes, normalize_json_value
 from ..errors import AIError, ErrorCode
-from . import ReferencedContent, ReferencedInputOrigin
+from ._referenced_content import ReferencedContent, ReferencedInputOrigin
 from ._wire_fields import decode_fields
 from ._json_snapshot import stable_json_snapshot
 
 
 _NATIVE_VALUE_ADAPTER = TypeAdapter(object, config=ConfigDict(ser_json_bytes="base64"))
+_MediaContent = BinaryContent | ImageUrl | AudioUrl | DocumentUrl | VideoUrl | UploadedFile
+_MEDIA_ADAPTER = TypeAdapter(_MediaContent)
 
 
 class RetiredReferencedContent(TextContent):
@@ -76,31 +78,12 @@ def encode_user_content_item(item: UserContent) -> JsonValue:
                 "metadata": normalize_json_value(item.metadata),
             }
         if isinstance(item, BinaryContent):
-            return {
-                "kind": "binary",
-                "data": base64.b64encode(item.data).decode("ascii"),
-                "media_type": item.media_type,
-                "identifier": item.identifier,
-                "vendor_metadata": normalize_json_value(item.vendor_metadata),
-            }
-        if isinstance(item, (ImageUrl, AudioUrl, DocumentUrl, VideoUrl)):
-            return {
-                "kind": item.kind,
-                "url": item.url,
-                "media_type": item.media_type,
-                "identifier": item.identifier,
-                "force_download": item.force_download,
-                "vendor_metadata": normalize_json_value(item.vendor_metadata),
-            }
-        if isinstance(item, UploadedFile):
-            return {
-                "kind": "uploaded-file",
-                "file_id": item.file_id,
-                "provider_name": item.provider_name,
-                "media_type": item.media_type,
-                "identifier": item.identifier,
-                "vendor_metadata": normalize_json_value(item.vendor_metadata),
-            }
+            # User-input objects use standard Base64; SDK message archives have their own wire format.
+            wire = _MEDIA_ADAPTER.dump_python(item, mode="json", exclude={"data"}, warnings="error")
+            wire["data"] = base64.b64encode(item.data).decode("ascii")
+            return normalize_json_value(wire)
+        if isinstance(item, _MediaContent):
+            return normalize_json_value(_MEDIA_ADAPTER.dump_python(item, mode="json", warnings="error"))
         if isinstance(item, CachePoint):
             return {"kind": "cache-point", "ttl": item.ttl}
     except (TypeError, ValueError) as error:
@@ -177,36 +160,11 @@ def decode_user_content_item(value: object) -> UserContent:
                 raise ValueError("retired reference descriptor is invalid")
             return RetiredReferencedContent(reference, kwargs["content"])
         return TextContent(**kwargs)
-    if kind == "binary":
-        return BinaryContent(**_content_fields(value, BinaryContent, {
-            "data": lambda raw: base64.b64decode(_required_string(raw), validate=True),
-            "media_type": _media_type,
-            "identifier": _optional_string,
-            "vendor_metadata": lambda raw: raw,
-        }))
-    url_types = {
-        "image-url": ImageUrl,
-        "audio-url": AudioUrl,
-        "document-url": DocumentUrl,
-        "video-url": VideoUrl,
-    }
-    url_type = url_types.get(kind)
-    if url_type is not None:
-        return url_type(**_content_fields(value, url_type, {
-            "url": _required_string,
-            "media_type": _optional_string,
-            "force_download": _force_download,
-            "identifier": _optional_string,
-            "vendor_metadata": lambda raw: raw,
-        }))
-    if kind == "uploaded-file":
-        return UploadedFile(**_content_fields(value, UploadedFile, {
-            "file_id": _required_string,
-            "provider_name": _required_string,
-            "media_type": _optional_string,
-            "identifier": _optional_string,
-            "vendor_metadata": lambda raw: raw,
-        }))
+    if kind in {"binary", "image-url", "audio-url", "document-url", "video-url", "uploaded-file"}:
+        content = _MEDIA_ADAPTER.validate_json(canonical_json_bytes(value), strict=True)
+        if isinstance(content, BinaryContent) and not content.media_type:
+            raise ValueError("binary content media type is invalid")
+        return content
     if kind == "cache-point":
         return CachePoint(**_content_fields(value, CachePoint, {"ttl": _cache_ttl}))
     raise UnsupportedUserContentKind("unknown user content kind")
@@ -225,19 +183,6 @@ def _content_fields(
 def _required_string(value: object) -> str:
     if not isinstance(value, str):
         raise ValueError("user content string is invalid")
-    return value
-
-
-def _media_type(value: object) -> str:
-    result = _required_string(value)
-    if not result:
-        raise ValueError("binary content media type is invalid")
-    return result
-
-
-def _force_download(value: object) -> object:
-    if value not in {False, True, "allow-local"}:
-        raise ValueError("URL download mode is invalid")
     return value
 
 

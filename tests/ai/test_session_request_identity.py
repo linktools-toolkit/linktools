@@ -24,10 +24,9 @@ async def _canonicalize(value):
     return value
 
 
-@pytest.fixture(params=("memory", "sqlite"))
-def storage(request: pytest.FixtureRequest, tmp_path: "Path") -> PersistenceStorage:
-    return (PersistenceStorage.in_memory() if request.param == "memory"
-            else PersistenceStorage.sqlite(tmp_path / "state.db"))
+@pytest.fixture
+def storage() -> PersistenceStorage:
+    return PersistenceStorage.in_memory()
 
 
 @pytest.mark.parametrize("key", ("update", "é" * 64))
@@ -255,3 +254,104 @@ async def test_session_request_identity_public_operation_helpers_preserve_contra
             assert await state.conversation.operations.compare_and_swap(
                 receipt.operation_id, tenant_id="tenant", expected_status=receipt.status,
                 next_record=candidate) == candidate
+
+
+@pytest.mark.parametrize("fault", ("unknown", "cancel"))
+async def test_native_fork_replays_committed_request_after_source_and_child_change(
+    tmp_path: "Path", monkeypatch: pytest.MonkeyPatch, fault: str,
+) -> None:
+    import asyncio
+
+    from linktools.ai.core import TenantAuthorizationPolicy
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
+
+    class HostAuthorization(TenantAuthorizationPolicy):
+        pass
+
+    storage = PersistenceStorage.sqlite(tmp_path / "native.db")
+    options = {"principal": _PRINCIPAL, "expected_revision": 0, "idempotency_key": "fork"}
+    async with (
+        Persistence.open("session-identity", storage=storage, tenant_id="tenant") as state,
+        Runtime.open(persistence=state, features=RuntimeFeatures("native"), authorization=HostAuthorization()) as runtime,
+    ):
+        sessions = runtime.sessions
+        await sessions.create_turn_session("session", principal=_PRINCIPAL, metadata={"initial": True})
+        context = state.session_turns._context
+        mutate = type(context).run_mutation
+
+        async def commit_then_fault(self, operation, **kwargs):
+            result = await mutate(self, operation, **kwargs)
+            if self is not context or kwargs.get("domain") != "session.fork":
+                return result
+            assert result
+            if fault == "cancel":
+                raise asyncio.CancelledError()
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(type(context), "run_mutation", commit_then_fault)
+            with pytest.raises(asyncio.CancelledError if fault == "cancel" else AIError) as lost:
+                await sessions.fork_turn_session("session", "child", **options)
+            if fault == "unknown":
+                assert lost.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
+
+    async with (
+        Persistence.open("session-identity", storage=storage, tenant_id="tenant") as state,
+        Runtime.open(persistence=state, features=RuntimeFeatures("native"), authorization=HostAuthorization()) as runtime,
+    ):
+        sessions = runtime.sessions
+        child = await state.session_turns.get_session("child")
+        assert child["config_json"]["metadata"] == {"initial": True}
+        assert await sessions.update_turn_session(
+            "session", principal=_PRINCIPAL, expected_revision=1, metadata={"source": True},
+        )
+        assert await sessions.update_turn_session(
+            "child", principal=_PRINCIPAL, expected_revision=0, metadata={"child": True},
+        )
+        assert not await sessions.update_turn_session(
+            "child", principal=_PRINCIPAL, expected_revision=0, metadata={"stale": True},
+        )
+        changed = await state.session_turns.get_session("child")
+        assert changed["config_json"]["metadata"] == {"child": True}
+        assert changed["lineage_json"] == child["lineage_json"]
+        source = await state.session_turns.get_session("session")
+        assert await sessions.fork_turn_session("session", "child", **options)
+        assert await state.session_turns.get_session("child") == changed
+        assert await state.session_turns.get_session("session") == source
+        with pytest.raises(AIError) as conflict:
+            await sessions.fork_turn_session("session", "child", **(options | {"idempotency_key": "different"}))
+        assert conflict.value.code is ErrorCode.STORAGE_CONFLICT
+
+
+async def test_native_fork_keeps_source_revision_fence(
+    tmp_path: "Path", monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from linktools.ai.core import TenantAuthorizationPolicy
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
+
+    class HostAuthorization(TenantAuthorizationPolicy):
+        pass
+
+    storage = PersistenceStorage.sqlite(tmp_path / "native.db")
+    async with (
+        Persistence.open("session-identity", storage=storage, tenant_id="tenant") as state,
+        Runtime.open(persistence=state, features=RuntimeFeatures("native"), authorization=HostAuthorization()) as runtime,
+    ):
+        sessions = runtime.sessions
+        await sessions.create_turn_session("session", principal=_PRINCIPAL)
+        turns = state.session_turns
+        original = turns.fork_session
+
+        async def race(*args, **kwargs):
+            assert await sessions.update_turn_session(
+                "session", principal=_PRINCIPAL, expected_revision=0, metadata={"winner": True},
+            )
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(turns, "fork_session", race)
+        assert not await sessions.fork_turn_session(
+            "session", "child", principal=_PRINCIPAL, expected_revision=0, idempotency_key="fork",
+        )
+        assert await turns.get_session("child") is None
+        source = await turns.get_session("session")
+        assert source["revision"] == 1 and source["config_json"]["metadata"] == {"winner": True}

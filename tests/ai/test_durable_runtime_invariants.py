@@ -355,7 +355,7 @@ async def test_execution_retention_releases_objects_after_execution_lookup() -> 
             get_in_transaction=execution_get_in_transaction,
             state_store=SimpleNamespace(read=read_source),
         )),
-        conversation=SimpleNamespace(),
+        conversation=SimpleNamespace(sessions=None),
         namespace="runtime",
         objects=SimpleNamespace(release_object_scope=release_object_scope),
         plan=PersistencePlan(trace=StorageRoute.transient()),

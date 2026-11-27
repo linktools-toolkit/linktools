@@ -25,7 +25,7 @@ async def test_native_index_union_batches_both_kinds_with_bounded_parameters(tmp
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'batch.db'}")
     context = create_sql_storage_context(engine)
     metadata = build_step_sql_metadata()
-    sequences, messages = (metadata.tables[name] for name in ("ai_step_sequences", "ai_step_messages"))
+    sequences, messages = (metadata.tables[name] for name in ("ai_message_sequences", "ai_messages"))
     store = native_store_key("index", "tenant")
     identity = {"store_key": store, "store_locator": native_store_locator(store)}
     rows = tuple({"sha256": _identity(str(i)), "message_sha256": _identity(str(i)),
@@ -66,7 +66,7 @@ async def test_native_index_union_preserves_required_partial_and_store_boundarie
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'source.db'}")
     context = create_sql_storage_context(engine)
     metadata = build_step_sql_metadata()
-    sequences, messages = (metadata.tables[name] for name in ("ai_step_sequences", "ai_step_messages"))
+    sequences, messages = (metadata.tables[name] for name in ("ai_message_sequences", "ai_messages"))
     store = native_store_key("index", "tenant")
     actual = native_store_key("index", "other") if damage in {"foreign_store", "raw_store"} else store
     identity = {"store_key": actual, "store_locator": native_store_locator(store if damage == "raw_store" else actual)}

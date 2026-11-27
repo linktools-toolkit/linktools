@@ -56,10 +56,6 @@ from ..persistence.repositories import SessionRepositoryImpl
 from ..persistence.repositories import ExecutionRepositoryImpl
 from ..persistence.state import active_state_scope
 
-
-
-
-
 class _SessionExecutionService(ExecutionService, Protocol):
     async def lookup_session_admission(
         self, session_id: str, *, principal: Principal, idempotency_key: str,
@@ -82,24 +78,6 @@ class _SessionExecutionService(ExecutionService, Protocol):
 
 
 class _SessionTranscriptStore(Protocol):
-    def iter_conversation_messages(
-        self,
-        *,
-        history_id: str | None,
-        agent_run_id: str,
-        tenant_id: str,
-    ) -> AsyncIterator[object]: ...
-
-    def iter_conversation_message_range(
-        self,
-        *,
-        history_id: str | None,
-        agent_run_id: str,
-        tenant_id: str,
-        start: int,
-        end: int,
-    ) -> AsyncIterator[object]: ...
-
     async def load_conversation_model_context(
         self,
         *,
@@ -165,8 +143,12 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
     async def require_available(self) -> None:
         if self._current_policy is None:
             await super().require_available()
-        elif not (await self._current_policy()).session.enabled:
+            return
+        session = (await self._current_policy()).session
+        if not session.enabled:
             raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING, "Session management is disabled")
+        if session.checkpoints:
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING, "Session checkpoints require native SQL sessions")
 
     async def _authorize_resume_execution(self, session_id: str, principal: Principal) -> None:
         # The built-in execution owner authorizes the actual new or replayed
@@ -591,9 +573,21 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
                             active.execution_id if active is not None else owner.execution_id)
             return None, execution_id
 
+        changed = asyncio.Event()
+
+        async def wait_for_change(delay: float) -> None:
+            passive = asyncio.timeout(delay)
+            try:
+                async with passive:
+                    await changed.wait()
+            except TimeoutError:
+                if not passive.expired():
+                    raise
+
         async def observe_inactivity() -> SessionView:
             retry_delay = 1.0
             while True:
+                changed.clear()
                 observation = asyncio.timeout(observation_timeout_seconds)
                 try:
                     async with observation:
@@ -607,7 +601,7 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
                 if view is not None:
                     return view
                 if execution_id is None:
-                    await asyncio.sleep(retry_delay)
+                    await wait_for_change(retry_delay)
                     retry_delay = min(30.0, retry_delay * 2)
                     continue
                 waiter = self._local_waiter
@@ -620,10 +614,12 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
                         if not wake.expired():
                             raise
                 else:
-                    await asyncio.sleep(30)
+                    # The worker can exit before its publication/release is visible.
+                    await wait_for_change(30)
                 retry_delay = 1.0
 
         deadline = asyncio.timeout(timeout_seconds)
+        unsubscribe = self.observe_changes(session_id, changed.set)
         try:
             async with deadline:
                 view = await observe_inactivity()
@@ -634,6 +630,8 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
             if not deadline.expired():
                 raise
             raise AIError(ErrorCode.WAIT_TIMEOUT, safe_details={"scope": "session", "resource_id": session_id}) from error
+        finally:
+            unsubscribe()
 
     async def history(
         self,
@@ -804,59 +802,6 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
                 checkpoint_sequence=record.continuation.checkpoint_sequence,
                 projection_digest=record.continuation.projection_digest,
             )
-
-    async def _iter_session_messages(
-        self,
-        session_id: str,
-        *,
-        principal: Principal,
-    ) -> AsyncIterator[object]:
-        async with self.consume_session(session_id, principal.tenant_id):
-            record = await self.read_authorized(
-                session_id, principal, AuthorizationAction.SESSION_READ
-            )
-            if self._transcript_store is None or record.continuation is None:
-                return
-            history_id = record.continuation.history_id or record.history_id
-            message_count = record.continuation.message_count
-            if message_count is None:
-                messages = self._transcript_store.iter_conversation_messages(
-                    history_id=history_id,
-                    agent_run_id=record.continuation.agent_run_id,
-                    tenant_id=self._runtime_conversation.sessions.tenant_id,
-                )
-            else:
-                messages = self._transcript_store.iter_conversation_message_range(
-                    history_id=history_id,
-                    agent_run_id=record.continuation.agent_run_id,
-                    tenant_id=self._runtime_conversation.sessions.tenant_id,
-                    start=0,
-                    end=message_count,
-                )
-            async for message in messages:
-                yield message
-
-    def iter_session_messages(
-        self,
-        session_id: str,
-        *,
-        principal: Principal,
-    ) -> AsyncIterator[object]:
-        return self._iter_session_messages(session_id, principal=principal)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     async def _read_session_record(self, session_id: str, *, tenant_id: str) -> SessionRecord | None:
         repository = self._runtime_conversation.sessions

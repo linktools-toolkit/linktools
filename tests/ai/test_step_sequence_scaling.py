@@ -55,8 +55,8 @@ async def test_cumulative_snapshot_sequences_grow_linearly_and_reopen_in_two_rea
         assert traffic.count == 0
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots")) == size
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == size
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == size
+            assert await connection.scalar(text("SELECT count(*) FROM ai_messages")) == size
+            assert await connection.scalar(text("SELECT count(*) FROM ai_message_sequences")) == size
             assert await connection.scalar(text(
                 "SELECT count(DISTINCT sequence_root) FROM ai_step_snapshots"
             )) == size
@@ -163,8 +163,8 @@ async def test_sequence_sharing_preserves_repetition_branches_truncation_and_cro
         assert traffic.count == len(cases)
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots")) == len(cases)
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 4
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 6
+            assert await connection.scalar(text("SELECT count(*) FROM ai_messages")) == 4
+            assert await connection.scalar(text("SELECT count(*) FROM ai_message_sequences")) == 6
             assert await connection.scalar(text(
                 "SELECT count(DISTINCT sequence_root) FROM ai_step_snapshots"
             )) == 4
@@ -209,19 +209,19 @@ async def test_sequence_structure_and_address_resolution_after_reopening(tmp_pat
             root = await connection.scalar(text("SELECT sequence_root FROM ai_step_snapshots"))
             if damage == "missing-child":
                 await connection.execute(text(
-                    "DELETE FROM ai_step_sequences WHERE sha256 = "
-                    "(SELECT left_sha256 FROM ai_step_sequences WHERE sha256 = :root)"
+                    "DELETE FROM ai_message_sequences WHERE sha256 = "
+                    "(SELECT left_sha256 FROM ai_message_sequences WHERE sha256 = :root)"
                 ), {"root": root})
             elif damage == "wrong-count":
                 await connection.execute(text(
-                    "UPDATE ai_step_sequences SET tree_count = tree_count + 2 WHERE sha256 = :root"
+                    "UPDATE ai_message_sequences SET tree_count = tree_count + 2 WHERE sha256 = :root"
                 ), {"root": root})
             else:
                 other = "f" * 64 if damage == "missing-message" else await connection.scalar(text(
-                    "SELECT message_sha256 FROM ai_step_sequences WHERE sha256 <> :root LIMIT 1"
+                    "SELECT message_sha256 FROM ai_message_sequences WHERE sha256 <> :root LIMIT 1"
                 ), {"root": root})
                 await connection.execute(text(
-                    "UPDATE ai_step_sequences SET message_sha256 = :other WHERE sha256 = :root"
+                    "UPDATE ai_message_sequences SET message_sha256 = :other WHERE sha256 = :root"
                 ), {"other": other, "root": root})
         if damage == "repointed-message":
             # The stored pointer is authoritative; reading does not recompute
@@ -259,7 +259,7 @@ def test_sequence_read_compiles_for_supported_dialects_without_unbounded_mysql_e
     }])
     assert query is not None
     sql = str(query.compile(dialect=dialect, compile_kwargs={"literal_binds": True})).upper()
-    assert "AI_STEP_SEQUENCES" in sql and "AI_STEP_MESSAGES" in sql
+    assert "AI_MESSAGE_SEQUENCES" in sql and "AI_MESSAGES" in sql
     if dialect_name == "mysql":
         assert "WITH" not in sql and "RECURSIVE" not in sql
         assert "UNION ALL" in sql
@@ -377,7 +377,7 @@ async def test_publication_receipts_are_reused_only_within_their_live_owner_tran
         await store.save_snapshot(snapshot)
         # Successful immutable writes already establish the publication closure.
         assert not projections
-        assert not any("ai_step_messages.message" in sql or "ai_step_messages.payload_json" in sql
+        assert not any("ai_messages.message" in sql or "ai_messages.payload_json" in sql
                        for sql in projections)
         for receipt, session in zip(receipts, sessions):
             with pytest.raises(ValueError, match="active transaction"):

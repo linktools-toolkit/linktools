@@ -132,7 +132,7 @@ async def _return_during_unknown_promotion(
     assert waiting.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
     if loss.readable:
         with pytest.raises(AIError) as repeated:
-            await case.session.start("work", idempotency_key="request")
+            await case.start_or_join()
         assert repeated.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
     assert len(loss.server_tasks) == 1
     assert case.gate.effects == [execution.execution_id]
@@ -188,7 +188,7 @@ async def test_uncertain_cancel_promotion_preserves_late_known_tool_result(
             )
             _assert_known_result(completed)
             assert case.gate.effects == [execution.execution_id]
-            replay = await case.session.start("work", idempotency_key="request")
+            replay = await case.start_or_join()
             assert replay.execution_id == execution.execution_id
             assert (await replay.wait(timeout_seconds=5)).result == result.result
         await case.runtime.close()

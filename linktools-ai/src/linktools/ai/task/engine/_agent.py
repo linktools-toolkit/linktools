@@ -20,6 +20,7 @@ from ...core import (
     JsonValue,
     OperationKind,
     OperationLedgerInput,
+    OperationLedgerRecord,
     OperationStatus,
     ResourceKind,
     TaskStatus,
@@ -35,6 +36,7 @@ from ...task.deadlines import deadline_policy
 from ...task import (
     AgentTaskNode,
     Task,
+    TaskGraphAdmission,
     TaskNode,
     TaskNodeInvocation,
     TaskNodeRunControl,
@@ -43,7 +45,7 @@ from ...task import (
     TaskResultRef,
 )
 from ...inputs import decode_task_prompt_draft, merge_captured_input_files, task_prompt_draft
-from ...execution import ExecutionInputContext, StoredUserInput
+from ...execution import Execution, ExecutionInputContext, StoredUserInput
 from ...persistence.codec import encode_domain
 from ...inputs import (
     AgentTaskInput,
@@ -57,7 +59,7 @@ if TYPE_CHECKING:
     from ...runtime.agent_execution import AgentExecutionPort
     from ...core import RunBudget
     from ...task import RecoverGraphRequest, TaskNodeView
-    from ...execution import Execution, ExecutionRecord, ExecutionView
+    from ...execution import ExecutionRecord, ExecutionView
     from ...persistence import Persistence
     from ...persistence.contracts import TaskAdmissionRepository, BudgetRepository
     from ._runner import TaskNodeExecutor
@@ -180,6 +182,7 @@ class AgentTaskRunner(Generic[AppT]):
         thinking: ThinkingValue,
         idempotency_key: str,
         dependency_hold_id: str,
+        admission: TaskGraphAdmission | None = None,
     ) -> "Execution[AppT]":
         output_type: type[BaseModel] | OutputBinding | None = (
             invocation.node.output_type
@@ -195,14 +198,8 @@ class AgentTaskRunner(Generic[AppT]):
             or not issubclass(output_type, BaseModel)
         ):
             output_type = restore_output(self._agent_binding.output_mode, self._agent_binding.output_schema)
-        admissions = self._task_admissions
-        if admissions is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        admission = await admissions.get(
-            invocation.graph_id, tenant_id=invocation.principal.tenant_id,
-        )
-        if admission is None or admission.graph_id != invocation.graph_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if admission is None:
+            admission = await self._read_admission(invocation)
         if admission.budget_scope_id is not None:
             if self._budgets is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -224,10 +221,23 @@ class AgentTaskRunner(Generic[AppT]):
             budget_scope_id=admission.budget_scope_id,
             tool_effects=admission.tool_effects,
             requires_task_invocation_capture=True,
+            task_invocation=invocation,
+            task_admission=admission,
             input_context=None if invocation.node.input.get("capture_context") is None else ExecutionInputContext.from_payload(invocation.node.input["capture_context"]),
         )
         self._execution_ports[execution.execution_id] = self.execution_port
         return execution
+
+    async def _read_admission(self, invocation: TaskNodeInvocation) -> TaskGraphAdmission:
+        admissions = self._task_admissions
+        if admissions is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        admission = await admissions.get(
+            invocation.graph_id, tenant_id=invocation.principal.tenant_id,
+        )
+        if admission is None or admission.graph_id != invocation.graph_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return admission
 
     async def _get_execution(
         self, execution_id: str,
@@ -399,7 +409,6 @@ class AgentTaskRunner(Generic[AppT]):
         tenant_id: str,
         contract: Mapping[str, JsonValue],
         materializer: "ExecutionInputMaterializer | None",
-        request_identity_version: int = 2,
     ) -> TaskNode:
         """Freeze Agent input through its producer before graph execution starts."""
         port = self.execution_port
@@ -430,8 +439,7 @@ class AgentTaskRunner(Generic[AppT]):
             body["prompt"] = {
                 "kind": "stored-user-content-v1",
                 "intent": "task-admission",
-                "source_intent_digest": node.prompt_intent_digest(
-                    request_identity_version=request_identity_version),
+                "source_intent_digest": node.prompt_intent_digest(),
                 "value": encode_domain(stored),
             }
             _logger.info("task input resolved: node=%s", node.node_id)
@@ -465,6 +473,7 @@ class AgentTaskRunner(Generic[AppT]):
         task_input = AgentTaskInput.from_mapping(invocation.node.input)
         files = task_input.files
         request_identity: str | None = None
+        admission = None
         if self.input_mode == "literal" or invocation.node.input.get("capture_fixed_input") is True:
             if task_input.parameters:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -487,7 +496,8 @@ class AgentTaskRunner(Generic[AppT]):
                 task_revision=self.revision,
                 binding_digest=self._binding_digest,
             )
-            prepared = await self._node_executor().get_prepared_agent_input(invocation)
+            admission = await self._read_admission(invocation)
+            prepared = await self._node_executor().get_prepared_agent_input(invocation, admission=admission)
             if prepared is not None and prepared.input_identity != input_identity:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if invocation.execution_id is not None and prepared is None:
@@ -565,6 +575,7 @@ class AgentTaskRunner(Generic[AppT]):
                 )
                 prepared = await self._node_executor().publish_prepared_agent_input(
                     invocation,
+                    admission=admission,
                     input_identity=input_identity,
                     source_refs=context.source_refs,
                     stored_user_input=stored,
@@ -616,7 +627,7 @@ class AgentTaskRunner(Generic[AppT]):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
         if request_identity is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        execution, execution_id = await self._establish_execution(
+        execution, execution_id = await self._start_and_handoff(
             invocation,
             control,
             prompt,
@@ -625,32 +636,10 @@ class AgentTaskRunner(Generic[AppT]):
             planning=planning,
             thinking=thinking,
             idempotency_key=request_identity,
+            admission=admission,
         )
         result = await self._wait_execution(invocation, execution, execution_id, budget_scope)
         return _agent_task_result(result, execution_id)
-
-    async def _establish_execution(
-        self,
-        invocation: TaskNodeInvocation,
-        control: TaskNodeRunControl,
-        prompt: CanonicalUserInput,
-        *,
-        files: tuple[str, ...],
-        session_id: str | None,
-        planning: bool,
-        thinking: ThinkingValue,
-        idempotency_key: str,
-    ) -> tuple[object, str]:
-        return await self._start_and_handoff(
-            invocation,
-            control,
-            prompt,
-            files=files,
-            session_id=session_id,
-            planning=planning,
-            thinking=thinking,
-            idempotency_key=idempotency_key,
-        )
 
     async def _start_and_handoff(
         self,
@@ -663,8 +652,11 @@ class AgentTaskRunner(Generic[AppT]):
         planning: bool,
         thinking: ThinkingValue,
         idempotency_key: str,
+        admission: TaskGraphAdmission | None,
     ) -> tuple[object, str]:
         hold_id = f"task:{invocation.graph_id}:{invocation.node.node_id}"
+        capture_confirmed = False
+        linked_waiting = False
         if invocation.execution_id is None:
             execution = await self._start_execution(
                 invocation,
@@ -675,8 +667,28 @@ class AgentTaskRunner(Generic[AppT]):
                 thinking=thinking,
                 idempotency_key=idempotency_key,
                 dependency_hold_id=hold_id,
+                admission=admission,
             )
         else:
+            lease = invocation.task_lease
+            if lease is not None and lease.recovery_operation_id is not None:
+                operation = await self._persistence_owner.task.operations.get(
+                    lease.recovery_operation_id, tenant_id=lease.tenant_id,
+                )
+                if operation is None or lease.recovery_actor is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                capture_confirmed = await self.execution_port.recover_bound_graph_turn(
+                    invocation.execution_id, task_invocation=invocation,
+                    recovery_operation=operation, principal=lease.recovery_actor,
+                )
+                if not capture_confirmed:
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            elif session_id is not None and lease is not None:
+                disposition = await self.execution_port.resume_bound_graph_turn(
+                    invocation.execution_id, task_invocation=invocation,
+                )
+                capture_confirmed = disposition == "resumed"
+                linked_waiting = disposition == "waiting"
             with self._node_executor().confirm_execution_result(invocation.execution_id):
                 execution = await self._get_execution(
                     invocation.execution_id,
@@ -697,7 +709,15 @@ class AgentTaskRunner(Generic[AppT]):
         elif current != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await control.handoff_execution(execution_id)
-        await self._capture_invocation(execution, execution_id, invocation)
+        capture_confirmed = capture_confirmed or (
+            isinstance(execution, Execution) and execution.task_invocation_captured
+        )
+        if not capture_confirmed:
+            await self._capture_invocation(execution, execution_id, invocation)
+        if capture_confirmed or linked_waiting:
+            await self.execution_port.reconcile_bound_graph_handoff(
+                execution_id, principal=invocation.principal,
+            )
         return execution, execution_id
 
     async def _capture_invocation(
@@ -855,6 +875,15 @@ class AgentTaskRunner(Generic[AppT]):
     ) -> TaskNodeRunResult | None:
         del invocation, execution_id, resolution
         raise AIError(ErrorCode.TASK_NOT_READY)
+
+    async def settle_bound_graph_cancel(
+        self, invocation: TaskNodeInvocation, execution_id: str,
+        authority: tuple[OperationLedgerRecord, Principal],
+    ) -> bool:
+        operation, actor = authority
+        return await self.execution_port.settle_bound_graph_cancel(
+            execution_id, node_id=invocation.node.node_id, operation=operation, principal=actor,
+        )
 
     async def cancel(self, invocation: TaskNodeInvocation) -> None:
         execution_id = invocation.execution_id

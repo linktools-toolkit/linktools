@@ -40,7 +40,7 @@ async def test_same_key_race_does_not_cache_losing_payload(tmp_path: Path, monke
     async def pause_after_insert(session, **kwargs):
         nonlocal held
         result = await original(session, **kwargs)
-        if not held and kwargs["table"].name == "ai_step_messages":
+        if not held and kwargs["table"].name == "ai_messages":
             held = True
             inserted.set()
             await release.wait()
@@ -96,7 +96,7 @@ async def test_sql_aborted_retry_resubmits_before_confirming(tmp_path: Path, mon
     async def abort_first_attempt(session, **kwargs):
         nonlocal fail_once
         result = await original(session, **kwargs)
-        if fail_once and kwargs["table"].name == "ai_step_messages":
+        if fail_once and kwargs["table"].name == "ai_messages":
             fail_once = False
             error = sqlite3.OperationalError("database is locked")
             error.sqlite_errorcode = sqlite3.SQLITE_BUSY
@@ -112,7 +112,7 @@ async def test_sql_aborted_retry_resubmits_before_confirming(tmp_path: Path, mon
         assert not fail_once
         assert traffic.message_rows == 2
         async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 1
+            assert await connection.scalar(text("SELECT count(*) FROM ai_messages")) == 1
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots")) == 1
         await store.save_snapshot(replace(snapshot, idempotency_key="warm"))
         assert traffic.message_rows == 2
@@ -140,8 +140,8 @@ async def test_history_larger_than_cache_keeps_all_references(tmp_path: Path) ->
             assert len(store._confirmed_sequences) <= 3
             assert await store.latest_snapshot(run_id="run") == current
         async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 17
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 17
+            assert await connection.scalar(text("SELECT count(*) FROM ai_messages")) == 17
+            assert await connection.scalar(text("SELECT count(*) FROM ai_message_sequences")) == 17
     finally:
         await store.close()
         await engine.dispose()

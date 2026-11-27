@@ -5,6 +5,7 @@
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import BaseModel
@@ -243,8 +244,11 @@ async def test_unresolved_handle_is_honest_and_async_observation_does_not_pin_st
         return replace(port, compiled=compiled, _binding_contract=contract,
                        derivations=derivations, observed_binding=observed_binding)
 
-    runtime = SimpleNamespace(_agent_execution_port=execution_port,
-                              _compiled_agent=lambda agent_id, revision, compiled: compiled)
+    runtime = SimpleNamespace(
+        _agent_execution_port=execution_port,
+        _compiled_agent=lambda agent_id, revision, compiled: compiled,
+        sessions=SimpleNamespace(_uses_turn_sessions=False),
+    )
     handle = Agent(runtime, "new", None)
     assert handle.revision is None and handle.model is None
     with pytest.raises(AIError) as raised:

@@ -2,22 +2,27 @@
 # -*- coding: utf-8 -*-
 """Current-turn selection does not discard the current run's durable tool state."""
 
-from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 
-from linktools.ai.capability import ExecutionCapability
-from linktools.ai.core import ApprovalDecision, ApprovalStatus, ExecutionStatus
-from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.capability import SessionCapability
+from linktools.ai.core import ApprovalDecision, ExecutionStatus, Principal, TenantAuthorizationPolicy
+from linktools.ai.execution import ApprovalDecisionRequest
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime import Runtime
 from linktools.ai.workspace import ToolPermissionPolicy, Workspace, WorkspacePolicy
 
-from ._runtime_test_helpers import _Models, _UsageFunctionModel, _wait_for_committed, model_features, workspace_features
+from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features, workspace_features
+
+
+class _HostAuthorization(TenantAuthorizationPolicy):
+    """Authorize this synthetic host to manage its own Sessions."""
 
 
 @pytest.mark.asyncio
-async def test_current_turn_keeps_tool_results_across_runtime_recovery(tmp_path):
+async def test_current_turn_keeps_tool_results_across_runtime_recovery(tmp_path: Path) -> None:
     (tmp_path / "file.txt").write_text("retained tool result", encoding="utf-8")
     requests = []
 
@@ -31,40 +36,51 @@ async def test_current_turn_keeps_tool_results_across_runtime_recovery(tmp_path)
             assert len(messages) == 1
             return ModelResponse(parts=[ToolCallPart("read_file", {"path": "file.txt"}, "read")])
         assert len(requests) == 3
-        assert "retained tool result" in str(messages[-1])
+        prompts = [part.content for message in messages for part in message.parts if isinstance(part, UserPromptPart)]
+        assert prompts == ["read the file"]
+        returned, = (part for part in messages[-1].parts if isinstance(part, ToolReturnPart))
+        assert returned.tool_call_id == "read" and "retained tool result" in str(returned.content)
         assert len(messages) >= 3
         return ModelResponse(parts=[TextPart("done")])
 
     workspace = Workspace.load(tmp_path, policy=WorkspacePolicy(tool_permissions=ToolPermissionPolicy(default="ask")))
     features = workspace_features("session-context-recovery", workspace=workspace)
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
     features.agent("reader", model="default", allow_tools=("read_file",), tool_retries=0, output_retries=0)
     features = model_features(_Models(_UsageFunctionModel(model)), features)
     storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
-    async with Persistence.open("session-context-recovery", storage=storage) as state:
-        async with Runtime.open(persistence=state, features=features, metrics=None) as runtime:
-            session = runtime.agents.get("reader").session("session")
-            old = await session.start("old question")
-            assert (await old.wait(timeout_seconds=5)).result.output == {"text": "old answer"}
-            execution = await session.start("read the file", session_context="current_turn")
-            tenant = runtime.tenant_id
-            await _wait_for_committed(
-                lambda: state.execution.executions.get(execution.execution_id, tenant_id=tenant),
-                lambda record: record is not None and record.status is ExecutionStatus.WAITING_DEFERRED,
-            )
-            approvals = await state.checkpoint.approvals.list_pending(execution.execution_id, tenant_id=tenant)
-            assert len(approvals) == 1
-            await state.checkpoint.approvals.decide(
-                approvals[0].approval_id, tenant_id=tenant, expected_status=ApprovalStatus.PENDING,
-                idempotency_key="a" * 64, decision=ApprovalDecision.APPROVE,
-                principal_id=runtime.default_principal.principal_id, decision_digest="b" * 64,
-                decided_at=datetime.now(timezone.utc),
-            )
-    async with Persistence.open("session-context-recovery", storage=storage) as state:
-        async with Runtime.open(persistence=state, features=features, metrics=None, auto_recover=True) as runtime:
-            finished = await runtime.executions.wait(execution.execution_id, principal=runtime.default_principal, timeout_seconds=10)
-            assert finished.result.status is ExecutionStatus.SUCCEEDED
-            assert finished.result.output == {"text": "done"}
-            assert len(requests) == 3
-            timeline = await runtime.agents.get("reader").session("session").timeline()
-            assert {turn.execution_id for turn in timeline.items} == {old.execution_id, execution.execution_id}
+    def open_host():
+        return Runtime.open("session-context-recovery", storage=storage, features=features,
+                            metrics=None, authorization=_HostAuthorization())
+
+    async with open_host() as runtime:
+        principal = Principal("owner", runtime.tenant_id)
+        await runtime.sessions.create_turn_session("session", principal=principal)
+        old = await runtime.sessions.start(
+            "session", "old question", agent="reader", principal=principal, idempotency_key="old",
+        )
+        assert (await old.wait_final(timeout_seconds=5)).view["output"] == {"text": "old answer"}
+        turn = await runtime.agents.get("reader").start(
+            "read the file", session_id="session", principal=principal, idempotency_key="read",
+            session_context="current_turn",
+        )
+        assert (await turn.wait()).status is ExecutionStatus.WAITING_DEFERRED
+        approval, = await runtime.approvals.list(turn.key, principal=principal)
+        await runtime.handoff()
+    async with open_host() as runtime:
+        persisted, = await runtime.approvals.list(turn.key, principal=principal)
+        assert persisted.approval_id == approval.approval_id
+        await runtime.approvals.decide(turn.key, ApprovalDecisionRequest(
+            principal, persisted.approval_id, "approve", ApprovalDecision.APPROVE,
+        ))
+        resumed = await runtime.agents.get("reader").start(
+            "read the file", session_id="session", principal=principal, idempotency_key="read",
+            session_context="current_turn",
+        )
+        assert resumed.key == turn.key
+        finished = await resumed.wait_final(timeout_seconds=10)
+        assert finished.status is ExecutionStatus.SUCCEEDED
+        assert finished.view["output"] == {"text": "done"}
+        assert len(requests) == 3
+        timeline = await runtime.sessions.timeline("session", principal=principal)
+        assert [item["turn_id"] for item in timeline["items"]] == [old.key.turn_id, turn.key.turn_id]

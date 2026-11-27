@@ -18,8 +18,8 @@ from ._native_tool_arguments import restore_native_tool_arguments_payload
 from ._native_tool_error import restore_native_tool_error_payload
 from ._pending_operation_reference import pending_operation_values
 from ._execution_content import (ExecutionContent, expand_snapshot_execution_content, snapshot_execution_content_size,
-    expand_native_execution_content, restore_native_text_payload, restore_native_user_input)
-from .codec import (decode_envelope, execution_payload_slots, pending_operation_reference, native_text_reference, binding_reference,
+    expand_native_execution_content, restore_native_text_payload)
+from .codec import (decode_envelope, restore_native_user_input, execution_payload_slots, pending_operation_reference, native_text_reference, binding_reference,
     tool_payload_slots, native_tool_result_reference, native_tool_arguments_reference, native_user_input_reference, native_tool_error_reference)
 
 from ..core import (
@@ -38,16 +38,25 @@ from ..task import TaskGraphAdmission, TaskGraphSubmission
 from ._runtime_identity import task_graph_binding_capture_key
 from ._run_registration import RunRegistrationStore, RunRegistrationReference, RunRegistrationCleanupResult
 from pydantic import TypeAdapter
+from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai_harness.step_persistence import RunRecord
 from ._native_event_reference import NativeEventReferences
+from ._native_run_reference import is_native_run_reference
+from ._step_contracts import AgentRunRecord
 from ._sql import SqlStateStore
 from ._turn_snapshot import (
-    GENERIC_TURN_SNAPSHOT_KINDS, TURN_SNAPSHOT_KINDS, decode_turn_snapshot, turn_snapshot_record,
+    GENERIC_TURN_SNAPSHOT_KINDS, TURN_SNAPSHOT_KINDS, decode_turn_snapshot, execution_receipt_snapshot_record,
 )
-from ._turn_sql_schema import RUNTIME_TURN_SCOPE, TURN_ADMISSION_TABLE, TURN_SLOT_TABLE
+from ._turn_sql_schema import RUNTIME_TURN_SCOPE, unoccupied_turn_route
+from ._ordinary_snapshot import (
+    capture_ordinary_snapshot, decode_ordinary_snapshot, has_waiting_turns, ordinary_input_object_refs,
+    ordinary_message_roots, rekey_ordinary_messages, require_waiting_checkpoints, restore_ordinary_snapshot,
+)
 from ._archive import archive_content_scope, ContentRecord
-from ._message_root import NativeMessageRoot
-from ..model.messages import decode_model_message_payloads
+from ._message_root import NativeMessageRoot, NativeUserInputReference
+from ._split_step_snapshot import (PairedSplitTerminalRestore, capture_split_source_pins,
+                                   require_no_unpaired_split_pins)
+from ..model.messages import canonical_structured_output, decode_model_message_payloads
 from ..model.attachments import read_attachment_payload, attachment_payload_objects
 from ._archive_closure import (
     ArchiveClosure,
@@ -66,6 +75,7 @@ from .captures import (
 )
 from ._capability_marker import has_capability_partition_marker
 from ._plan import PersistenceDomain
+from ._session_transcript import decode_session_input_reference, decode_session_transcript_root
 from .state import (
     STREAM_KEY_MAX_BYTES,
     validate_stream_key,
@@ -75,6 +85,7 @@ from .state import (
     StateStorageGroup,
     StateStore,
     StateTransaction,
+    state_store_key,
     SqlStateRowReader,
     SqlStateFactReader,
     SqlStateTransaction,
@@ -102,6 +113,7 @@ from ._snapshot_validation import (
 )
 from .codec import (
     _decode_enveloped_domain,
+    _decode_step_envelope,
     iter_runtime_object_dependencies,
     decode_fact,
     decode_operation,
@@ -120,8 +132,6 @@ if TYPE_CHECKING:
 
 
 def _require_turn_snapshot_partition(store: SqlStateStore, *, namespace: str, tenant_id: str) -> None:
-    from .state import state_store_key
-
     if store.store_key != state_store_key(namespace, tenant_id, "execution"):
         raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
@@ -163,13 +173,12 @@ class _StateSnapshotReader:
                                if native_run_scope is not None and isinstance(store, SqlStateStore) else None)
 
     async def validate_trace_prefix(self, records: Sequence[StoredRecord], facts: Sequence[StoredFact]) -> None:
-        from ._step_contracts import AgentRunRecord
         from .state import stream_key
         if self._trace_scope is None:
             return
         namespace, tenant_id = self._trace_scope
         streams = tuple(stream_key(namespace, tenant_id, "trace", "event", (
-            RunRegistrationReference.from_data(record.data).run_id,
+            _trace_run_id(record),
         )) for record in records if record.kind == "agent_run")
         counts = {}
         for fact in facts:
@@ -205,55 +214,60 @@ class _StateSnapshotReader:
         if scope is None or not isinstance(store, SqlStateStore):
             return ()
         _require_turn_snapshot_partition(store, namespace=scope[0], tenant_id=scope[1])
-        from sqlalchemy import and_, select
-        from ._turn_sql import ACTIVE_REQUEST
-        from .state import record_key
+        return await self._capture_execution_receipts(store, scope=scope, budget=budget, page_size=page_size)
 
-        captured = []
-        for name in (TURN_SLOT_TABLE, TURN_ADMISSION_TABLE):
-            table = store.storage_group.metadata.tables[name]
-            after = 0
-            while True:
-                limit = budget.page_size(page_size)
-                statement = select(table)
-                if name == TURN_SLOT_TABLE:
-                    metadata = store.storage_group.metadata
-                    admission, control = metadata.tables[TURN_ADMISSION_TABLE], metadata.tables["ai_execution_records"]
-                    statement = statement.add_columns(
-                        admission.c.control_id, control.c.key.label("execution_key"), control.c.turn_token, control.c.turn_expiry,
-                    ).select_from(table.outerjoin(admission, and_(
-                        admission.c.store_key == table.c.store_key, admission.c.execution_id == table.c.active_execution_id,
-                        admission.c.session_kind == table.c.session_kind, admission.c.session_key == table.c.session_key,
-                        admission.c.lease_fence == table.c.lease_fence, admission.c.route_kind == ACTIVE_REQUEST,
-                    )).outerjoin(control, and_(
-                        control.c.id == admission.c.control_id, control.c.store_key == table.c.store_key,
-                        control.c.turn_slot_kind == table.c.session_kind, control.c.turn_slot_key == table.c.session_key,
-                        control.c.turn_fence == table.c.lease_fence,
-                    )))
-                statement = statement.where(table.c.store_key == store.store_key, table.c.id > after
-                                            ).order_by(table.c.id).limit(limit)
+    async def _capture_execution_receipts(
+        self, execution: SqlStateStore, *, scope: tuple[str, str], budget: "_SnapshotCaptureBudget", page_size: int,
+    ) -> tuple[StoredRecord, ...]:
+        from sqlalchemy import select
+        from ..storage import TurnScopeIdentity
+        from ._split_turn_anchor import SplitSessionTurnTransactions
+        from ._turn_snapshot import _utc
+        from ._turn_sql import SESSION, STANDALONE, SqlTurnRows
 
-                async def read(transaction: StateTransaction):
-                    if not isinstance(transaction, SqlStateRowReader):
-                        raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-                    return await transaction.read_sql_rows(store.context, statement)
+        metadata = execution.storage_group.metadata
+        control = metadata.tables["ai_execution_records"]
+        namespace, tenant_id = scope
+        turn_scope = TurnScopeIdentity(namespace, tenant_id, RUNTIME_TURN_SCOPE)
+        rows = SqlTurnRows(metadata, execution.store_key, turn_scope, coowned=True)
+        statement = select(
+            control.c.id, control.c.key, control.c.key_locator, control.c.kind, control.c.turn_slot_kind, control.c.turn_slot_key,
+            control.c.turn_request_route, control.c.turn_receipt, control.c.turn_token, control.c.turn_fence,
+            control.c.turn_revision, control.c.turn_expiry, control.c.turn_expiry.label("observed_at"),
+            control.c.turn_occupied_route,
+        ).where(
+            control.c.store_key == execution.store_key, control.c.turn_receipt.is_not(None),
+        ).order_by(control.c.id)
+        captured: list[StoredRecord] = []
+        after = 0
+        while True:
+            limit = budget.page_size(page_size)
+            query = statement.where(control.c.id > after).limit(limit)
 
-                page = await store.read(read)
+            async def read(transaction: StateTransaction):
+                if not isinstance(transaction, SqlStateRowReader):
+                    raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                page = await transaction.read_sql_rows(execution.context, query)
                 for row in page:
-                    if name == TURN_SLOT_TABLE and row.get("control_id") is not None:
-                        raw_execution = row["active_execution_id"]
-                        exact = record_key(scope[0], scope[1], "execution", "execution", (raw_execution.decode("utf-8"),))
-                        if (row["execution_key"] != exact or row["turn_expiry"] is None or row["turn_token"] is None
-                                or row["lease_token"] is not None or row["lease_expires_at"] is not None):
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        row = {**row, "lease_token": row["turn_token"], "lease_expires_at": row["turn_expiry"]}
-                    value = turn_snapshot_record(name, row, namespace=scope[0], tenant_id=scope[1])
-                    budget.accept(encode_record(value))
-                    captured.append(value)
-                if len(page) < limit:
-                    break
-                after = page[-1]["id"]
-        return tuple(captured)
+                    split = row["turn_slot_kind"] == SESSION
+                    if split:
+                        proof, _ = SplitSessionTurnTransactions.parse_receipt(
+                            row, scope=turn_scope, decode_time=_utc,
+                        )
+                    elif row["turn_slot_kind"] == STANDALONE:
+                        proof, _ = rows.parse_standalone_control_receipt(row, decode_time=_utc)
+                    else:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    record = execution_receipt_snapshot_record(
+                        row, proof, namespace=namespace, tenant_id=tenant_id, split_session=split,
+                    )
+                    budget.accept(encode_record(record))
+                    captured.append(record)
+                return len(page), page[-1]["id"] if page else 0
+
+            count, after = await execution.read(read)
+            if count < limit:
+                return tuple(captured)
 
     async def capture_facts(
         self, *, budget: "_SnapshotCaptureBudget", page_size: int,
@@ -461,6 +475,9 @@ class _SnapshotExportSource:
     native_projections: Mapping[str, _CapturedSnapshotReader] | None = None
     native_payloads: Mapping[str, Mapping[tuple[bytes, str], bytes]] | None = None
     run_registrations: Mapping[str, RunRecord] | None = None
+    ordinary_sessions: dict[str, list[dict[str, object]]] | None = None
+    ordinary_binding_archive: str | None = None
+    split_step_terminals: Mapping[str, object] | None = None
 
     def archive_object_store(self, domain: PersistenceDomain) -> ObjectStore:
         return self.archive_object_stores[domain]
@@ -482,6 +499,9 @@ class SnapshotResources:
     capability_stores: Mapping[str, StateStore] | None = None
     checkpoint_backup_source: Callable[[NativeStepSource], Awaitable["SqlStepStore"]] | None = None
     run_registrations: RunRegistrationStore | None = None
+    # Internal cutover gate: restore is selectable only with the paired
+    # exporter and a bound foreign transcript reader for this exact source.
+    _paired_split_snapshot_ready: bool = False
 
     def archive_object_store(self, domain: PersistenceDomain) -> ObjectStore:
         return (self.archive_object_stores if self.archive_object_stores is not None else self.object_stores)[domain]
@@ -604,12 +624,29 @@ class RuntimeSnapshotOperations:
         native_projections = {}
         run_registrations = {}
         native_payloads = {}
+        ordinary_sessions = None
+        ordinary_binding_archive = None
+        split_step_terminals = None
         readers = {}
         groups = {}
         for domain in sorted(self._resources.durable_domains, key=lambda value: value.value):
             store = self._resources.stores[domain]
             groups.setdefault(store.storage_group, []).append((domain, store))
-        for group, members in groups.items():
+        split_source_group = None
+        split_conversation_group = None
+        if self._resources._paired_split_snapshot_ready:
+            execution = self._resources.stores.get(PersistenceDomain.EXECUTION)
+            checkpoint = self._resources.stores.get(PersistenceDomain.CHECKPOINT)
+            conversation = self._resources.stores.get(PersistenceDomain.CONVERSATION)
+            if (all(isinstance(store, SqlStateStore) for store in (execution, checkpoint, conversation))
+                    and execution.storage_group is checkpoint.storage_group
+                    and execution.storage_group is not conversation.storage_group
+                    and {PersistenceDomain.EXECUTION, PersistenceDomain.CHECKPOINT,
+                         PersistenceDomain.CONVERSATION}.issubset(self._resources.durable_domains)):
+                split_source_group = execution.storage_group
+                split_conversation_group = conversation.storage_group
+        grouped = sorted(groups.items(), key=lambda item: item[0] is not split_conversation_group)
+        for group, members in grouped:
             if not isinstance(group, StateStorageGroup):
                 raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
             opened = await group.open_archive()
@@ -631,13 +668,99 @@ class RuntimeSnapshotOperations:
                     and checkpoint_store is not None and checkpoint_store.storage_group is group)
                 if pending_source_available:
                     execution_bindings.bind_pending_operation_source(checkpoint_store)
+                async def read_execution_archive_object(reference: ObjectRef) -> bytes:
+                    return await read_object(self._resources.archive_object_store(PersistenceDomain.EXECUTION),
+                        reference.key, expected_digest=reference.digest, expected_size=reference.size)
+
+                execution_bindings.bind_archive_object_reader(read_execution_archive_object)
                 await execution_bindings.initialize(create=False)
 
             async def capture_group(transaction: object) -> None:
-                nonlocal native
+                nonlocal native, ordinary_sessions, ordinary_binding_archive, split_step_terminals
                 roots = []
                 event_references = []
+                waiting_owner = None
+                if group is split_source_group:
+                    source_store = self._resources.stores[PersistenceDomain.EXECUTION]
+                    from ._step_store import SqlStepStore
+
+                    async def capture_source(tx: StateTransaction):
+                        if not isinstance(tx, SqlStateRowReader):
+                            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                        scope = SqlStepStore.scope_key(namespace=self._resources.namespace, tenant_id=self._resources.tenant_id)
+                        table = group.metadata.tables["ai_step_runs"]
+                        pins = await capture_split_source_pins(
+                            tx, source_store.context, table, scope, accept=capture_budget.accept,
+                        )
+                        if not pins:
+                            return None
+                        if opened is None or native is None or native.store_key != scope or not native.backup_supported:
+                            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                        backup = await native._capture_backup(
+                            tx, accept=capture_budget.accept, validate_messages=False, paired_split=True,
+                        )
+                        return pins, backup
+
+                    captured = await source_store.read(capture_source)
+                    target_rows = None if ordinary_sessions is None else decode_ordinary_snapshot(
+                        ordinary_sessions, tenant_id=self._resources.tenant_id, paired_split=True,
+                    )
+                    if captured is not None:
+                        pins, backup = captured
+                        scope = opened[0]
+                        split_step_terminals = {
+                            "source_group": scope, "pins": list(pins),
+                        }
+                        paired = PairedSplitTerminalRestore.decode(
+                            split_step_terminals, target_rows, {scope: backup},
+                            {scope: {"domain": PersistenceDomain.EXECUTION.value}},
+                            conversation_group=ordinary_binding_archive,
+                        )
+                        native_checkpoints[scope] = backup
+                        roots.extend(paired.roots)
+                        roots.extend(backup.message_roots(scope))
+                        for row in backup.runs:
+                            _retain_run_registration(run_registrations, _run_from_native_row(row))
+                    elif target_rows is not None and any(
+                        row.get("split_source_receipt") is not None for row in target_rows["turns"]
+                    ):
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, "Split Step target lost its source seal")
                 for domain, store in members:
+                    if group is not split_source_group and domain is PersistenceDomain.CHECKPOINT and isinstance(store, SqlStateStore):
+                        table = group.metadata.tables.get("ai_step_runs")
+                        if table is not None:
+                            from ._step_store import SqlStepStore
+
+                            async def require_closed_source(tx: StateTransaction):
+                                if not isinstance(tx, SqlStateRowReader):
+                                    raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                                await require_no_unpaired_split_pins(
+                                    tx, store.context, table, SqlStepStore.scope_key(
+                                        namespace=self._resources.namespace, tenant_id=self._resources.tenant_id,
+                                    ),
+                                )
+
+                            await store.read(require_closed_source)
+                    if domain is PersistenceDomain.CONVERSATION and isinstance(store, SqlStateStore):
+                        captured_ordinary = await capture_ordinary_snapshot(
+                            store, namespace=self._resources.namespace, tenant_id=self._resources.tenant_id,
+                            accept=capture_budget.accept, page_size=capture_budget.page_size,
+                            paired_split=group is split_conversation_group,
+                        )
+                        if captured_ordinary["sessions"] or captured_ordinary["turns"]:
+                            ordinary_sessions = captured_ordinary
+                            if captured_ordinary["turns"]:
+                                if opened is None:
+                                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                                ordinary_binding_archive = opened[0]
+                            if has_waiting_turns(captured_ordinary):
+                                waiting_owner = store
+                            if group is split_conversation_group:
+                                for row in captured_ordinary["turns"]:
+                                    if row.get("split_source_receipt") is None:
+                                        roots.extend(ordinary_message_roots({"turns": [row]}))
+                            else:
+                                roots.extend(ordinary_message_roots(captured_ordinary))
                     reader = _StateSnapshotReader(store,
                         native_run_scope=((self._resources.namespace, self._resources.tenant_id)
                                           if domain is PersistenceDomain.TRACE else None),
@@ -695,6 +818,37 @@ class RuntimeSnapshotOperations:
                             for row in backup.runs:
                                 _retain_run_registration(run_registrations, _run_from_native_row(row))
                             roots.extend(backup.message_roots(source.group_id))
+                if waiting_owner is not None:
+                    from ._step_store import SqlStepStore
+
+                    checkpoint_store = self._resources.stores.get(PersistenceDomain.CHECKPOINT)
+                    resolver = self._resources.checkpoint_backup_source
+                    if (opened is None or resolver is None or checkpoint_store is None
+                            or checkpoint_store.storage_group is not waiting_owner.storage_group
+                            or PersistenceDomain.CHECKPOINT not in self._resources.durable_domains):
+                        raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                    scope, _ = opened
+                    if scope not in native_checkpoints:
+                        store_key = SqlStepStore.scope_key(
+                            namespace=self._resources.namespace, tenant_id=self._resources.tenant_id,
+                        )
+                        if native is None:
+                            native = await resolver(NativeStepSource(scope, store_key))
+                        if (native is None or not native.backup_supported or native.store_key != store_key
+                                or native.storage_context.engine is not waiting_owner.context.engine):
+                            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+
+                        async def capture_waiting(tx: StateTransaction) -> NativeStepBackup:
+                            if not isinstance(tx, SqlStateRowReader):
+                                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                            return await native.capture_backup(tx, accept=capture_budget.accept, validate_messages=False)
+
+                        backup = await waiting_owner.read(capture_waiting)
+                        native_checkpoints[scope] = backup
+                        for row in backup.runs:
+                            _retain_run_registration(run_registrations, _run_from_native_row(row))
+                        roots.extend(backup.message_roots(scope))
+                    require_waiting_checkpoints(ordinary_sessions, {scope: native_checkpoints[scope]})
                 if event_references:
                     if opened is None or any(ref.group_id != opened[0] for ref in event_references):
                         raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
@@ -774,9 +928,8 @@ class RuntimeSnapshotOperations:
 
         # Registrations are immutable and published before their references.
         # Read the detached closure after group snapshots to avoid nested owner sessions.
-        references = [RunRegistrationReference.from_data(record.data)
-                      for captured in readers.values() for record in captured.records
-                      if record.kind == "agent_run"]
+        references = [reference for domain, captured in readers.items() for record in captured.records
+                      if (reference := _snapshot_run_reference(record, domain)) is not None]
         missing = tuple(dict.fromkeys(reference.run_id for reference in references
                                       if reference.run_id not in run_registrations))
         if missing:
@@ -809,6 +962,8 @@ class RuntimeSnapshotOperations:
             readers=readers, archives=archives(), object_stores=self._resources.object_stores,
             native_rows=native_rows, native_checkpoints=native_checkpoints, native_projections=native_projections, native_payloads=native_payloads,
             run_registrations=run_registrations,
+            ordinary_sessions=ordinary_sessions, ordinary_binding_archive=ordinary_binding_archive,
+            split_step_terminals=split_step_terminals,
             archive_object_stores=(self._resources.archive_object_stores
                                   if self._resources.archive_object_stores is not None
                                   else self._resources.object_stores),
@@ -966,7 +1121,7 @@ async def _export_snapshot(
                     {group: (rows[1], rows[2]) for group, rows in (source.native_rows or {}).items()},
                     source.native_payloads or {}, namespace=source.namespace, tenant_id=source.tenant_id,
                     event_backups=source.native_checkpoints or {})
-                semantic_value = _expand_run_reference(semantic_value, source.run_registrations or {})
+                semantic_value = _expand_run_reference(semantic_value, source.run_registrations or {}, domain)
                 semantic_value = expand_snapshot_execution_content(semantic_value, binding_contents,
                     namespace=source.namespace, tenant_id=source.tenant_id, reserve=binding_budget.reserve_bytes,
                     operations=pending_operation_values(value, pending_owners, namespace=source.namespace, tenant_id=source.tenant_id))
@@ -1059,6 +1214,11 @@ async def _export_snapshot(
     capture_state_closure(tuple(record for records in snapshot_records.values() for record in records),
         values=tuple(dict(fact.data) for facts in snapshot_facts.values() for fact in facts),
         namespace=source.namespace, tenant_id=source.tenant_id, require_bindings=True)
+    if source.ordinary_sessions is not None:
+        _mark_ordinary_bindings(
+            archive_closures, source.ordinary_binding_archive, source.ordinary_sessions,
+            namespace=source.namespace, tenant_id=source.tenant_id,
+        )
     archives = []
     for scope, closure in archive_closures.items():
         domain = archive_domains[scope]
@@ -1083,6 +1243,10 @@ async def _export_snapshot(
             for row in raw[name]:
                 accept(row)
         native_checkpoints.append({"group_id": group_id, **raw})
+    if source.ordinary_sessions is not None:
+        for root in ordinary_message_roots(source.ordinary_sessions):
+            _validate_native_partition(root.store_key, source.namespace, source.tenant_id)
+            native_roots.setdefault(root.group_id, []).append(root)
     native_messages = []
     for group_id, roots in native_roots.items():
         owner = (source.native_rows or {}).get(group_id)
@@ -1108,9 +1272,16 @@ async def _export_snapshot(
         native_messages.append({"group_id": group_id, "domain": domain.value,
                                 "sequences": [accept(encode_native_sequence_row(row)) for row in retained_sequences],
                                 "messages": [accept(encode_native_message_row(row)) for row in retained_messages]})
+    if source.ordinary_sessions is not None:
+        for reference in ordinary_input_object_refs(
+            source.ordinary_sessions, namespace=source.namespace, tenant_id=source.tenant_id,
+        ):
+            if PersistenceDomain.EXECUTION not in source.object_stores:
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+            await copy_reference(PersistenceDomain.EXECUTION, reference)
     manifest = {
         "kind": "runtime-storage-snapshot",
-        "format_version": 1,
+        "format_version": 4 if source.ordinary_sessions is not None else 1,
         "namespace": source.namespace,
         "tenant_id": source.tenant_id,
         "domains": domains,
@@ -1125,6 +1296,15 @@ async def _export_snapshot(
             for group_id, projected in (source.native_projections or {}).items()],
         "objects": objects,
     }
+    if source.ordinary_sessions is not None:
+        manifest["ordinary_sessions"] = {
+            name: [accept(row) for row in rows]
+            for name, rows in source.ordinary_sessions.items()
+        }
+    if source.ordinary_binding_archive is not None:
+        manifest["ordinary_binding_archive"] = source.ordinary_binding_archive
+    if source.split_step_terminals is not None:
+        manifest["split_step_terminals"] = source.split_step_terminals
     for optional in ("native_messages", "native_checkpoints", "native_projections"):
         if not manifest[optional]:
             del manifest[optional]
@@ -1133,9 +1313,33 @@ async def _export_snapshot(
     if budget_entries > limits.max_entries or len(payload) + budget_bytes > limits.max_bytes:
         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
     digest = hashlib.sha256(payload).hexdigest()
-    key = f"v1/runtime-storage-snapshot/{digest}"
+    key = f"v{manifest['format_version']}/runtime-storage-snapshot/{digest}"
     await _put_snapshot_object(object_store, key, payload)
     return ObjectRef(object_store.store_id, key, digest, len(payload))
+
+def parse_storage_snapshot_manifest(payload: bytes) -> dict[str, object]:
+    """Decode the manifest shared by portable snapshot publication and restore."""
+    try:
+        manifest = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if not isinstance(manifest, dict):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if manifest.get("kind") != "runtime-storage-snapshot":
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    format_version = manifest.get("format_version")
+    if (
+        isinstance(format_version, bool)
+        or not isinstance(format_version, int)
+        or format_version < 1
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if format_version not in (1, 4) or (format_version == 4) != ("ordinary_sessions" in manifest):
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    if not isinstance(manifest.get("domains"), dict):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return manifest
+
 
 async def restore_snapshot(
     ref: ObjectRef,
@@ -1158,25 +1362,8 @@ async def restore_snapshot(
         expected_digest=ref.digest,
         expected_size=ref.size,
     )
-    try:
-        manifest = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if not isinstance(manifest, dict):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if manifest.get("kind") != "runtime-storage-snapshot":
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    format_version = manifest.get("format_version")
-    if (
-        isinstance(format_version, bool)
-        or not isinstance(format_version, int)
-        or format_version < 1
-    ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if format_version != 1:
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    if not isinstance(manifest.get("domains"), dict):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    manifest = parse_storage_snapshot_manifest(payload)
+    format_version = manifest["format_version"]
     namespace = manifest.get("namespace")
     tenant_id = manifest.get("tenant_id")
     if not isinstance(namespace, str) or not isinstance(tenant_id, str):
@@ -1188,6 +1375,21 @@ async def restore_snapshot(
     if budget_entries > limits.max_entries or len(payload) + budget_bytes > limits.max_bytes:
         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
 
+    raw_split_pairs = manifest.get("split_step_terminals")
+    if "split_step_terminals" in manifest and raw_split_pairs is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    ordinary_sessions = (
+        decode_ordinary_snapshot(
+            manifest["ordinary_sessions"], tenant_id=tenant_id, paired_split=raw_split_pairs is not None,
+        ) if format_version == 4 else None
+    )
+    if ordinary_sessions is not None and (
+        not ordinary_sessions["sessions"] or PersistenceDomain.CONVERSATION.value not in manifest["domains"]
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    ordinary_binding_archive = manifest.get("ordinary_binding_archive")
+    if ordinary_sessions is None and "ordinary_binding_archive" in manifest:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     run_registrations = _decode_run_registrations(manifest.get("run_registrations", []))
     raw_domains = manifest["domains"]
     raw_objects = manifest.get("objects", [])
@@ -1214,6 +1416,12 @@ async def restore_snapshot(
         entry_count += len(records)
     if entry_count > limits.max_entries:
         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+    ordinary_bindings = (
+        _mark_ordinary_bindings(
+            archive_closures, ordinary_binding_archive, ordinary_sessions,
+            namespace=namespace, tenant_id=tenant_id,
+        ) if ordinary_sessions is not None else set()
+    )
     raw_native = manifest.get("native_messages", [])
     if not isinstance(raw_native, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1237,6 +1445,27 @@ async def restore_snapshot(
                  "messages": [decode_native_message_row(row) for row in entry["messages"]]}
         native_closures[entry["group_id"]] = NativeMessageClosure(entry["sequences"])
         native_entries[entry["group_id"]] = entry
+    ordinary_roots = tuple(ordinary_message_roots(ordinary_sessions)) if ordinary_sessions is not None else ()
+    ordinary_group_ids = {root.group_id for root in ordinary_roots}
+    structured_turns: dict[str, list[tuple[NativeMessageRoot, list[int]]]] = {}
+    native_inputs: dict[str, list[NativeUserInputReference]] = {}
+    if ordinary_sessions is not None:
+        for row in ordinary_sessions["turns"]:
+            prompt = decode_session_input_reference(row["request_json"], row["turn_id"].decode("utf-8"))
+            if prompt is not None:
+                if prompt.root.group_id != ordinary_binding_archive or row.get("split_source_receipt") is not None:
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                native_inputs.setdefault(prompt.root.group_id, []).append(prompt)
+            if row["state"] == "succeeded" and "output_ref" in row["result_json"]:
+                result = row["result_json"]
+                transcript_root = decode_session_transcript_root(result)
+                structured_turns.setdefault(transcript_root.group_id, []).append((transcript_root, result["output_ref"]))
+    for transcript_root in ordinary_roots:
+        _validate_native_partition(transcript_root.store_key, namespace, tenant_id)
+        closure = native_closures.get(transcript_root.group_id)
+        if closure is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        closure.mark(transcript_root.store_key, transcript_root.slices)
     raw_checkpoints = manifest.get("native_checkpoints", [])
     if not isinstance(raw_checkpoints, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1260,9 +1489,35 @@ async def restore_snapshot(
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         for message_root in backup.message_roots(group_id):
             native_closures[group_id].mark(message_root.store_key, message_root.slices)
+    paired_split = PairedSplitTerminalRestore.decode(
+        raw_split_pairs, ordinary_sessions, native_checkpoints, native_entries,
+        conversation_group=ordinary_binding_archive,
+    )
+    local_ordinary_roots = tuple(root for root in ordinary_roots
+                                 if paired_split is None or root.group_id != paired_split.source_group)
+    if any(root.group_id != ordinary_binding_archive for root in local_ordinary_roots):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if paired_split is not None and set(ordinary_roots) - set(local_ordinary_roots) != set(paired_split.projected_roots):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    waiting_checkpoint_group = (
+        require_waiting_checkpoints(ordinary_sessions, native_checkpoints)
+        if ordinary_sessions is not None else None
+    )
+    if waiting_checkpoint_group is not None and PersistenceDomain.CHECKPOINT.value not in raw_domains:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     object_bytes = 0
     expected_objects: set[tuple[str, str, str, int]] = set()
-    required_checkpoint_groups: set[str] = set()
+    if ordinary_sessions is not None:
+        expected_objects.update(
+            (PersistenceDomain.EXECUTION.value, reference.key, reference.digest, reference.size)
+            for reference in ordinary_input_object_refs(ordinary_sessions, namespace=namespace, tenant_id=tenant_id)
+        )
+    required_checkpoint_groups = {waiting_checkpoint_group} if waiting_checkpoint_group is not None else set()
+    if paired_split is not None:
+        required_checkpoint_groups.add(paired_split.source_group)
+        entry_count += len(paired_split.pairs)
+        if entry_count > limits.max_entries:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
     decoded_domains: dict[
         PersistenceDomain,
         tuple[
@@ -1321,13 +1576,33 @@ async def restore_snapshot(
             encoded = await _read_content_payload(content, resolve)
             _validate_archive_content(content, encoded)
             native_encoded_payloads[group_id][(row["store_key"], row["sha256"])] = encoded
-            if group_id in native_checkpoints:
+            if group_id in native_checkpoints or group_id in ordinary_group_ids:
                 raw = decode_payload_bytes(encoded, codec=content.compression,
                                            raw_digest=content.raw_digest, raw_size=content.raw_size)
                 decode_model_message_payloads((raw,))
                 checkpoint_payloads[(row["store_key"], row["sha256"])] = raw
         if group_id in native_checkpoints:
             _validate_native_checkpoint_payloads(native_checkpoints[group_id], closure, checkpoint_payloads)
+        for reference in native_inputs.get(group_id, ()):
+            input_root = reference.root
+            try:
+                (identity,) = closure.message_identities(input_root.store_key, input_root.slices)
+                _, (message,) = decode_model_message_payloads((checkpoint_payloads[(input_root.store_key, identity)],))
+                if (not isinstance(message, ModelRequest) or len(message.parts) != 1
+                        or not isinstance(message.parts[0], UserPromptPart)
+                        or not isinstance(message.parts[0].content, str)):
+                    raise ValueError("Graph input does not reference a singleton scalar prompt")
+            except (KeyError, TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        for transcript_root, output_ref in structured_turns.get(group_id, ()):
+            try:
+                _, messages = decode_model_message_payloads(tuple(
+                    checkpoint_payloads[(transcript_root.store_key, identity)]
+                    for identity in closure.message_identities(transcript_root.store_key, transcript_root.slices)
+                ))
+                canonical_structured_output(messages, output_ref)
+            except (KeyError, TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
     semantic_domains = {}
     binding_contents = {key: content for closure in archive_closures.values()
@@ -1381,7 +1656,7 @@ async def restore_snapshot(
             _expand_run_reference(_expand_snapshot_native_content(record,
                 {group: (entry["sequences"], entry["messages"]) for group, entry in native_entries.items()},
                 native_encoded_payloads, namespace=namespace, tenant_id=tenant_id,
-                event_backups=native_checkpoints), run_registrations), binding_contents,
+                event_backups=native_checkpoints), run_registrations, domain), binding_contents,
             namespace=namespace, tenant_id=tenant_id,
             operations=pending_operation_values(record, pending_owners, namespace=namespace, tenant_id=tenant_id)), binding_contents,
             namespace=namespace, tenant_id=tenant_id) for record in records)
@@ -1461,9 +1736,9 @@ async def restore_snapshot(
         namespace=namespace, tenant_id=tenant_id, require_bindings=True)
     if required_checkpoint_groups != set(native_checkpoints):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    referenced_runs = {RunRegistrationReference.from_data(record.data).run_id
-                       for records, _facts, _operations, _sequences in decoded_domains.values() for record in records
-                       if record.kind == "agent_run"}
+    referenced_runs = {reference.run_id
+                       for domain, (records, _, _, _) in decoded_domains.items() for record in records
+                       if (reference := _snapshot_run_reference(record, domain)) is not None}
     referenced_runs.update(row["run_id"] for backup in native_checkpoints.values() for row in backup.runs)
     if referenced_runs != set(run_registrations):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1527,6 +1802,7 @@ async def restore_snapshot(
                 expected_objects.add(nested_identity)
                 pending_objects.append(nested_identity)
 
+    ordinary_binding_payloads = {}
     for scope, closure in archive_closures.items():
         if not closure.has_roots or closure.unreachable_records:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1545,6 +1821,28 @@ async def restore_snapshot(
                 return await read_object(object_store, content_ref.key, expected_digest=content_ref.digest, expected_size=content_ref.size)
             encoded = await _read_content_payload(content, resolve)
             _validate_archive_content(content, encoded)
+            if scope == ordinary_binding_archive and content.identity in ordinary_bindings:
+                from .codec import decode_agent_binding_content
+
+                raw = decode_payload_bytes(encoded, codec=content.compression,
+                                           raw_digest=content.raw_digest, raw_size=content.raw_size)
+                ordinary_binding_payloads[content.identity] = decode_agent_binding_content(raw).to_payload()
+
+    if ordinary_sessions is not None:
+        from ._archive import archive_content_identity
+
+        for row in ordinary_sessions["turns"]:
+            identity = archive_content_identity("execution-binding", row["binding_key"].hex())
+            binding = ordinary_binding_payloads.get(identity)
+            if binding is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            request = {**row["request_json"], "binding": binding}
+            frontier = request.pop("instruction_frontier", None)
+            if len(canonical_json_bytes(request)) + max(
+                len(canonical_json_bytes(row["result_json"])),
+                0 if frontier is None else len(canonical_json_bytes(frontier)),
+            ) > 64 * 1024:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     for group_id, entry in native_entries.items():
         closure = native_closures[group_id]
@@ -1573,6 +1871,50 @@ async def restore_snapshot(
     if target.exists() and any(target.iterdir()):
         raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
     async with open_target(target, namespace, tenant_id) as resources:
+        if ordinary_sessions is not None and (
+            resources.namespace != namespace or resources.tenant_id != tenant_id or resources.read_only
+            or not isinstance(resources.stores.get(PersistenceDomain.CONVERSATION), SqlStateStore)
+        ):
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        execution_store = resources.stores.get(PersistenceDomain.EXECUTION)
+        conversation_store = resources.stores.get(PersistenceDomain.CONVERSATION)
+        if waiting_checkpoint_group is not None:
+            checkpoint_store = resources.stores.get(PersistenceDomain.CHECKPOINT)
+            if (not isinstance(checkpoint_store, SqlStateStore)
+                    or checkpoint_store.storage_group is not conversation_store.storage_group):
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        if paired_split is not None:
+            if not resources._paired_split_snapshot_ready:
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Paired split Step restore is not active")
+            checkpoint_store = resources.stores.get(PersistenceDomain.CHECKPOINT)
+            if (not isinstance(execution_store, SqlStateStore) or not isinstance(checkpoint_store, SqlStateStore)
+                    or execution_store.storage_group is not checkpoint_store.storage_group
+                    or execution_store.storage_group is conversation_store.storage_group
+                    or not {PersistenceDomain.EXECUTION, PersistenceDomain.CHECKPOINT,
+                            PersistenceDomain.CONVERSATION}.issubset(decoded_domains)):
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Split Step source and Conversation must retain their mapped stores")
+            # Native refs seen in Trace/custom owners cannot remap this split
+            # source into a third physical archive.
+            source_group = execution_store.storage_group
+            for domain, values in decoded_domains.items():
+                if resources.stores[domain].storage_group is source_group:
+                    continue
+                records, facts, operations, _sequences = values
+                for row in (*records, *facts, *operations):
+                    if any(ref.group_id == paired_split.source_group
+                           for ref in (*iter_native_message_roots(row.data), *iter_native_event_references(row.data))):
+                        raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Split Step source cannot be copied to another archive")
+        participants = (*resources.stores.values(), *(resources.capability_stores or {}).values())
+        coowned = type(execution_store) is SqlStateStore and all(
+            type(store) is SqlStateStore and store.storage_group is execution_store.storage_group
+            for store in participants
+        )
+        split_sessions = any(
+            record.kind == "turn_admission" and record.data.get("split_session") is True
+            for record in decoded_domains.get(PersistenceDomain.EXECUTION, ((), (), (), ()))[0]
+        )
+        if split_sessions and (type(execution_store) is not SqlStateStore or coowned):
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Split session occupancy requires independent storage participants")
         pending_references = any(pending_operation_reference(payload) is not None
             for record in decoded_domains.get(PersistenceDomain.EXECUTION, ((), (), (), ()))[0]
             if record.kind == "execution"
@@ -1595,6 +1937,9 @@ async def restore_snapshot(
                 raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
             for registration in run_registrations.values():
                 await resources.run_registrations.publish(registration)
+        if any(domain not in resources.object_stores and not source.key.startswith("v1/archive/")
+               for domain, source, _ in decoded_objects):
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         for domain, source, content_ref in decoded_objects:
             if source.key.startswith("v1/archive/"):
                 continue
@@ -1612,7 +1957,12 @@ async def restore_snapshot(
                 )
 
         restored_native_backups = {}
-        for domain, values in decoded_domains.items():
+        domain_items = tuple(decoded_domains.items())
+        split_source_restored = None
+        if paired_split is not None:
+            order = {PersistenceDomain.EXECUTION: 0, PersistenceDomain.CHECKPOINT: 1}
+            domain_items = tuple(sorted(domain_items, key=lambda item: order.get(item[0], 2)))
+        for domain, values in domain_items:
             records, facts, operations, sequences = values
             referenced_scopes = set()
             reference_values = tuple(capture_retention_value(value) if value.kind in CAPTURE_RECORD_KINDS else value.data
@@ -1622,9 +1972,18 @@ async def restore_snapshot(
                 referenced_scopes.update(scope for scope, _, _ in iter_archive_content_refs(value))
             domain_native_roots = tuple(root for value in reference_values
                                         for root in iter_native_message_roots(value))
+            if domain is PersistenceDomain.CONVERSATION:
+                domain_native_roots += local_ordinary_roots
+                if ordinary_binding_archive is not None:
+                    referenced_scopes.add(ordinary_binding_archive)
+            elif domain is PersistenceDomain.EXECUTION and paired_split is not None:
+                domain_native_roots += paired_split.roots
             event_groups = {ref.group_id for value in reference_values for ref in iter_native_event_references(value)}
-            domain_checkpoints = {key: backup for key, backup in native_checkpoints.items()
-                                  if native_entries[key]["domain"] == domain.value or key in event_groups}
+            domain_checkpoints = {
+                key: backup for key, backup in native_checkpoints.items()
+                if native_entries[key]["domain"] == domain.value or key in event_groups
+                or (domain is PersistenceDomain.CONVERSATION and key == waiting_checkpoint_group)
+            }
             domain_native_roots += tuple(root for group_id, backup in domain_checkpoints.items()
                                          for root in backup.message_roots(group_id))
             native_groups = {root.group_id for root in domain_native_roots} | set(domain_checkpoints)
@@ -1768,6 +2127,10 @@ async def restore_snapshot(
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         if previous_backup is None:
                             await transaction.run_sql(store.context, lambda session: native_restore.restore_backup(session, backup))
+                    if paired_split is not None and domain is PersistenceDomain.EXECUTION:
+                        await transaction.run_sql(store.context, lambda session: paired_split.install_source(
+                            session, store.storage_group.metadata.tables["ai_step_runs"], target_group=target_scope,
+                        ))
                 state_facts = facts
                 store = resources.stores[domain]
                 if domain is PersistenceDomain.TRACE and isinstance(store, SqlStateStore):
@@ -1788,19 +2151,14 @@ async def restore_snapshot(
                     if not isinstance(store, SqlStateStore) or not isinstance(transaction, SqlStateTransaction):
                         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
                     _require_turn_snapshot_partition(store, namespace=resources.namespace, tenant_id=resources.tenant_id)
-                    slots, admissions = decode_turn_snapshot(
-                        records, namespace=resources.namespace, tenant_id=resources.tenant_id, store_key=store.store_key,
+                    receipts = decode_turn_snapshot(
+                        records, namespace=resources.namespace, tenant_id=resources.tenant_id,
                     )
-
-                    # A snapshot preserves the admission proof, not a live
-                    # producer. Restore both layouts as expired so ordinary
-                    # takeover can retire the generation without a fake release.
+                    # Snapshot transfers ownership evidence, never a live producer.
                     expired_at = datetime(1970, 1, 1, tzinfo=timezone.utc)
-                    for slot in slots:
-                        if slot["lease_expires_at"] is not None:
-                            slot["lease_expires_at"] = min(slot["lease_expires_at"], expired_at)
 
                     async def restore_turn_rows(session) -> None:
+                        from hashlib import sha256
                         from sqlalchemy import select, update
                         from ..storage import TurnScopeIdentity
                         from ._execution_authority import ExecutionAuthority
@@ -1808,40 +2166,55 @@ async def restore_snapshot(
 
                         metadata = store.storage_group.metadata
                         control = metadata.tables["ai_execution_records"]
-                        slot_by_key = {(row["session_kind"], row["session_key"]): row for row in slots}
                         scope = TurnScopeIdentity(resources.namespace, resources.tenant_id, RUNTIME_TURN_SCOPE)
-                        for admission in admissions:
-                            admission["control_id"] = None
-                            if not admission.pop("_coowned", False):
-                                continue
-                            address = admission["session_kind"], admission["session_key"]
-                            slot = slot_by_key[address]
-                            authority = ExecutionAuthority(scope, admission["execution_id"].decode("utf-8"),
-                                                           turn_session_identity(*address),
-                                                           slot["lease_token"].decode("ascii"), admission["lease_fence"])
+                        for admission in receipts:
+                            execution_id = admission["execution_id"].decode("utf-8")
+                            address = turn_session_identity(admission["session_kind"], admission["session_key"])
+                            token = admission["turn_token"]
+                            expiry = admission["turn_expiry"]
+                            if token is not None:
+                                expiry = min(expiry, expired_at)
+                            # The helper builds the same owner shell address;
+                            # a parked/archived row is written with no token.
+                            token_for_shell = admission["turn_receipt"]["receipt_id"] if token is None else token.decode("ascii")
+                            authority = ExecutionAuthority(scope, execution_id, address, token_for_shell, admission["turn_fence"])
                             identity = (control.c.store_key == store.store_key, control.c.key == authority.key)
-                            owner = (await session.execute(select(control.c.id, control.c.turn_token).where(*identity))).one_or_none()
-                            expiry = slot["lease_expires_at"]
-                            if owner is None:
-                                result = await session.execute(control.insert().values(authority.shell_values(store_key=store.store_key, expiry=expiry)))
-                                (admission["control_id"],) = result.inserted_primary_key
-                            elif owner.turn_token is None:
-                                await session.execute(update(control).where(*identity).values(**authority.authority_values(), turn_expiry=expiry))
-                                admission["control_id"] = owner.id
+                            owner = (await session.execute(select(control.c.kind, control.c.turn_token, control.c.turn_receipt)
+                                                           .where(*identity))).one_or_none()
+                            unoccupied = unoccupied_turn_route(sha256(authority.key).hexdigest())
+                            values = dict(
+                                turn_slot_kind=admission["session_kind"], turn_slot_key=admission["session_key"],
+                                turn_token=token, turn_fence=admission["turn_fence"], turn_expiry=expiry,
+                                turn_revision=admission["turn_revision"],
+                                turn_request_route=admission["turn_request_route"] or unoccupied,
+                                turn_receipt=admission["turn_receipt"],
+                                turn_occupied_route=admission["turn_occupied_route"] or unoccupied,
+                            )
+                            if owner is None and admission["owner_kind"] == "execution_shell":
+                                await session.execute(control.insert().values(
+                                    {**authority.shell_values(store_key=store.store_key, expiry=expiry), **values},
+                                ))
+                            elif (owner is not None and owner.kind == admission["owner_kind"]
+                                  and owner.turn_token is None and owner.turn_receipt is None):
+                                await session.execute(update(control).where(*identity).values(**values))
                             else:
                                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                            slot.update(lease_token=None, lease_expires_at=None)
-
-                        for name, rows in ((TURN_SLOT_TABLE, slots), (TURN_ADMISSION_TABLE, admissions)):
-                            if rows:
-                                await session.execute(metadata.tables[name].insert(), rows)
-
                     state_records = tuple(row for row in records if row.kind not in TURN_SNAPSHOT_KINDS)
                 else:
                     restore_turn_rows = None
                 await _insert_snapshot_values(transaction, state_records, state_facts, operations, sequences)
                 if restore_turn_rows is not None:
                     await transaction.run_sql(store.context, restore_turn_rows)
+                if domain is PersistenceDomain.CONVERSATION and ordinary_sessions is not None:
+                    ordinary_destinations = dict(native_mapping) if native_groups else {}
+                    if paired_split is not None:
+                        if split_source_restored is None:
+                            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                        ordinary_destinations[paired_split.source_group] = split_source_restored
+                    await restore_ordinary_snapshot(
+                        store, transaction, namespace=resources.namespace, tenant_id=resources.tenant_id,
+                        rows=rekey_ordinary_messages(ordinary_sessions, ordinary_destinations),
+                    )
                 if domain is PersistenceDomain.TRACE and not isinstance(store, SqlStateStore):
                     from ._model_interaction_store import ModelInteractionStateStepArchive
                     from ._step_contracts import AgentRunRecord, StepEvent
@@ -1861,6 +2234,8 @@ async def restore_snapshot(
             try:
                 await resources.stores[domain].mutate(publish)
                 restored_native_backups.update({(target_scope, backup.store_key): backup for backup in domain_checkpoints.values()})
+                if paired_split is not None and domain is PersistenceDomain.EXECUTION:
+                    split_source_restored = target_scope
             finally:
                 if native_rows and isinstance(resources.stores[domain], SqlStateStore):
                     from ._step_store import SqlStepStore
@@ -1904,6 +2279,14 @@ def snapshot_manifest_usage(
                 if not isinstance(rows, list):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 entries += len(rows)
+    if "ordinary_sessions" in manifest:
+        ordinary = manifest["ordinary_sessions"]
+        if not isinstance(ordinary, Mapping) or set(ordinary) != {"sessions", "turns"}:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for rows in ordinary.values():
+            if not isinstance(rows, list):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            entries += len(rows)
     for raw_object in objects:
         if not isinstance(raw_object, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2065,6 +2448,9 @@ def snapshot_manifest_identity(manifest: Mapping[str, object]) -> str:
         "native_sequences": ordered_unique(native_sequences),
         "native_messages": ordered_unique(list(native_messages.values())),
         "objects": ordered_unique(normalized_objects),
+        **({"ordinary_sessions": {section: ordered_unique(rows)
+                                  for section, rows in rekey_ordinary_messages(manifest["ordinary_sessions"], groups).items()}}
+           if "ordinary_sessions" in manifest else {}),
     })
 
 
@@ -2104,10 +2490,34 @@ def _run_from_native_row(row: Mapping[str, object]) -> RunRecord:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-def _expand_run_reference(record: StoredRecord, runs: Mapping[str, RunRecord]) -> StoredRecord:
+def _trace_owned_run(record: StoredRecord) -> AgentRunRecord:
+    run = _decode_step_envelope(record.data)
+    if not isinstance(run, AgentRunRecord):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return run
+
+
+def _snapshot_run_reference(record: StoredRecord, domain: PersistenceDomain) -> RunRegistrationReference | None:
     if record.kind != "agent_run":
+        return None
+    if domain is PersistenceDomain.TRACE and not is_native_run_reference(record.data):
+        _trace_owned_run(record)
+        return None
+    return RunRegistrationReference.from_data(record.data)
+
+
+def _trace_run_id(record: StoredRecord) -> str:
+    if is_native_run_reference(record.data):
+        return RunRegistrationReference.from_data(record.data).run_id
+    return _trace_owned_run(record).agent_run_id
+
+
+def _expand_run_reference(
+    record: StoredRecord, runs: Mapping[str, RunRecord], domain: PersistenceDomain,
+) -> StoredRecord:
+    reference = _snapshot_run_reference(record, domain)
+    if reference is None:
         return record
-    reference = RunRegistrationReference.from_data(record.data)
     source = runs.get(reference.run_id)
     if source is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2289,7 +2699,7 @@ async def _read_native_messages(
     async def read(transaction: StateTransaction) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
         if not isinstance(transaction, SqlStateRowReader):
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-        nodes = tables["ai_step_sequences"]
+        nodes = tables["ai_message_sequences"]
         columns = ("store_key", "sha256", "message_sha256", "tree_count",
                    "left_sha256", "right_sha256", "next_sha256")
         sequences = []
@@ -2316,7 +2726,7 @@ async def _read_native_messages(
             closure.mark(root.store_key, root.slices)
         sequences = [row for row in sequences if (row["store_key"], row["sha256"]) in closure.retained_sequences]
         messages = []
-        table = tables["ai_step_messages"]
+        table = tables["ai_messages"]
         for partition in partitions:
             identities = sorted(identity for scope, identity in closure.retained_messages if scope == partition)
             offset = 0
@@ -2347,7 +2757,7 @@ async def _insert_native_messages(
 
     async def insert(session: "AsyncSession") -> None:
         for sequences, messages in entries:
-            for name, rows in (("ai_step_messages", messages), ("ai_step_sequences", sequences)):
+            for name, rows in (("ai_messages", messages), ("ai_message_sequences", sequences)):
                 table = tables[name]
                 if not rows:
                     continue
@@ -2365,6 +2775,31 @@ async def _insert_native_messages(
                 await index_nodes(store.context, session, partition,
                                   tuple(row for row in sequences if row["store_key"] == partition), partial_restore=True)
     await transaction.run_sql(store.context, insert)
+
+
+def _mark_ordinary_bindings(
+    closures: Mapping[str, ArchiveClosure], scope: object, rows: Mapping[str, list[dict[str, object]]],
+    *, namespace: str, tenant_id: str,
+) -> set[str]:
+    from ._archive import archive_content_identity
+
+    if not rows["turns"]:
+        if scope is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return set()
+    if not isinstance(scope, str) or scope not in closures:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    closure = closures[scope]
+    content_scope = archive_content_scope(namespace, tenant_id)
+    identities = set()
+    for row in rows["turns"]:
+        digest = row["binding_key"]
+        if isinstance(digest, bytes):
+            digest = digest.hex()
+        identities.add(archive_content_identity("execution-binding", digest))
+    for identity in identities:
+        closure.mark_content(scope, content_scope, identity)
+    return identities
 
 
 def _mark_archive_value(closures: Mapping[str, ArchiveClosure], value: object) -> None:
@@ -2479,4 +2914,4 @@ async def _put_snapshot_object(
 from ._capability_marker import ensure_capability_partition_marker
 from ._snapshot import snapshot_object_ref_from_payload, snapshot_object_ref_payload
 
-__all__ = ['RunRegistrationCleanupResult', 'snapshot_manifest_usage', 'snapshot_manifest_identity', 'RuntimeSnapshotOperations', 'SnapshotExclusiveGuard', 'SnapshotLimits', 'SnapshotResources', 'ensure_capability_partition_marker', 'has_capability_partition_marker', 'restore_snapshot', 'snapshot_object_ref_from_payload', 'snapshot_object_ref_payload']
+__all__ = ['RunRegistrationCleanupResult', 'parse_storage_snapshot_manifest', 'snapshot_manifest_usage', 'snapshot_manifest_identity', 'RuntimeSnapshotOperations', 'SnapshotExclusiveGuard', 'SnapshotLimits', 'SnapshotResources', 'ensure_capability_partition_marker', 'has_capability_partition_marker', 'restore_snapshot', 'snapshot_object_ref_from_payload', 'snapshot_object_ref_payload']

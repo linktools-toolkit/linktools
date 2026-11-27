@@ -11,7 +11,7 @@ from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.tools import RunContext, ToolDefinition
 
 from ..capability import AgentContext
-from ..core import canonical_sha256
+from ..core import BudgetUsage, canonical_sha256
 from ..persistence.contracts import BudgetRepository
 from ._tool_metrics import TOOL_METRICS_MANAGED_METADATA_KEY
 
@@ -22,11 +22,19 @@ class RunBudgetContext:
     scope_id: str
     execution_id: str
     agent_run_id: str
+    _turn_generation: int | None = None
+    _guarded_admit_model: Callable[[str], Awaitable[BudgetUsage]] | None = None
+    _guarded_admit_tool: Callable[[str], Awaitable[BudgetUsage]] | None = None
 
     async def run_model(
         self, request_id: str, handler: Callable[[], Awaitable[ModelResponse]],
     ) -> ModelResponse:
-        await self.repository.admit_model(self.scope_id, request_id)
+        if self._guarded_admit_model is None:
+            await self.repository.admit_model(self.scope_id, request_id)
+        else:
+            # Untraced recovery may restart the model journal; budget receipts cannot.
+            request_id = canonical_sha256({"generation": self._turn_generation, "request_id": request_id})
+            await self._guarded_admit_model(request_id)
         try:
             response = await handler()
         except BaseException:
@@ -48,7 +56,10 @@ class RunBudgetContext:
             "operation_id": operation_id,
             "fence": fence,
         })
-        await self.repository.admit_tool(self.scope_id, identity)
+        if self._guarded_admit_tool is None:
+            await self.repository.admit_tool(self.scope_id, identity)
+        else:
+            await self._guarded_admit_tool(identity)
 
 
 class RunBudgetCapability(AbstractCapability[AgentContext[object]]):

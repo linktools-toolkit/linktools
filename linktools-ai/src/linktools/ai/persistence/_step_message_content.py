@@ -209,8 +209,8 @@ class NativeMessageContent:
             raise ValueError("native content cache limits must be nonnegative")
         self._context = context
         metadata = build_step_sql_metadata()
-        self._messages = metadata.tables["ai_step_messages"]
-        self._nodes = metadata.tables["ai_step_sequences"]
+        self._messages = metadata.tables["ai_messages"]
+        self._nodes = metadata.tables["ai_message_sequences"]
         self._generation = 0
         self._prepared: WeakSet[PreparedNativeMessages] = WeakSet()
         self._replacements: WeakKeyDictionary[PreparedNativeMessages, PreparedNativeMessages] = WeakKeyDictionary()
@@ -283,6 +283,34 @@ class NativeMessageContent:
         self._proofs.add(result)
         return result
 
+    @staticmethod
+    def _append_frontier(frontier: deque[ImmutableSequenceNode], identity: str) -> ImmutableSequenceNode:
+        first = frontier[0] if frontier else None
+        second = frontier[1] if len(frontier) > 1 else None
+        node = ImmutableSequenceNode.extend(identity, first, second)
+        if first is not None and second is not None and first.tree_count == second.tree_count:
+            frontier.popleft()
+            frontier.popleft()
+        frontier.appendleft(node)
+        return node
+
+    def adopt_checkpoint_prefix(
+        self, root: NativeMessageRoot, messages: MessageSnapshot,
+    ) -> CommittedNativeMessages | None:
+        """Prove the bytes of a retained complete snapshot selected by its SQL owner."""
+        self._scope(root)
+        span, = root.slices
+        if span.start != 0 or span.end != span.count or span.count != len(messages):
+            return None
+        frontier: deque[ImmutableSequenceNode] = deque()
+        for raw in messages.encoded_payloads():
+            self._append_frontier(frontier, hashlib.sha256(raw).hexdigest())
+        if not frontier or frontier[0].identity != span.first:
+            return None
+        proof = CommittedNativeMessages(root.sequence, tuple(frontier), self._generation)
+        self._proofs.add(proof)
+        return proof
+
     async def prepare_append(
         self, delta: MessageSnapshot, *,
         prepare_payload: Callable[[bytes], Awaitable[PreparedMessagePayload]],
@@ -339,13 +367,7 @@ class NativeMessageContent:
                 messages[identity] = payload.content
                 if archive is not None and reuse_payload is not None:
                     additions[identity] = payload.content
-            first = frontier[0] if frontier else None
-            second = frontier[1] if len(frontier) > 1 else None
-            node = ImmutableSequenceNode.extend(identity, first, second)
-            if first is not None and second is not None and first.tree_count == second.tree_count:
-                frontier.popleft()
-                frontier.popleft()
-            frontier.appendleft(node)
+            node = self._append_frontier(frontier, identity)
             if not use_cache or node.identity not in self._known_nodes:
                 nodes[node.identity] = node
             count = _count(count + 1)
@@ -580,6 +602,7 @@ class NativeMessageContent:
 
     def range_query(
         self, roots: Sequence[NativeMessageSequence | NativeMessageRoot], *, budget: NativeRangeBudget = NativeRangeBudget(),
+        _identities_only: bool = False,
     ) -> NativeRangeQuery | None:
         """One body SELECT, traversing intersecting subtrees only.
 
@@ -596,19 +619,26 @@ class NativeMessageContent:
         nodes, messages = self._nodes, self._messages
         store = bindparam("native_store_key", self._store_key, type_=nodes.c.store_key.type)
         locator = bindparam("native_store_locator", self._store_locator, type_=nodes.c.store_locator.type)
+        body_columns = () if _identities_only else (
+            messages.c.message, messages.c.compression, messages.c.raw_size, messages.c.payload_json,
+        )
+        node_columns = (
+            nodes.c.sha256, nodes.c.message_sha256, nodes.c.tree_count,
+            nodes.c.left_sha256, nodes.c.right_sha256, nodes.c.next_sha256,
+        )
         seeds = []
         depth = path_units = 0
         inputs, _ = self._range_inputs(roots)
         if len(inputs) > budget.max_seeds:
             raise ValueError("native range seed budget exceeded")
         if inputs and all(item.count == 1 for _, _, item in inputs):
+            source = nodes if _identities_only else nodes.outerjoin(messages, and_(
+                messages.c.store_locator == locator, messages.c.store_key == store, messages.c.sha256 == nodes.c.message_sha256,
+            ))
             statement = select(
                 null().label("request"), null().label("span"), integer(0).label("position"),
-                nodes.c.sha256, nodes.c.message_sha256, nodes.c.tree_count,
-                nodes.c.left_sha256, nodes.c.right_sha256, nodes.c.next_sha256, messages.c.message, messages.c.compression, messages.c.raw_size, messages.c.payload_json,
-            ).select_from(nodes.outerjoin(messages, and_(
-                messages.c.store_locator == locator, messages.c.store_key == store, messages.c.sha256 == nodes.c.message_sha256,
-            ))).where(nodes.c.store_locator == locator, nodes.c.store_key == store, nodes.c.sha256.in_(
+                *node_columns, *body_columns,
+            ).select_from(source).where(nodes.c.store_locator == locator, nodes.c.store_key == store, nodes.c.sha256.in_(
                 bindparam("native_singleton_ids", [item.first for _, _, item in inputs], expanding=True),
             ))
             return self._range_plan(statement, depth=0, path_units=len(inputs), budget=budget)
@@ -682,15 +712,16 @@ class NativeMessageContent:
             closure = select(start).cte("native_range_nodes", recursive=True)
             closure = closure.union_all(extend(closure))
         selected = and_(closure.c.position >= closure.c.lo, closure.c.position < closure.c.hi)
-        statement = select(
-            closure.c.request, closure.c.span, closure.c.position, nodes.c.sha256,
-            nodes.c.message_sha256, nodes.c.tree_count, nodes.c.left_sha256, nodes.c.right_sha256,
-            nodes.c.next_sha256, messages.c.message, messages.c.compression, messages.c.raw_size, messages.c.payload_json,
-        ).select_from(closure.join(nodes, and_(
+        source = closure.join(nodes, and_(
             nodes.c.store_locator == locator, nodes.c.store_key == store, nodes.c.sha256 == closure.c.sha256,
-        )).outerjoin(messages, and_(
-            selected, messages.c.store_locator == locator, messages.c.store_key == store, messages.c.sha256 == nodes.c.message_sha256,
-        )))
+        ))
+        if not _identities_only:
+            source = source.outerjoin(messages, and_(
+                selected, messages.c.store_locator == locator, messages.c.store_key == store,
+                messages.c.sha256 == nodes.c.message_sha256,
+            ))
+        statement = select(closure.c.request, closure.c.span, closure.c.position,
+                           *node_columns, *body_columns).select_from(source)
         return self._range_plan(statement, depth=depth, path_units=path_units, budget=budget)
 
     def _range_plan(
@@ -708,6 +739,7 @@ class NativeMessageContent:
     async def hydrate_ranges(
         self, roots: Sequence[NativeMessageSequence | NativeMessageRoot], rows: Sequence[Mapping[str, object]], *,
         read_object: Callable[[ObjectRef], Awaitable[bytes]] | None = None,
+        _identities_only: bool = False,
     ) -> tuple[tuple[bytes, ...], ...]:
         """Validate traversed metadata and decode only selected canonical bodies.
 
@@ -762,7 +794,12 @@ class NativeMessageContent:
                         raise ValueError("native range sequence is corrupt")
                     if forest and ((remaining > expected) != (node.next_forest is not None)):
                         raise ValueError("native range forest is incomplete")
-                    if lo <= position < hi:
+                    if _identities_only:
+                        if node.identity != identity:
+                            raise ValueError("native range node identity is corrupt")
+                        if lo <= position < hi:
+                            selected[position] = node.content_id.encode("ascii")
+                    elif lo <= position < hi:
                         try:
                             content = ContentRecord.from_native_row(row)
                         except (AIError, TypeError, ValueError) as error:
