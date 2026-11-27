@@ -169,7 +169,7 @@ def test_feedback_retry_uses_declared_optional_defaults() -> None:
 
 
 @_NEW_SDK
-@pytest.mark.parametrize("retry", [None, "retry", {}, {**_RETRY, "extra": True}])
+@pytest.mark.parametrize("retry", [None, "retry", {}])
 def test_feedback_requires_known_retry_structure(retry: object) -> None:
     with pytest.raises(AIError) as caught:
         decode_model_messages(_wire({**_feedback_wire(), "retry": retry}))

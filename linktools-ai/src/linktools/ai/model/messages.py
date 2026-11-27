@@ -605,27 +605,6 @@ def _validate_message_facts(message: ModelMessage) -> None:
                 raise ValueError("instruction digest is invalid")
 
 
-def _require_preserved_fields(supplied: object, restored: object) -> None:
-    """Allow declared missing defaults, not ignored or coerced explicit facts."""
-    if supplied is restored:
-        return
-    if isinstance(supplied, dict):
-        if not isinstance(restored, dict) or supplied.keys() - restored.keys():
-            raise ValueError("native message decoder discarded fields")
-        for key, value in supplied.items():
-            _require_preserved_fields(value, restored[key])
-    elif isinstance(supplied, list):
-        if not isinstance(restored, list) or len(supplied) != len(restored):
-            raise ValueError("native message decoder changed a sequence")
-        for left, right in zip(supplied, restored):
-            _require_preserved_fields(left, right)
-    elif isinstance(supplied, str) and isinstance(restored, str) and supplied.endswith("+00:00") and restored == supplied[:-6] + "Z":
-        # Native datetime JSON uses Z for UTC; source archive bytes remain untouched.
-        return
-    elif type(supplied) is not type(restored) or supplied != restored:
-        raise ValueError("native message decoder changed an explicit value")
-
-
 def _encode_messages(messages: Sequence[ModelMessage]) -> list[JsonValue]:
     lowered = []
     patches = []
@@ -757,6 +736,13 @@ def _legacy_message_wire(value: dict[str, object]) -> dict[str, object]:
     return wire
 
 
+def _validate_wire_usage_counts(usage: object) -> None:
+    if isinstance(usage, dict) and any(
+        key in usage and type(usage[key]) is not int for key in _USAGE_TOKEN_FIELDS
+    ):
+        raise ValueError("usage token count must be an integer")
+
+
 def _decode_message(value: object) -> ModelMessage:
     if not isinstance(value, dict):
         raise ValueError("message must be an object")
@@ -773,20 +759,27 @@ def _decode_message(value: object) -> ModelMessage:
     wire["parts"] = [dict(part) if isinstance(part, dict) else part for part in wire["parts"]]
     patches = []
     attempt_usages = []
+    _validate_wire_usage_counts(wire.get("usage"))
     if isinstance(wire.get("failed_attempts"), list):
         wire["failed_attempts"] = [dict(attempt) if isinstance(attempt, dict) else attempt
                                    for attempt in wire["failed_attempts"]]
         for index, attempt in enumerate(wire["failed_attempts"]):
             if isinstance(attempt, dict) and attempt.get("usage") is not None:
+                _validate_wire_usage_counts(attempt["usage"])
                 usage = _USAGE_ADAPTER.validate_python(attempt["usage"])
-                usage_wire = _USAGE_ADAPTER.dump_python(usage, mode="json", warnings="error")
-                _require_preserved_fields(attempt["usage"], usage_wire)
                 attempt_usages.append((index, usage))
                 attempt["usage"] = None
     for pi, part in enumerate(wire["parts"]):
         if not isinstance(part, dict) or "part_kind" not in part:
             raise ValueError("durable part discriminator is required")
         kind = part["part_kind"]
+        if "retry" in part and kind == "builtin-tool-return":
+            raise ValueError("native tool returns cannot carry retry information")
+        retry = part.get("retry")
+        if isinstance(retry, dict) and any(
+            retry.get(key) is not None and type(retry[key]) is not int for key in ("attempt", "max_retries")
+        ):
+            raise ValueError("retry budget must be an integer or null")
         content = (part.get("content") if kind == "user-prompt" else
                    [part.get("content")] if kind == "file" else
                    [part.get("audio")] if kind == "speech" else ())
@@ -802,6 +795,8 @@ def _decode_message(value: object) -> ModelMessage:
                     continue
                 if instruction.get("part_kind") not in {"instruction", "instruction-digest", "instruction-delta"}:
                     raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+                if "dynamic" in instruction and type(instruction["dynamic"]) is not bool:
+                    raise ValueError("instruction dynamic flag must be a boolean")
                 identity = instruction.get("id")
                 if isinstance(identity, str) and _INSTRUCTION_ID_ADAPTER.validate_python(identity) is None:
                     raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
@@ -836,8 +831,10 @@ def _decode_message(value: object) -> ModelMessage:
                 if all(item["type"] == "union_tag_invalid" for item in error.errors(include_input=False, include_context=False))
                 else ErrorCode.STORAGE_INTEGRITY_ERROR)
         raise AIError(code) from None
-    # Global extra=forbid would reject supported provider usage extensions.
-    _require_preserved_fields(wire, ModelMessagesTypeAdapter.dump_python([message], mode="json", warnings="error")[0])
+    for supplied, part in zip(wire["parts"], message.parts):
+        visibility = supplied.get("ui_visibility")
+        if visibility is not None and getattr(part, "ui_visibility", None) != visibility:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     for pi, target, restored in patches:
         part = message.parts[pi]
         if target == "summary":

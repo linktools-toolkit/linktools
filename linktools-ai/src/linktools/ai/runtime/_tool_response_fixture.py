@@ -17,12 +17,6 @@ from ..core import JsonValue, canonical_json_bytes, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..spec import MCPServerSpec, mcp_tool_selector, parse_mcp_tool_selector
 
-_DEFINITION_FIELDS = frozenset({
-    "name", "parameters_json_schema", "description", "outer_typed_dict_key",
-    "strict", "sequential", "kind", "metadata", "timeout", "defer_loading",
-    "unless_native", "with_native", "tool_kind", "return_schema",
-    "include_return_schema", "toolset_id", "capability_id", "unless_tool_kind", "ui_visibility",
-})
 _DEFINITION_ADAPTER = TypeAdapter(ToolDefinition)
 _ARGUMENTS_ADAPTER = TypeAdapter(dict[str, Any])
 
@@ -215,25 +209,18 @@ def _decode_tool(server_id: str, value: JsonValue) -> _FixtureTool:
     if not isinstance(name, str) or not name:
         raise ValueError("fixture original tool name is invalid")
     mcp_tool_selector(server_id, name)
-    if isinstance(definition, dict) and "durable" in definition and definition["durable"] is None:
-        # Native captures may serialize the unset execution-placement setting.
-        # The offline catalog does not accept explicit placement overrides.
-        definition = {key: value for key, value in definition.items() if key != "durable"}
-    if (
-        not isinstance(definition, dict)
-        or not {"name", "parameters_json_schema"}.issubset(definition)
-        or not set(definition).issubset(_DEFINITION_FIELDS)
-        or not isinstance(definition["parameters_json_schema"], dict)
-    ):
-        raise ValueError("fixture tool definition is incomplete or unsupported")
+    if not isinstance(definition, dict) or "parameters_json_schema" not in definition:
+        raise ValueError("fixture must include the captured tool schema")
+    if definition.get("durable") is not None:
+        raise ValueError("fixture cannot override tool execution placement")
     encoded = canonical_json_bytes(definition)
     try:
         decoded = _DEFINITION_ADAPTER.validate_json(encoded, strict=True)
     except ValidationError as error:
         raise ValueError("fixture tool definition is invalid") from error
-    for field in ("unless_tool_kind", "ui_visibility"):
-        if (value := definition.get(field)) is not None and getattr(decoded, field, None) != value:
-            raise ValueError(f"installed SDK cannot preserve fixture tool field {field}")
+    visibility = definition.get("ui_visibility")
+    if visibility is not None and getattr(decoded, "ui_visibility", None) != visibility:
+        raise ValueError("installed SDK cannot preserve fixture tool visibility")
     if not decoded.name or decoded.kind != "function" or decoded.tool_kind is not None:
         raise ValueError("fixture requires ordinary MCP function tools")
     rows = row["responses"]

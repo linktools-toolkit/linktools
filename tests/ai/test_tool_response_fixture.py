@@ -289,7 +289,7 @@ async def test_fixture_coverage_and_named_revision_must_match_selected_servers()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("invalid", (
-    "version", "unknown_field", "explicit_durable", "missing_schema", "unknown_outcome", "raw_mcp",
+    "version", "explicit_durable", "missing_schema", "unknown_outcome", "raw_mcp",
     "multimodal", "duplicate_tool", "conflicting_response", "wrong_model_name",
 ))
 async def test_fixture_rejects_unsupported_or_conflicting_inputs(invalid: str) -> None:
@@ -298,8 +298,6 @@ async def test_fixture_rejects_unsupported_or_conflicting_inputs(invalid: str) -
     response = tool["responses"][0]
     if invalid == "version":
         payload["version"] = 2
-    elif invalid == "unknown_field":
-        tool["definition"]["unknown"] = "ignored"
     elif invalid == "explicit_durable":
         tool["definition"]["durable"] = False
     elif invalid == "missing_schema":
@@ -324,6 +322,22 @@ async def test_fixture_rejects_unsupported_or_conflicting_inputs(invalid: str) -
     try:
         with pytest.raises(AIError):
             await _capabilities(fixture, _Bridge(False))
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_fixture_accepts_additional_sdk_definition_fields() -> None:
+    payload = _manifest()
+    tool = payload["servers"][0]["tools"][0]
+    tool["definition"]["future_sdk_field"] = {"value": "ignored by the current SDK"}
+    store, fixture = await _store(payload)
+    try:
+        manifest = await _load_tool_response_fixture(fixture, fixture.ref)
+        captured, = manifest.server("server").tools
+        assert captured.tool_definition().parameters_json_schema == tool["definition"]["parameters_json_schema"]
+        response = tool["responses"][0]
+        assert captured.result(response["arguments"]) == response["outcome"]["value"]
     finally:
         await store.close()
 

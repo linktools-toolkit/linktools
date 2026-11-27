@@ -90,7 +90,7 @@ def test_legacy_ordinary_content_keeps_its_additive_field_compatibility() -> Non
 
 
 @pytest.mark.parametrize('damage', ['dual_identity', 'prompt_extra', 'prompt_bad', 'reference_extra', 'usage_collision',
-                                   'attempt_negative', 'attempt_overflow', 'attempt_dual', 'attempt_pairs', 'attempts_mapping', 'unknown_field'])
+                                   'attempt_negative', 'attempt_overflow', 'attempt_dual', 'attempt_pairs', 'attempts_mapping'])
 def test_legacy_read_rejects_ambiguous_or_corrupt_values(damage: str) -> None:
     rows = json.loads(_filesystem_payload())
     if damage == 'dual_identity': rows[0]['conversation_id'] = 'other'
@@ -103,7 +103,6 @@ def test_legacy_read_rejects_ambiguous_or_corrupt_values(damage: str) -> None:
     elif damage == 'attempt_pairs': rows[2]['failed_attempts'][0] = list(rows[2]['failed_attempts'][0].items())
     elif damage == 'attempts_mapping': rows[2]['failed_attempts'] = {}
     elif damage == 'attempt_dual': rows[2]['failed_attempts'][0]['duration'] = 'PT1S'
-    elif damage == 'unknown_field': rows[0]['unknown'] = 'cannot discard'
     with pytest.raises(AIError) as caught:
         decode_model_messages(canonical_json_bytes(rows))
     assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
