@@ -119,21 +119,30 @@ async def test_fixture_declaration_retains_validated_immutable_reference_and_bor
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("filter_kind", [None, "file-read", True])
-async def test_fixture_preserves_optional_tool_kind_filter_without_silent_downgrade(filter_kind: object) -> None:
+@pytest.mark.parametrize(("field", "value"), [
+    ("unless_tool_kind", None),
+    ("unless_tool_kind", "file-read"),
+    ("unless_tool_kind", True),
+    ("ui_visibility", None),
+    ("ui_visibility", "private"),
+    ("ui_visibility", "invalid"),
+])
+async def test_fixture_preserves_optional_tool_behavior_without_silent_downgrade(
+    field: str, value: object,
+) -> None:
     payload = _manifest()
-    payload["servers"][0]["tools"][0]["definition"]["unless_tool_kind"] = filter_kind
-    supports_filter = "unless_tool_kind" in {field.name for field in fields(ToolDefinition)}
+    payload["servers"][0]["tools"][0]["definition"][field] = value
+    supports_field = field in {item.name for item in fields(ToolDefinition)}
     store, fixture = await _store(payload)
     try:
-        if filter_kind is True or (filter_kind is not None and not supports_filter):
+        if value in (True, "invalid") or (value is not None and not supports_field):
             with pytest.raises(AIError) as failed:
                 await _load_tool_response_fixture(fixture, fixture.ref)
             assert failed.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         else:
             loaded = await _load_tool_response_fixture(fixture, fixture.ref)
             definition = loaded.server("server").tools[0].tool_definition()
-            assert TypeAdapter(ToolDefinition).dump_python(definition).get("unless_tool_kind") == filter_kind
+            assert getattr(definition, field, None) == value
     finally:
         await store.close()
 

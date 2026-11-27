@@ -21,7 +21,7 @@ _DEFINITION_FIELDS = frozenset({
     "name", "parameters_json_schema", "description", "outer_typed_dict_key",
     "strict", "sequential", "kind", "metadata", "timeout", "defer_loading",
     "unless_native", "with_native", "tool_kind", "return_schema",
-    "include_return_schema", "toolset_id", "capability_id", "unless_tool_kind",
+    "include_return_schema", "toolset_id", "capability_id", "unless_tool_kind", "ui_visibility",
 })
 _DEFINITION_ADAPTER = TypeAdapter(ToolDefinition)
 _ARGUMENTS_ADAPTER = TypeAdapter(dict[str, Any])
@@ -231,11 +231,9 @@ def _decode_tool(server_id: str, value: JsonValue) -> _FixtureTool:
         decoded = _DEFINITION_ADAPTER.validate_json(encoded, strict=True)
     except ValidationError as error:
         raise ValueError("fixture tool definition is invalid") from error
-    if definition.get("unless_tool_kind") is not None and (
-        _DEFINITION_ADAPTER.dump_python(decoded).get("unless_tool_kind")
-        != definition["unless_tool_kind"]
-    ):
-        raise ValueError("installed SDK cannot preserve fixture tool-kind filtering")
+    for field in ("unless_tool_kind", "ui_visibility"):
+        if (value := definition.get(field)) is not None and getattr(decoded, field, None) != value:
+            raise ValueError(f"installed SDK cannot preserve fixture tool field {field}")
     if not decoded.name or decoded.kind != "function" or decoded.tool_kind is not None:
         raise ValueError("fixture requires ordinary MCP function tools")
     rows = row["responses"]
