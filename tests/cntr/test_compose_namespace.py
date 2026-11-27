@@ -144,6 +144,7 @@ def test_nginx_joins_safeline_tengine_network(monkeypatch, fresh_manager, instal
         ]
         safeline = models["safeline"]["services"]
         assert "nginx" not in safeline
+        assert f"SUBNET_PREFIX={prefix}" in safeline["safeline-mgt"]["environment"]
         assert all(set(spec["networks"]) == {"safeline-ce"} for spec in safeline.values())
         assert "nginx" not in models["safeline"]["networks"]
         assert safeline["safeline-tengine"]["networks"]["safeline-ce"] == {"ipv4_address": prefix + ".254"}

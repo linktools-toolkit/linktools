@@ -30,6 +30,7 @@ services:
     environment:
       - MGT_PG=postgres://safeline-ce:{{ SAFELINE_POSTGRES_PASSWORD }}@safeline-pg/safeline-ce?sslmode=disable
       - MGT_PROXY=0
+      - SUBNET_PREFIX={{ SAFELINE_SUBNET_PREFIX }}
     depends_on:
       safeline-pg:
         condition: service_healthy
