@@ -328,7 +328,8 @@ URL/端口参数接收字面值或 ConfigValue；配置键显式使用 ConfigRef
 
 SafeLine 独立拥有 `safeline-ce` 网络，Tengine 和其他 SafeLine 服务只加入这个网络。
 启用 SafeLine 时，Nginx 额外加入该网络，固定为 `.253`；Tengine 固定为 `.254`。
-Nginx 保留自己的应用网络，但 Tengine 不加入它。网段沿用 `SAFELINE_SUBNET_PREFIX`，默认 `172.22.242`。
+Nginx 保留自己的应用网络，但 Tengine 不加入它。网段由 `SAFELINE_SUBNET_PREFIX` 指定，默认 `172.22.222`。
+已有 `172.22.242.0/24` 网络若不迁移，升级前请显式设置 `SAFELINE_SUBNET_PREFIX=172.22.242`。
 
 回源契约为 `http://nginx:<NGINX_WAF_PORT>`，默认 `http://nginx:8000`。
 固定地址避免容器重建后双向代理仍使用旧 IP；两者不共享网络命名空间，Nginx 健康检查不等待 Tengine。

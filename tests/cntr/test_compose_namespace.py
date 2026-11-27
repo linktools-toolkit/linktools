@@ -111,12 +111,13 @@ def test_compose_with_dependencies_expands_selection(monkeypatch, fresh_manager)
 
 
 @pytest.mark.parametrize("installed,waf", [(True, True), (True, False), (False, False)])
-@pytest.mark.parametrize("prefix", ["172.22.242", "172.29.171"])
-def test_nginx_joins_safeline_tengine_network(monkeypatch, fresh_manager, installed, waf, prefix):
+@pytest.mark.parametrize("prefix,override", [("172.22.222", None), ("172.29.171", "172.29.171")])
+def test_nginx_joins_safeline_tengine_network(monkeypatch, fresh_manager, installed, waf, prefix, override):
     if not installed:
         fresh_manager.installed_state.remove("safeline")
     fresh_manager.config.set("NGINX_WAF_ENABLE", waf)
-    fresh_manager.config.set("SAFELINE_SUBNET_PREFIX", prefix)
+    if override is not None:
+        fresh_manager.config.set("SAFELINE_SUBNET_PREFIX", override)
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     recorded = _record(fresh_manager, monkeypatch)
 

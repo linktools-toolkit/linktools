@@ -72,7 +72,7 @@
           "aliases": [
             "nginx-origin"
           ],
-          "ipv4_address": "172.22.242.253"
+          "ipv4_address": "172.22.222.253"
         }
       },
       "ports": [

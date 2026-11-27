@@ -8,8 +8,8 @@
       "ipam": {
         "config": [
           {
-            "gateway": "172.22.242.1",
-            "subnet": "172.22.242.0/24"
+            "gateway": "172.22.222.1",
+            "subnet": "172.22.222.0/24"
           }
         ],
         "driver": "default"
@@ -33,7 +33,7 @@
       },
       "networks": {
         "safeline-ce": {
-          "ipv4_address": "172.22.242.10"
+          "ipv4_address": "172.22.222.10"
         }
       },
       "restart": "unless-stopped",
@@ -57,7 +57,7 @@
       },
       "networks": {
         "safeline-ce": {
-          "ipv4_address": "172.22.242.5"
+          "ipv4_address": "172.22.222.5"
         }
       },
       "restart": "unless-stopped",
@@ -79,7 +79,7 @@
       },
       "networks": {
         "safeline-ce": {
-          "ipv4_address": "172.22.242.8"
+          "ipv4_address": "172.22.222.8"
         }
       },
       "restart": "unless-stopped",
@@ -98,7 +98,7 @@
         }
       },
       "environment": [
-        "MGT_IP=172.22.242.4",
+        "MGT_IP=172.22.222.4",
         "LUIGI_PG=postgres://safeline-ce:Pg-pAssw0rd@safeline-pg/safeline-ce?sslmode=disable"
       ],
       "hostname": "safeline-luigi",
@@ -111,7 +111,7 @@
       },
       "networks": {
         "safeline-ce": {
-          "ipv4_address": "172.22.242.7"
+          "ipv4_address": "172.22.222.7"
         }
       },
       "restart": "unless-stopped",
@@ -133,7 +133,7 @@
       "environment": [
         "MGT_PG=postgres://safeline-ce:Pg-pAssw0rd@safeline-pg/safeline-ce?sslmode=disable",
         "MGT_PROXY=0",
-        "SUBNET_PREFIX=172.22.242"
+        "SUBNET_PREFIX=172.22.222"
       ],
       "healthcheck": {
         "test": "curl -k -f https://localhost:1443/api/open/health"
@@ -148,7 +148,7 @@
       },
       "networks": {
         "safeline-ce": {
-          "ipv4_address": "172.22.242.4"
+          "ipv4_address": "172.22.222.4"
         }
       },
       "ports": [
@@ -187,7 +187,7 @@
       },
       "networks": {
         "safeline-ce": {
-          "ipv4_address": "172.22.242.2"
+          "ipv4_address": "172.22.222.2"
         }
       },
       "restart": "unless-stopped",
@@ -207,10 +207,10 @@
         }
       },
       "environment": [
-        "TCD_MGT_API=https://172.22.242.4:1443/api/open/publish/server",
-        "TCD_SNSERVER=172.22.242.5:8000",
-        "SNSERVER_ADDR=172.22.242.5:8000",
-        "CHAOS_ADDR=172.22.242.10"
+        "TCD_MGT_API=https://172.22.222.4:1443/api/open/publish/server",
+        "TCD_SNSERVER=172.22.222.5:8000",
+        "SNSERVER_ADDR=172.22.222.5:8000",
+        "CHAOS_ADDR=172.22.222.10"
       ],
       "hostname": "safeline-tengine",
       "image": "chaitin/safeline-tengine:latest",
@@ -222,7 +222,7 @@
       },
       "networks": {
         "safeline-ce": {
-          "ipv4_address": "172.22.242.254"
+          "ipv4_address": "172.22.222.254"
         }
       },
       "restart": "unless-stopped",

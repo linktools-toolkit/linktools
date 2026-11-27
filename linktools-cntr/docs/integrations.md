@@ -654,7 +654,7 @@ upstreams to Docker runtime DNS.
 ### Nginx and SafeLine networks
 
 SafeLine owns the `safeline-ce` bridge and its existing `SAFELINE_SUBNET_PREFIX`
-(default `172.22.242`). All SafeLine services, including Tengine and management,
+(default `172.22.222`). All SafeLine services, including Tengine and management,
 join only this bridge. When SafeLine is enabled, Nginx also joins it at `.253`,
 while retaining its own `nginx` bridge for application backends. Tengine keeps
 its fixed `.254` address. Nginx only references SafeLine's network; it does not
@@ -702,8 +702,9 @@ instead would create a forwarding loop. The WAF port is not published to the
 host. `SAFELINE_PORT=0` disables the optional management host port; its default
 remains `9200` mapped to `1443`.
 
-No new subnet setting or Nginx network recreation is required. Existing valid
-`http://nginx:<NGINX_WAF_PORT>` origins remain valid and are not rewritten.
+To keep an existing bridge on the previous default `172.22.242.0/24`, explicitly
+set `SAFELINE_SUBNET_PREFIX=172.22.242` before applying the updated configuration.
+Existing valid `http://nginx:<NGINX_WAF_PORT>` origins are not rewritten.
 Changing `SAFELINE_SUBNET_PREFIX` separately remains a network migration, not a
 partial service update. Check it against host/VPN/other Docker routes before
 changing it. Scoped SafeLine removal does not remove a bridge still used by

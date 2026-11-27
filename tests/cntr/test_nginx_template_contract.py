@@ -182,7 +182,7 @@ def test_default_listeners_are_explicit_and_independent_of_server_name(
     assert rendered.count("default_server") == (3 if default else 0)
     assert rendered.count("server_name " + server_name + ";") == 3
     assert "auth_request /_internal/auth;" in rendered
-    assert "proxy_pass http://172.22.242.254:8000;" in rendered
+    assert "proxy_pass http://172.22.222.254:8000;" in rendered
     assert "ssl_certificate " in rendered
 
 
