@@ -45,9 +45,9 @@ def test_waf_forwarding_and_origin_trust_use_only_tengine_peer(fresh_manager):
     fresh_manager.config.set("NGINX_WAF_PORT", 8880)
     nginx = fresh_manager.containers["nginx"]
     rendered = nginx._render_site_template(nginx, nginx.get_source_path("templates", "server.conf"), make_site())
-    assert 'set $waf_target "http://172.29.171.254:8880";' in rendered
+    assert 'proxy_pass http://172.29.171.254:8880;' in rendered
     assert 'set_real_ip_from 172.29.171.254;' in rendered
-    assert 'if ($peer_address != "172.29.171.254") { return 403; }' in rendered
+    assert 'if ($waf_origin_allowed = 0) { return 403; }' in rendered
     assert "set_real_ip_from 172.29.171.0/24" not in rendered
 
 
@@ -182,7 +182,7 @@ def test_default_listeners_are_explicit_and_independent_of_server_name(
     assert rendered.count("default_server") == (3 if default else 0)
     assert rendered.count("server_name " + server_name + ";") == 3
     assert "auth_request /_internal/auth;" in rendered
-    assert "proxy_pass $waf_target;" in rendered
+    assert "proxy_pass http://172.22.242.254:8000;" in rendered
     assert "ssl_certificate " in rendered
 
 
@@ -440,7 +440,7 @@ def test_original_field_definition_drives_native_values_and_snapshot(fresh_manag
         assert "real_ip_recursive on;" in server
         assert "set $waf_scheme " + ("https" if https else "http") + ";" in server
         assert "$original_host|$original_uri|$original_method|" in server
-        waf_location = server.split("location @waf {", 1)[1].split("}", 1)[0]
+        waf_location = server.split("location / {", 1)[1].split("}", 1)[0]
         assert "X-Proxy-Original-" not in waf_location
 
 
@@ -560,7 +560,7 @@ def test_native_location_body_limit_can_override_site_default(fresh_manager, tmp
     nginx.__dict__["sites"] = {site._declaration: site}
     rendered = prepared_config(nginx)["sites/generated.conf"]
     assert rendered.count('client_max_body_size "10m";') == 2
-    assert rendered.count("client_max_body_size 0;") == 2
+    assert rendered.count("client_max_body_size 0;") == 1
 
 
 def test_body_limit_is_one_quoted_token_and_rejects_control_characters(fresh_manager):
@@ -597,6 +597,6 @@ def test_server_parameters_have_shared_defaults_and_explicit_overrides(fresh_man
     rendered = prepared_config(nginx)["sites/generated.conf"]
     for key, value in dict(values, client_max_body_size="1m", proxy_cache="off").items():
         assert rendered.count(key + ' "' + value + '";') == 1 + int(waf)
-    assert rendered.count("proxy_read_timeout 7s;") == 1 + int(waf)
+    assert rendered.count("proxy_read_timeout 7s;") == 1
     assert "fastcgi_max_temp_file_size" not in rendered
     assert dict(site.template_vars) == values

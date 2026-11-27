@@ -268,6 +268,7 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
         root = root.rsplit("}", 1)[0] + """
         server {
             listen 127.0.0.254:PORT;
+            location = /waf-unavailable { return 503; }
             location / {
                 proxy_bind 127.0.0.254;
                 proxy_http_version 1.1;
@@ -303,7 +304,9 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
         server_text += nginx._render_site_template(
             producer, nginx.get_source_path("templates", "server.conf"), plain_site,
             business=render("default.conf", plain_site))
-        server_text = server_text.replace("location @waf {", "location @waf { proxy_bind 127.0.0.253;")
+        server_text = server_text.replace("/run/nginx-waf-", str(tmp_path) + "/waf-")
+        server_text = server_text.replace("proxy_pass http://127.0.0.254:",
+                                          "proxy_bind 127.0.0.253; proxy_pass http://127.0.0.254:")
         server_text = server_text.replace("/etc/certs/live/", str(tmp_path) + "/")
         server_text = server_text.replace("listen " + str(origin_port) + " ",
                                           "listen 127.0.0.253:" + str(origin_port) + " ")
@@ -389,6 +392,13 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
             status, _ = request("/private", {"X-Test-Auth-Status": str(denied)})
             assert status == (302 if denied == 401 else denied)
             assert "app" not in [event[0] for event in events]
+        events.clear()
+        status, _ = request("/waf-unavailable")
+        assert status == 503
+        assert events == []
+        status, _ = request("/waf-public/private", {"X-Test-Auth-Status": "401"})
+        assert status == 302
+        assert [event[0] for event in events] == ["auth"]
         status, data = request("/fallback", {"X-Test-Auth-Status": "403"})
         assert status == 200 and json.loads(data)["headers"]["Authorization"] == "Bearer client"
         assert "X-Auth-User" not in json.loads(data)["headers"]
@@ -723,6 +733,7 @@ def test_native_body_limits_with_fixed_length_and_chunked_requests(fresh_manager
         business += "\nlocation /bypass/unlimited { client_max_body_size 0; proxy_pass " + site.proxy + "; }"
         server = nginx._render_site_template(
             producer, nginx.get_source_path("templates", "server.conf"), site, business=business)
+        server = server.replace("/run/nginx-waf-", str(tmp_path) + "/waf-")
         server = server.replace("listen " + str(origin_port) + " ",
                                 "listen 127.0.0.253:" + str(origin_port) + " ")
         if waf:

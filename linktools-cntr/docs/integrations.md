@@ -468,7 +468,8 @@ templates retain only the explicit context described below.
   requires the global capability; missing providers fail closed
 - Browser authentication requires HTTPS
 - `auth_bypass` and `waf_bypass` independently match the normalized main-request
-  path without query; no application path is implicitly trusted
+  path without query. A WAF exception preserves application authentication and
+  does not change request limits on the origin.
 - `auth_headers` is literal data, injected only after actual successful
   authentication; bypass and explicit native auth-off preserve client tokens
 - Native access rules belong to `Authelia.access`, independently of request authentication
@@ -669,15 +670,19 @@ it. Neither service borrows the other's network namespace. Nginx's Unix-socket
 healthcheck does not wait for Tengine; only Tengine's startup dependency points
 to healthy Nginx.
 
-Public requests enter Nginx's HTTP/HTTPS listeners and WAF-protected requests
-are forwarded to Tengine at `.254:<NGINX_WAF_PORT>`. SafeLine returns them to
-Nginx's separate HTTP origin listener at `nginx:<NGINX_WAF_PORT>`. That listener
-runs the application/authentication routes without forwarding into WAF again.
+For WAF-enabled sites, the public Nginx listener directly proxies ordinary
+requests to Tengine at `.254:<NGINX_WAF_PORT>`. SafeLine returns them to Nginx's
+separate HTTP origin listener at `nginx:<NGINX_WAF_PORT>`. Application routing
+and authentication run only at that origin. Explicit `waf_bypass` paths use a
+private, site-specific Unix socket on the same origin server, preserving the
+declared exception without exposing another TCP port or duplicating application
+routes. An unavailable Tengine does not fall back to this socket.
 Nginx replaces incoming `X-Forwarded-For` with the actual client address before
 forwarding to SafeLine. SafeLine preserves Host and appends its incoming proxy
-address with `$proxy_add_x_forwarded_for`. The origin accepts only the exact
-Tengine TCP peer; recursive realip trusts only the two configured proxy addresses
-(`.253` and `.254`), not the entire subnet. Host, URI and method come from the
+address with `$proxy_add_x_forwarded_for`. The TCP origin accepts only the exact
+Tengine peer. Recursive realip trusts the two configured proxy addresses
+(`.253` and `.254`), not the entire subnet. The private socket, when present,
+accepts the forwarded address set by the local ingress. Host, URI and method come from the
 native request and are snapshotted before business rewrites. The origin scheme
 comes from the site's HTTPS setting: HTTPS sites redirect their public HTTP
 listener rather than serving application traffic there.

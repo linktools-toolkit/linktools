@@ -515,7 +515,11 @@ class Container(BaseContainer):
                 leader.producer, self.get_source_path("templates", "server.conf"),
                 leader, business="\n".join(routes), sites=sites, route_auth=route_auth,
                 template_vars=template_vars))
-        return {"sites/generated.conf": "\n".join(rendered)}, any(site.waf for site in active)
+        waf_ports = {site.producer.get_config("NGINX_WAF_PORT") for site in active if site.waf}
+        for port in sorted(waf_ports - defaults.keys()):
+            rendered.append(
+                'server { listen %s default_server; server_name ""; return 404; }' % port)
+        return {"sites/generated.conf": "\n".join(rendered)}, bool(waf_ports)
 
     def on_starting(self, context: "OperationContext") -> None:
         import tarfile

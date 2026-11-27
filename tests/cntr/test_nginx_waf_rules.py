@@ -4,7 +4,6 @@
 
 import re
 from types import SimpleNamespace
-import shlex
 from typing import TYPE_CHECKING
 
 import pytest
@@ -28,19 +27,18 @@ def _render_site(nginx, waf, patterns):
     )
 
 
-def test_site_waf_bypass_routes_through_named_location(fresh_manager):
+def test_site_waf_bypass_uses_private_origin_socket(fresh_manager):
     nginx = fresh_manager.containers["nginx"]
     rendered = _render_site(nginx, True, (r"^/health$", r"\.(css|js)$"))
-    assert "map $uri $waf_skip_123" in rendered
-    assert r'"~*^/health$" 1;' in rendered
-    assert r'"~*\\.(css|js)$" 1;' in rendered
-    assert "if ($waf_skip_123 = 0)" in rendered
-    assert "error_page 418 = @waf" in rendered
-    assert "location @waf" in rendered
-    assert "location / { return 204; }" in rendered
+    assert 'location ~* "^/health$"' in rendered
+    assert r'location ~* "\\.(css|js)$"' in rendered
+    assert "proxy_pass http://172.22.242.254:8000;" in rendered
+    assert "proxy_pass http://unix:/run/nginx-waf-123.sock:;" in rendered
+    assert "listen unix:/run/nginx-waf-123.sock;" in rendered
+    assert "@waf" not in rendered and "418" not in rendered
+    assert rendered.count("location / { return 204; }") == 1
     assert "include sites/" not in rendered
     assert "real_ip_header X-Forwarded-For;" in rendered
-
 
 def test_disabled_waf_has_no_bypass_or_internal_origin(fresh_manager):
     nginx = fresh_manager.containers["nginx"]
@@ -73,24 +71,22 @@ def test_authelia_waf_bypass_preserves_auth_and_other_sites(
         assert "@waf" not in rendered
         return
 
-    waf_map = rendered.split("map $uri $waf_skip_" + site.var_name + " {", 1)[1].split("}", 1)[0]
-    assert "default 0;" in waf_map
-    patterns = [shlex.split(line)[0][2:] for line in waf_map.splitlines() if '"~*' in line]
-    assert patterns == [r"^/api/", r"^/\.well-known/", r"^/jwks\.json$"]
+    patterns = (r"^/api/", r"^/\.well-known/", r"^/jwks\.json$")
+    assert site.waf_bypass == patterns
+    for pattern in patterns:
+        assert "location ~* " + nginx.complex_value(pattern) + " {" in rendered
     for uri in ("/api/", "/api/foo", "/.well-known/", "/.well-known/openid-configuration",
                 "/jwks.json", "/jwks.json?x=1", "/API/foo"):
         assert any(re.search(pattern, uri.partition("?")[0], re.IGNORECASE) for pattern in patterns), uri
     for uri in ("/api", "/apix", "/other/.well-known/", "/.well-known", "/.well-knownx/",
                 "/jwks.json.evil", "/jwks.json/", "/jwksXjson", "/", "/auth-admin", "/app.js"):
         assert not any(re.search(pattern, uri, re.IGNORECASE) for pattern in patterns), uri
-    assert "if ($waf_skip_" + site.var_name + " = 0) { return 418; }" in rendered
-    assert "location @waf" in rendered
+    assert "proxy_pass http://unix:/run/nginx-waf-" + site.var_name + ".sock:;" in rendered
     for other in nginx.sites.values():
         if other.enabled and other is not site:
             assert other.waf is True
             assert other.waf_bypass == ()
-            other_map = rendered.split("map $uri $waf_skip_" + other.var_name + " {", 1)[1].split("}", 1)[0]
-            assert '"~*^/api/" 1;' not in other_map
+            assert "listen unix:/run/nginx-waf-" + other.var_name + ".sock;" not in rendered
 
 
 @pytest.mark.parametrize("https", (False, True))
@@ -115,13 +111,13 @@ def test_safeline_private_dns_suffix_is_http_only(fresh_manager: "ContainerManag
     assert "server_name safeline.lan;" in rendered
     assert "ssl_certificate " not in rendered
     assert "listen 8000" in rendered
-    assert 'set $waf_target "http://172.22.242.254:8000";' in rendered
+    assert 'proxy_pass http://172.22.242.254:8000;' in rendered
 
 
 def test_waf_hop_keeps_common_proxy_limits_and_timeouts(fresh_manager):
     nginx = fresh_manager.containers["nginx"]
     rendered = _render_site(nginx, True, ())
-    waf_location = rendered.split("location @waf {", 1)[1].split("}", 1)[0]
+    waf_location = rendered.split("location / {", 1)[1].split("}", 1)[0]
     parameters = nginx._render_site_template(
         nginx, nginx.get_source_path("templates", "params.conf"),
         SimpleNamespace(template_vars={})).splitlines()
