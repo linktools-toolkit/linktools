@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from linktools.errors import ConfigError
 from linktools.cntr import ContainerError, OperationContext
 
 
@@ -673,7 +674,7 @@ def test_https_requires_configured_dns_root_before_build(fresh_manager, root):
     fresh_manager.config.set("NGINX_ROOT_DOMAIN", root)
     fresh_manager.config.set("NGINX_WILDCARD_DOMAIN", False)
     fresh_manager.config.set("NGINX_HTTPS_ENABLE", True)
-    with pytest.raises(ContainerError, match="Configure NGINX_ROOT_DOMAIN.*HTTPS"):
+    with pytest.raises(ConfigError, match="Configure NGINX_ROOT_DOMAIN.*HTTPS"):
         _ = nginx.docker_compose
 
 

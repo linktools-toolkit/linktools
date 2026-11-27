@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Nginx declarations, lazy domain configuration, and site resolution."""
-import re
 from typing import TYPE_CHECKING
 
 from ._base import Integration
-from ..errors import ContainerError
 
 if TYPE_CHECKING:
     from typing import Any, Mapping, Optional, Sequence
@@ -52,30 +50,6 @@ class Nginx(Integration):
         return self
 
     @classmethod
-    def validate_https_domain(cls, value: str) -> None:
-        """Reject routing placeholders and non-DNS names before TLS configuration."""
-        if not cls.is_dns_domain(value):
-            raise ContainerError("Configure NGINX_ROOT_DOMAIN with a DNS domain for HTTPS.")
-
-    @classmethod
-    def certificate_domain(cls, value: str) -> "Optional[str]":
-        """Resolve an optional certificate name, allowing a leading wildcard."""
-        if not value:
-            return None
-        name = value[2:] if value.startswith("*.") else value
-        if not cls.is_dns_domain(name):
-            raise ContainerError("Invalid nginx certificate domain: {!r}".format(value))
-        return value
-
-    @classmethod
-    def is_dns_domain(cls, value: object, *, qualified: bool = True) -> bool:
-        """DNS routes may use a private suffix; certificates require a qualified name."""
-        labels = value.split(".") if isinstance(value, str) and len(value) <= 253 else ()
-        return (len(labels) >= (2 if qualified else 1) and (len(labels) > 1 or labels[0].lower() != "localhost")
-                and not labels[-1].isdigit() and
-                all(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) for label in labels))
-
-    @classmethod
     def domain(cls, container: "BaseContainer", name: "Optional[str]" = None) -> "LazyProvider":
         """Resolve a container's domain from the installed nginx configuration."""
         from linktools.core import LazyProvider
@@ -84,7 +58,9 @@ class Nginx(Integration):
             if not container.containers["nginx"].enable:
                 return ""
             root = config.get("NGINX_ROOT_DOMAIN")
-            if not config.get("NGINX_WILDCARD_DOMAIN", type=bool) or not cls.is_dns_domain(root, qualified=False):
+            if (not config.get("NGINX_WILDCARD_DOMAIN", type=bool)
+                    or not isinstance(root, str) or root.lower() in ("", "_", "localhost")
+                    or root.rsplit(".", 1)[-1].isdigit()):
                 return root
             if name is None:
                 return f"{container.name}.{root}"

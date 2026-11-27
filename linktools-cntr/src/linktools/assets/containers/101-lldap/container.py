@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 """LLDAP container definition."""
 import os
+import re
 from typing import TYPE_CHECKING
 
 from linktools import utils
 from linktools.cli import CommandError
 from linktools.cntr import BaseContainer, ContainerError
-from linktools.cntr.ext import Flare, Nginx, load_port_url
+from linktools.cntr.ext import Flare, load_port_url
 from linktools.core import ConfigRef, ConfigField, PromptProvider, LazyProvider
 from linktools.decorator import cached_property
 
@@ -24,9 +25,11 @@ class Container(BaseContainer):
     def fields(self) -> "dict[str, Any]":
         def get_base_dn(cfg: "ConfigResolver") -> str:
             domain = cfg.get("NGINX_ROOT_DOMAIN")
-            if not Nginx.is_dns_domain(domain):
-                domain = "example.org"
-            return ",".join(f"dc={part}" for part in domain.split("."))
+            parts = domain.split(".") if isinstance(domain, str) else ()
+            if (len(parts) < 2 or len(domain) > 253 or parts[-1].isdigit() or
+                    not all(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", part) for part in parts)):
+                return "dc=example,dc=org"
+            return ",".join(f"dc={part}" for part in parts)
 
         return dict(
             LLDAP_TAG="stable",

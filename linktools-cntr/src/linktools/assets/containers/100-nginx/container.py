@@ -15,7 +15,6 @@ from jinja2 import Environment, FileSystemLoader, PrefixLoader, StrictUndefined,
 from linktools import utils
 from linktools.cntr import BaseContainer, ContainerError
 from linktools.cntr.container import ContainerTemplateError
-from linktools.cntr.ext import Nginx
 from linktools.core import ConfigValue, ConfigField, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider
 from linktools.decorator import cached_property
 from linktools.errors import ConfigNotFoundError
@@ -25,7 +24,7 @@ from linktools.types import MISSING
 
 if TYPE_CHECKING:
     from types import SimpleNamespace
-    from linktools.cntr.ext import ResolvedSite
+    from linktools.cntr.ext import Nginx, ResolvedSite
     from collections.abc import Sequence
     from typing import Any, Callable, Iterator
     from linktools.core import Config
@@ -135,7 +134,7 @@ class Container(BaseContainer):
             NGINX_TAG="stable-alpine",
             NGINX_WILDCARD_DOMAIN=ConfigField.chain(AliasProvider("WILDCARD_DOMAIN"), default=False),
             NGINX_ROOT_DOMAIN=ConfigField.chain(
-                AliasProvider("ROOT_DOMAIN"), PromptProvider(cached=True), default="_",
+                AliasProvider("ROOT_DOMAIN"), PromptProvider(cached=True), cast=self._resolve_root_domain, default="_",
             ),
             NGINX_HTTP_PORT=ConfigField.chain(
                 AliasProvider("HTTP_PORT"), PromptProvider(cached=True), cast=int, default=80,
@@ -213,20 +212,34 @@ class Container(BaseContainer):
             values.append("export {}={}\n".format(key, shlex.quote(value)))
         return "".join(values)
 
+    @staticmethod
+    def _dns_name(value: str) -> bool:
+        labels = value.split(".")
+        return (len(value) <= 253 and not labels[-1].isdigit() and
+                all(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) for label in labels))
+
+    def _resolve_root_domain(self, domain: str) -> str:
+        if (not isinstance(domain, str) or "." not in domain or not self._dns_name(domain)) and (
+                self.enable and self.get_config("NGINX_HTTPS_ENABLE", type=bool)):
+            raise ValueError("Configure NGINX_ROOT_DOMAIN with a DNS domain for HTTPS.")
+        return domain
+
     @cached_property
     def acme_ssl_domains(self) -> "list[str]":
         if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
             return []
         domain = self.get_config("NGINX_ROOT_DOMAIN")
-        Nginx.validate_https_domain(domain)
         result = [domain, f"*.{domain}"]
         for site in self.sites.values():
             if not site.enabled or not site.https:
                 continue
             for value in site.cert_domains:
-                certificate_domain = Nginx.certificate_domain(value)
-                if certificate_domain is not None and certificate_domain not in result:
-                    result.append(certificate_domain)
+                if not value or value in result:
+                    continue
+                name = value[2:] if value.startswith("*.") else value
+                if "." not in name or not self._dns_name(name):
+                    raise ContainerError("Invalid nginx certificate domain: {!r}".format(value))
+                result.append(value)
         return result
 
     def shell_quote(self, value: object) -> str:
@@ -245,12 +258,12 @@ class Container(BaseContainer):
         import tempfile
         if context.target_services is not None and "nginx" not in context.target_services:
             return
-        root_domain = self.get_config("NGINX_ROOT_DOMAIN")
-        if self.get_config("NGINX_WILDCARD_DOMAIN") and not Nginx.is_dns_domain(root_domain, qualified=False):
-            raise ContainerError("Wildcard domain is enabled; configure NGINX_ROOT_DOMAIN with a DNS domain.")
-        domain = root_domain if self.get_config("NGINX_HTTPS_ENABLE", type=bool) else None
-        if domain is not None:
-            Nginx.validate_https_domain(domain)
+        https = self.get_config("NGINX_HTTPS_ENABLE", type=bool)
+        root = self.get_config("NGINX_ROOT_DOMAIN")
+        domain = root if https else None
+        if not https and self.get_config("NGINX_WILDCARD_DOMAIN", type=bool):
+            if not isinstance(root, str) or root.lower() == "localhost" or not self._dns_name(root):
+                raise ContainerError("Wildcard domain is enabled; configure NGINX_ROOT_DOMAIN with a DNS domain.")
         if self.get_config("NGINX_WAF_ENABLE") and not self.containers["safeline"].enable:
             raise ContainerError("NGINX_WAF_ENABLE is true but safeline container is not enabled.")
         if self.get_config("NGINX_AUTH_ENABLE") and not self.containers["authelia"].enable:
@@ -418,8 +431,6 @@ class Container(BaseContainer):
         for site in self.sites.values():
             if site.enabled:
                 active.append(site.resolve())
-        if any(site.https for site in active):
-            Nginx.validate_https_domain(self.get_config("NGINX_ROOT_DOMAIN"))
         defaults = {}
         for site in active:
             if not site.default_server:

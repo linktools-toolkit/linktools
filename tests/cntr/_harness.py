@@ -54,6 +54,8 @@ def _placeholder(prompt, type=str, default=MISSING, choices=None, **kwargs):
     # via get_uid/get_gid, which fail on synthetic names.
     if prompt == "DOCKER_USER":
         return os.environ.get("SUDO_USER") or getpass.getuser() or "root"
+    if prompt == "NGINX_ROOT_DOMAIN":
+        return "example.test"
     # Fields whose ``default`` is a fresh utils.random_string()/random_secret()
     # each process (e.g. cached=True password generation) would otherwise make
     # snapshots flake between runs -- pin them to a fixed placeholder instead

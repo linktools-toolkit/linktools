@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from linktools.cntr import ContainerError
+from linktools.errors import ConfigError
 from linktools.cntr.ext import Nginx
 
 if TYPE_CHECKING:
@@ -104,7 +105,7 @@ def test_safeline_private_dns_suffix_is_http_only(fresh_manager: "ContainerManag
         fresh_manager.config.set(key, value)
     nginx = fresh_manager.containers["nginx"]
     if https:
-        with pytest.raises(ContainerError, match="NGINX_ROOT_DOMAIN with a DNS domain for HTTPS"):
+        with pytest.raises(ConfigError, match="NGINX_ROOT_DOMAIN with a DNS domain for HTTPS"):
             nginx.acme_ssl_domains
         return
 

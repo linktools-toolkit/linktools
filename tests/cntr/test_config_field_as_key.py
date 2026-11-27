@@ -118,11 +118,12 @@ def test_container_has_no_get_config_later_alias() -> None:
 def test_nginx_domain_provider_via_configfield_key(fresh_manager):
     from linktools.cntr.ext import Nginx
 
-    fresh_manager.config.unset("NGINX_ROOT_DOMAIN")
+    fresh_manager.config.set("NGINX_HTTPS_ENABLE", False)
+    fresh_manager.config.set("NGINX_ROOT_DOMAIN", "_")
     portainer = fresh_manager.containers["portainer"]
     field = ConfigField(name="SOME_DOMAIN", provider=Nginx.domain(portainer, "x"))
     assert isinstance(field.provider, LazyProvider)
-    assert portainer.get_config(field) == "_"  # NGINX_ROOT_DOMAIN falls back to "_" in tests
+    assert portainer.get_config(field) == "_"
 
 
 def test_third_party_nginx_domain_provider_uses_builtin_schema(tmp_path, capsys, monkeypatch):
@@ -141,6 +142,8 @@ def test_third_party_nginx_domain_provider_uses_builtin_schema(tmp_path, capsys,
     manager.installed_state.add("nginx")
 
     manager.prepare_installed_containers()
+    manager.config.set("NGINX_HTTPS_ENABLE", False)
+    manager.config.set("NGINX_ROOT_DOMAIN", "_")
 
     assert container.config.get("AIONUI_DOMAIN") == "_"
 

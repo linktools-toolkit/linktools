@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 from _harness import configure_builtin_inputs
-from linktools.cntr import ContainerError
+from linktools.errors import ConfigError
 from linktools.cntr.ext import Authelia
 
 
@@ -137,5 +137,5 @@ def test_authelia_does_not_publish_configuration_with_placeholder_root(fresh_man
     fresh_manager.config.set("NGINX_ROOT_DOMAIN", "localhost")
     container = fresh_manager.containers["authelia"]
     monkeypatch.setattr(container, "prepare_files", lambda *args: pytest.fail("configuration prepared"))
-    with pytest.raises(ContainerError, match="Configure NGINX_ROOT_DOMAIN.*HTTPS"):
+    with pytest.raises(ConfigError, match="Configure NGINX_ROOT_DOMAIN.*HTTPS"):
         _ = container.config_path
