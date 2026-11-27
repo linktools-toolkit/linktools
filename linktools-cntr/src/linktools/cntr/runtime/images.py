@@ -26,7 +26,6 @@ class ImagePreparationError(ContainerError):
 class LocalImage:
     image_id: str
     revision: "str | None"
-    references: "tuple[str, ...]" = ()
 
 
 @dataclass(frozen=True)
@@ -174,14 +173,12 @@ class ImagePreparer:
                 revision = labels.get(self.BUILD_LABEL)
                 if revision is not None and not isinstance(revision, str):
                     raise ValueError("invalid build revision")
-                names = []
                 for field in ("RepoTags", "RepoDigests"):
                     references = item.get(field)
                     if references is not None and (not isinstance(references, list) or
                             any(not isinstance(reference, str) or not reference for reference in references)):
                         raise ValueError("invalid image references")
-                    names.extend(references or ())
-                states.append(LocalImage(image_id, revision, tuple(names)))
+                states.append(LocalImage(image_id, revision))
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             raise ImagePreparationError("Invalid local image inspection output") from exc
         if result.succeeded:
@@ -208,24 +205,6 @@ class ImagePreparer:
             else:
                 resolved.update(self.inspect_images((image,)))
         return resolved
-
-    def prune_replaced_images(self, image_ids: "Sequence[str]") -> None:
-        """Remove only replaced image IDs, leaving containers and parent images alone."""
-        for image_id in dict.fromkeys(image_ids):
-            image = self.inspect_images((image_id,))[image_id]
-            if image is None or image.image_id != image_id or image.references:
-                continue
-            try:
-                process = self.manager.runtime.create_docker_process(
-                    "image", "rm", "--no-prune", image_id, capture_output=True)
-                result = self.manager.structured_runner.execute_text(process, check=False)
-            except (OSError, StructuredCommandError) as exc:
-                raise ImagePreparationError("Unable to remove replaced image " + image_id) from exc
-            if result.succeeded:
-                self.manager.logger.info("Removed replaced image %s", image_id)
-            else:
-                # Docker owns the cross-project container/child-image conflict check.
-                self.manager.logger.warning("Kept replaced image %s: %s", image_id, (result.stderr or "").strip())
 
     def image_id(self, image: str) -> str:
         state = self.inspect_images((image,))[image]

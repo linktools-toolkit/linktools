@@ -218,14 +218,22 @@ class ComposeOperations:
     def up(self, names: "Sequence[str] | None" = None, pull: bool = False,
            report: bool = False, *, prune: bool = False) -> None:
         with self.manager.environ.locks.process_lock("cntr:project:" + self.manager.project_name):
-            self._start(names, pull, report, restart=False, prune=prune)
+            self._start(names, pull, report, restart=False)
+            if prune:
+                try:
+                    status = self.manager.runtime.create_docker_process("system", "prune").call()
+                except (OSError, ContainerError) as error:
+                    self.manager.logger.warning("Deployment succeeded; Docker system prune could not run: %s", error)
+                else:
+                    if status:
+                        self.manager.logger.warning("Deployment succeeded; Docker system prune exited with %s", status)
 
     def restart(self, names: "Sequence[str] | None" = None, pull: bool = False,
                 report: bool = False) -> None:
         with self.manager.environ.locks.process_lock("cntr:project:" + self.manager.project_name):
             self._start(names, pull, report, restart=True)
 
-    def _start(self, names, pull, report, restart, prune=False):
+    def _start(self, names, pull, report, restart):
         import os
         from copy import copy
         from .artifacts import (AppliedServiceModels, collect_candidates, consumer_config_changes,
@@ -628,16 +636,6 @@ class ComposeOperations:
             manager.running_state.mark_started(applied)
         if context.is_full_project:
             manager.lifecycle.reconcile_removed(context)
-        if prune:
-            current_ids = {item.image_id for item in observed.service_instances()}
-            deployed = observed.existing_services.intersection(selection.services)
-            replaced = sorted({item.image_id for item in actual.service_instances()
-                               if item.service in deployed and item.image_id and item.image_id not in current_ids})
-            try:
-                with record_phase(context, "prune-images", logger=manager.logger):
-                    manager.image_preparer.prune_replaced_images(replaced)
-            except (OSError, ContainerError) as error:
-                manager.logger.warning("Deployment succeeded; image cleanup failed: %s", error)
         try:
             prune_prepared_files(context, model_store)
         except (OSError, ContainerError) as error:

@@ -15,7 +15,7 @@ def metadata(image_id, tags=None, digests=None, revision=None):
             "Config": {"Labels": {ImagePreparer.BUILD_LABEL: revision} if revision else None}}
 
 
-def case(responses, removals=None):
+def case(responses):
     calls, closed = [], []
 
     class Process:
@@ -36,17 +36,12 @@ def case(responses, removals=None):
     def create(*args, **kwargs):
         assert kwargs == {"capture_output": True}
         calls.append(args)
-        if args[:2] == ("image", "rm"):
-            expected, stderr, returncode = removals.pop(0)
-            assert args == ("image", "rm", "--no-prune", expected)
-            return Process(args, ("", stderr, returncode))
         expected, payload, stderr, returncode = responses.pop(0)
         assert args == ("image", "inspect", *expected)
         stdout = payload if isinstance(payload, str) else json.dumps(payload)
         return Process(args, (stdout, stderr, returncode))
 
-    manager = SimpleNamespace(runtime=SimpleNamespace(create_docker_process=create),
-                              logger=SimpleNamespace(info=lambda *args: None, warning=lambda *args: None))
+    manager = SimpleNamespace(runtime=SimpleNamespace(create_docker_process=create))
     manager.structured_runner = StructuredCommandRunner(manager)
     return ImagePreparer(manager), calls, closed
 
@@ -79,9 +74,9 @@ def test_partial_batch_resolves_tags_digests_ids_and_only_retries_unmatched_alia
         (("short-alias",), [alias], "", 0),
     ])
     result = preparer.inspect_images(requests)
-    assert result == {"tagged:latest": LocalImage("sha256:tagged", "r1", ("tagged:latest",)), "missing:latest": None,
-                      digest: LocalImage("sha256:digested", "r2", (digest,)), image_id: LocalImage(image_id, None),
-                      "short-alias": LocalImage("sha256:aliased", None, ("canonical:latest",))}
+    assert result == {"tagged:latest": LocalImage("sha256:tagged", "r1"), "missing:latest": None,
+                      digest: LocalImage("sha256:digested", "r2"), image_id: LocalImage(image_id, None),
+                      "short-alias": LocalImage("sha256:aliased", None)}
     assert len(calls) == 2 and closed == calls
 
 
@@ -89,7 +84,7 @@ def test_partial_result_does_not_shift_later_image_onto_missing_argument():
     preparer, calls, _ = case([(("missing:latest", "found:latest"),
         [metadata("sha256:found", tags=["found:latest"])], "Error: No such image: missing:latest", 1)])
     assert preparer.inspect_images(("missing:latest", "found:latest")) == {
-        "missing:latest": None, "found:latest": LocalImage("sha256:found", None, ("found:latest",))}
+        "missing:latest": None, "found:latest": LocalImage("sha256:found", None)}
     assert len(calls) == 1
 
 
@@ -153,28 +148,8 @@ def test_reported_missing_reference_wins_over_other_objects_stale_repo_tags():
     preparer, calls, _ = case([((image_id, "removed:latest"),
         [metadata(image_id, tags=["removed:latest"])], "Error: No such image: removed:latest", 1)])
     assert preparer.inspect_images((image_id, "removed:latest")) == {
-        image_id: LocalImage(image_id, None, ("removed:latest",)), "removed:latest": None}
+        image_id: LocalImage(image_id, None), "removed:latest": None}
     assert len(calls) == 1
-
-
-def test_prune_leaves_referenced_images_and_defers_container_conflicts_to_docker():
-    tagged, pinned, in_use, stale = ("sha256:" + value * 64 for value in "abcd")
-    images = (tagged, pinned, in_use, stale)
-    prep, calls, closed = case([
-        ((tagged,), [metadata(tagged, tags=["keep:latest"])], "", 0),
-        ((pinned,), [metadata(pinned, digests=["keep@sha256:" + "0" * 64])], "", 0),
-        ((in_use,), [metadata(in_use)], "", 0),
-        ((stale,), [metadata(stale)], "", 0),
-    ], removals=[(in_use, "image is used by a stopped container", 1), (stale, "", 0)])
-    prep.prune_replaced_images((*images, stale))
-    assert calls == closed == [
-        ("image", "inspect", tagged),
-        ("image", "inspect", pinned),
-        ("image", "inspect", in_use),
-        ("image", "rm", "--no-prune", in_use),
-        ("image", "inspect", stale),
-        ("image", "rm", "--no-prune", stale),
-    ]
 
 
 def test_alias_fallback_permission_failure_does_not_become_absent():

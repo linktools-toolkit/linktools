@@ -236,19 +236,21 @@ def test_preparation_images_check_apply_and_notification_have_fixed_order(tmp_pa
     assert manager.running_state.get_persisted() == ["app"]
 
 
-@pytest.mark.parametrize("outcome", ["updated", "unchanged", "failed", "disabled"])
-def test_up_prunes_only_replaced_service_images_after_success(tmp_path, outcome):
-    manager = setup_case(tmp_path, [
-        ("app", {"app": {"image": "app:latest"}}),
-        ("other", {"other": {"image": "other:latest"}}),
-    ], running=("app", "other"))
-    manager.image_preparer.image_id = (
-        lambda ref: "sha256:old-app" if outcome == "unchanged" else "sha256:new-app")
-    manager.image_preparer.prune_replaced_images = (
-        lambda ids: manager.events.append(("prune", tuple(ids))))
+@pytest.mark.parametrize("outcome", ["enabled", "failed", "disabled"])
+def test_up_invokes_native_system_prune_only_after_success(tmp_path, outcome):
+    manager = setup_case(tmp_path, [("app", {"app": {"image": "app:latest"}})], running=("app",))
     manager.compose_runner.verify_services_started = (
         lambda context, services: manager.docker_inspector.get_project_state(None))
 
+    def create_process(*args, **kwargs):
+        # Inherit stdin/stdout so Docker's native confirmation is interactive.
+        assert not kwargs
+        def call():
+            manager.events.append(("docker", args))
+            return 0
+        return SimpleNamespace(call=call)
+
+    manager.runtime = SimpleNamespace(create_docker_process=create_process)
     if outcome == "failed":
         def fail(context):
             raise ContainerError("after-start failed")
@@ -256,16 +258,14 @@ def test_up_prunes_only_replaced_service_images_after_success(tmp_path, outcome)
         with pytest.raises(ContainerError, match="after-start failed"):
             manager.compose_operations.up(["app"], pull=True, prune=True)
     else:
-        manager.compose_operations.up(["app"], pull=True, prune=outcome != "disabled")
+        manager.compose_operations.up(["app"], pull=True, prune=outcome == "enabled")
 
-    pruned = [event[1] for event in manager.events if event[0] == "prune"]
-    if outcome == "updated":
-        assert pruned == [("sha256:old-app",)]
-        assert manager.events.index(("after-callback", "app")) < manager.events.index(("prune", pruned[0]))
-    elif outcome == "unchanged":
-        assert pruned == [()]
+    docker_calls = [event for event in manager.events if event[0] == "docker"]
+    if outcome == "enabled":
+        assert docker_calls == [("docker", ("system", "prune"))]
+        assert manager.events.index(("after-callback", "app")) < manager.events.index(docker_calls[0])
     else:
-        assert not pruned
+        assert not docker_calls
 
 
 def test_failed_check_does_not_stop_or_apply_restart_targets(tmp_path):

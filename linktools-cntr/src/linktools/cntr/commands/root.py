@@ -134,7 +134,7 @@ class Command(StatusCommands, BaseCommandGroup):
     @subcommand_argument("--pull", action=BooleanOptionalAction,
                          help="always attempt to pull a newer version of the image")
     @subcommand_argument("--prune", action="store_true", default=False,
-                         help="remove unused, untagged images replaced by this deployment")
+                         help="run docker system prune after deployment (daemon-wide; asks for confirmation)")
     @subcommand_argument("--dry-run", dest="dry_run", action="store_true", default=False,
                          help="show what would happen, without doing it")
     @subcommand_argument("--json", dest="as_json", action="store_true", default=False,

@@ -263,7 +263,7 @@ def test_up_prune_dry_run_describes_cleanup_without_deploying(fresh_manager, mon
     monkeypatch.setattr(fresh_manager.compose_operations, "up", lambda **kwargs: pytest.fail("unexpected deployment"))
     cntr_main.command.on_command_up(names=["portainer"], pull=True, prune=True, dry_run=True, as_json=True)
     result = json.loads(capsys.readouterr().out)
-    assert any("only replaced" in warning for warning in result["warnings"])
+    assert any("docker system prune" in warning and "entire Docker daemon" in warning for warning in result["warnings"])
 
 
 def test_cntr_help_has_no_removed_plan_command():

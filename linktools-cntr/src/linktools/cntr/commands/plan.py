@@ -61,7 +61,7 @@ def maybe_dry_run(manager: "ContainerManager", logger: "logging.Logger", action:
     plan = manager.planner.plan(action, names=names, pull=pull)
     if prune:
         plan = dataclasses.replace(plan, warnings=(*plan.warnings,
-            "After successful deployment, only replaced, untagged images not used by any container may be removed."))
+            "After successful deployment, docker system prune will ask for confirmation to clean the entire Docker daemon."))
     if as_json:
         print(json.dumps(_plan_to_dict(plan), indent=2, sort_keys=True))
     else:
