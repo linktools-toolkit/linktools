@@ -2183,6 +2183,7 @@ class _RegenerableTurnRunner:
             context_messages, transcript, binding_refs = prepare_native_turn_transcript(
                 model_prompt, turn.history, messages, output,
                 instructions=frozen_spec.instructions, system_prompt=frozen_spec.system_prompt, structured=structured,
+                merge_context_requests=True,
             )
             # The transcript is published as a native archive root, not in the
             # turn row. Bound its body separately from the terminal receipt.

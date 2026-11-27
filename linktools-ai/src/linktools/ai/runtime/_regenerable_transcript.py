@@ -11,6 +11,7 @@ from pydantic_ai.messages import (
     ModelResponse,
     SystemPromptPart,
     UserContent,
+    repair_messages,
 )
 
 from ..model.messages import canonical_structured_output, canonical_structured_output_reference, restore_turn_context, substitute_turn_input
@@ -35,9 +36,13 @@ def prepare_native_turn_transcript(
     prompt: str | Sequence[UserContent], history: Sequence[ModelMessage],
     messages: Sequence[ModelMessage], output: JsonValue, *,
     instructions: tuple[str, ...], system_prompt: str, structured: bool = False,
+    merge_context_requests: bool = False,
 ) -> tuple[tuple[ModelMessage, ...], tuple[ModelMessage, ...], tuple[tuple[int, int | None], ...]]:
     """Use typed placeholders so immutable native messages are valid model values."""
-    delta = _canonical_delta(prompt, history, messages, output, structured=structured)
+    delta = _canonical_delta(
+        prompt, history, messages, output, structured=structured,
+        merge_context_requests=merge_context_requests,
+    )
     static_instructions = "\n".join(instructions)
     omit_instructions = len(static_instructions.encode("utf-8")) >= 128
     omit_system = len(system_prompt.encode("utf-8")) >= 128
@@ -65,14 +70,32 @@ def prepare_native_turn_transcript(
 def _canonical_delta(
     prompt: str | Sequence[UserContent], history: Sequence[ModelMessage],
     messages: Sequence[ModelMessage], output: JsonValue, *, structured: bool = False,
+    merge_context_requests: bool = False,
 ) -> tuple[ModelMessage, ...]:
-    prefix = len(history)
-    if tuple(messages[:prefix]) != tuple(history):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable run replaced its context")
+    frozen = tuple(history)
+    prefix = len(frozen)
+    if tuple(messages[:prefix]) != frozen:
+        if not merge_context_requests:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable run replaced its context")
+        # The SDK joins adjacent provider requests, including the last output
+        # receipt of one turn and the stored user prompt of the next. Compare the
+        # full repaired envelope, but never accept dropped or synthesized parts.
+        repaired = tuple(repair_messages(frozen, repair_last_response=False))
+        prefix = len(repaired)
+        if (prefix >= len(frozen) or tuple(messages[:prefix]) != repaired
+                or _request_merge_contents(frozen) != _request_merge_contents(repaired)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Regenerable run replaced its context")
     suffix = tuple(messages[prefix:])
     if not suffix or reply_from_turn(suffix, structured=structured) != output:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "Terminal output cannot be projected from the transcript")
     return (substitute_turn_input(suffix[0], prompt, ""), *suffix[1:])
+
+
+def _request_merge_contents(messages: Sequence[ModelMessage]) -> tuple[object, ...]:
+    return tuple(
+        item for message in messages
+        for item in (message.parts if isinstance(message, ModelRequest) else (message,))
+    )
 
 
 def decode_regenerable_turn(
