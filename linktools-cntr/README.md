@@ -6,7 +6,7 @@ Docker 容器部署和管理工具，为 homelab 及服务器环境提供统一�
 
 `ct-cntr up --pull safeline sublink omniroute` 只刷新和构建这三个容器自身的服务，不自动拉取或构建 nginx、Authelia 等依赖。关联且正在运行的集成消费者会生成候选配置，仅生成挂载变化时随本次 up 重建；其已应用镜像和其他配置保持不变。未运行消费者不自动启动。已有依赖只做就绪检查；缺少必要依赖时会在镜像操作和停止容器之前提示，把需要的容器显式加到命令中即可。`restart` 和 `exec <容器> up/restart` 遵循相同边界。
 
-`ct-cntr up --pull --prune [容器名…]` 在部署成功后运行 [`docker system prune`](https://docs.docker.com/reference/cli/docker/system/prune/)，保留 Docker 的确认提示，不加 `--force`、`-a` 或 `--volumes`。清理范围是整个 Docker daemon，可能清掉其他项目的已停止容器、未使用的网络、悬空镜像及构建缓存，不限于指定容器。`--dry-run` 只提示，不执行。
+`ct-cntr up --pull --prune [容器名…]` 在部署成功后运行 [`docker system prune --force`](https://docs.docker.com/reference/cli/docker/system/prune/)，不再提示确认，不加 `-a` 或 `--volumes`。清理范围是整个 Docker daemon，可能清掉其他项目的已停止容器、未使用的网络、悬空镜像及构建缓存，不限于指定容器。`--dry-run` 只提示，不执行。
 
 未指定容器的 `ct-cntr up` 仍处理完整项目。依赖关系不会从 Compose 模型删除；若共享服务作者、运行中的重启依赖或 namespace 绑定必须联合操作，会明确要求共同选择，不能静默扩大范围。
 

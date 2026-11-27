@@ -221,7 +221,7 @@ class ComposeOperations:
             self._start(names, pull, report, restart=False)
             if prune:
                 try:
-                    status = self.manager.runtime.create_docker_process("system", "prune").call()
+                    status = self.manager.runtime.create_docker_process("system", "prune", "--force").call()
                 except (OSError, ContainerError) as error:
                     self.manager.logger.warning("Deployment succeeded; Docker system prune could not run: %s", error)
                 else:

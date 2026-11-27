@@ -243,7 +243,6 @@ def test_up_invokes_native_system_prune_only_after_success(tmp_path, outcome):
         lambda context, services: manager.docker_inspector.get_project_state(None))
 
     def create_process(*args, **kwargs):
-        # Inherit stdin/stdout so Docker's native confirmation is interactive.
         assert not kwargs
         def call():
             manager.events.append(("docker", args))
@@ -262,7 +261,7 @@ def test_up_invokes_native_system_prune_only_after_success(tmp_path, outcome):
 
     docker_calls = [event for event in manager.events if event[0] == "docker"]
     if outcome == "enabled":
-        assert docker_calls == [("docker", ("system", "prune"))]
+        assert docker_calls == [("docker", ("system", "prune", "--force"))]
         assert manager.events.index(("after-callback", "app")) < manager.events.index(docker_calls[0])
     else:
         assert not docker_calls
