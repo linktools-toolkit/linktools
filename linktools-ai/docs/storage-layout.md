@@ -42,9 +42,8 @@ production DBA approval or a deployed migration.
 | `ai_session_turns` | Ordinary turn request, generation and terminal transcript. History reads the committed rows in sequence. |
 
 Session turns reference the existing content-addressed `execution-binding` archive. Compiled Agent bindings are shared within the same archive scope, not copied into turn rows.
-| `ai_state_records` | Generic domain control state; a same-group strict SessionRecord also owns its occupied execution and fencing generation. Archive records can own binary bodies. |
+| `ai_state_records` | Generic domain control state, including TaskGraph headers, node definitions, and node state. Graph recovery uses a bounded candidate range in the existing scan index. Archive records can own binary bodies. |
 | `ai_execution_records` | Strict execution lifecycle, exact request routes, coordination receipts, lease and content references. In split storage the Execution group also owns the strict session's occupied route. |
-| `ai_task_graphs` | Authoritative TaskGraph state and recovery ordering. |
 | `ai_state_facts` | Ordered fact payloads and native references; transcript bodies stay with their archive or native owner. |
 | `ai_state_counters` | Monotonic counters shared by execution, task, conversation and trace domains; not message sequences. |
 | `ai_state_operations` | Ordered replay/control receipts; no separate compressed copy. |
@@ -65,7 +64,7 @@ Session turns reference the existing content-addressed `execution-binding` archi
 | `ai_message_sequences` | Immutable message-sequence links and counts, not copied bodies. |
 | `ai_step_snapshots` | Bounded descriptor and sequence root; the descriptor is not the whole conversation. |
 
-For the seven Runtime payload columns that store native JSON objects, see
+For the six Runtime payload columns that store native JSON objects, see
 [SQL state payload storage](sql-payload-storage.md).
 
 Identity, sequence, state, lease, CAS, revision, ordering and time columns are not

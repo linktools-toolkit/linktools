@@ -22,11 +22,14 @@ those callers. The SQL regressions in `test_state_stream_addresses.py` and
 ownership. The remaining dedicated columns must match their domain writers,
 including direct SQL insertion and portable restore.
 
+Graph headers share the generic record owner with their nodes. Their built-in
+identity is still at most 224 framed bytes. Recovery uses the existing State
+scan index; it does not widen the key or add a second index.
+
 ### Dedicated record columns
 
 | Table | Key | Scope | Parent |
 | --- | --- | --- | --- |
-| `ai_task_graphs` | 224 bytes: six framed components, namespace and tenant at 64 bytes each and Graph ID at 64 | Removed; graph headers have no scope | Removed; graph headers have no parent |
 | `ai_execution_records` | 360 bytes: up to 228 for Execution and 360 for its idempotency receipt | 300 bytes: full session or execution-idempotency resource relation | 239 bytes: full parent-execution relation |
 | `ai_step_run_admissions` | 231 bytes: reserved run address with a bounded 64-byte run ID; other key shapes stay in generic State | 308 bytes: full conversation relation | 239 bytes: full parent-run relation |
 | `ai_step_tool_operations` | 234 bytes: exact checkpoint address with a bounded 64-byte operation ID; other key shapes stay in generic State | 308 bytes: full agent-run relation | 309 bytes: full execution relation |
@@ -46,9 +49,7 @@ For the dedicated owners, the full bounded key and relation address are
 retained; the canonical reserved key determines which
 widths apply. Generic record keys retain the full opaque relation budget. Separate
 typed ownership and preserve opaque State records before tightening these
-columns. The Task Graph owner now takes only its dedicated address shape;
-other shapes stay in the generic table. For existing pre-release data using
-a superseded Task Graph owner layout, rebuild before switching schemas.
+columns.
 
 | Field | What must survive | Where to change first |
 | --- | --- | --- |

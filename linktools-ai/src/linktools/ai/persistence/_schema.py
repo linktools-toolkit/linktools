@@ -86,8 +86,6 @@ def build_runtime_sql_metadata(
     build_record_owner_table(metadata, name="ai_state_records", comment=_RECORD_COMMENT)
     build_record_owner_table(metadata, name="ai_execution_records",
                              comment="Authoritative execution lifecycle, request receipts, and content references.")
-    build_record_owner_table(metadata, name="ai_task_graphs",
-                             comment="Authoritative TaskGraph state and recovery ordering.")
     build_record_owner_table(metadata, name="ai_step_tool_operations",
                              comment="Authoritative Step tool effect ledger, including dispatch fencing and durable receipts.")
     from ._run_admission_schema import build_run_admission_sql_metadata

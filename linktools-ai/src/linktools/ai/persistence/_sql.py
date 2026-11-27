@@ -4035,13 +4035,14 @@ def _record_query_statement(metadata: "MetaData", store_key: bytes, query: Recor
                             *, content_columns: Sequence[str] = (), dialect: str | None = None) -> "Select | CompoundSelect":
     from sqlalchemy import literal_column, select, union_all
 
-    if query.kind is not None and query.kind.rstrip(" ") == "execution":
+    if query.kind is not None and query.kind.rstrip(" ") in {"execution", "task_graph"}:
         # Each disjoint range keeps all possible members of the global page.
         # Logical filters and raw-key cursors apply before each branch limit.
+        columns = EXECUTION_REFERENCE_COLUMNS if query.kind.rstrip(" ") == "execution" else content_columns
         branches = [
             _record_page_statement(
                 record_owner_rows(metadata, kind=query.kind, owner=owner, scan_kind=bucket,
-                                  content_columns=EXECUTION_REFERENCE_COLUMNS),
+                                  content_columns=columns),
                 store_key, query,
             )
             for owner in record_owner_names(kind=query.kind)
@@ -4062,24 +4063,6 @@ def _record_query_statement(metadata: "MetaData", store_key: bytes, query: Recor
                 candidates.c.sort_prefix, candidates.c.sort_key, candidates.c.key,
             )
             return statement.limit(query.limit) if query.limit is not None else statement
-    # PAD SPACE collations can make distinct raw states share one equality range.
-    if (query.kind == "task_graph" and query.limit is not None and query.states
-            and len(query.states) <= 2
-            and len({state.rstrip(" ") for state in query.states}) == len(query.states)):
-        # Bound each physical owner's equality range before the global merge.
-        # A range's first N records contain every possible global first-N member.
-        branches = [
-            select(_record_page_statement(
-                record_owner_rows(metadata, owner=owner, kind=query.kind), store_key,
-                replace(query, states=frozenset((state,))),
-            ).subquery())
-            for owner in record_owner_names(kind=query.kind)
-            for state in sorted(query.states)
-        ]
-        candidates = union_all(*branches).subquery()
-        return select(candidates).order_by(
-            candidates.c.sort_prefix, candidates.c.sort_key, candidates.c.key,
-        ).limit(query.limit)
     return _record_page_statement(record_owner_rows(metadata, kind=query.kind,
                                                    content_columns=content_columns), store_key, query)
 

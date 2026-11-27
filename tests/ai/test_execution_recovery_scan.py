@@ -226,7 +226,7 @@ def test_scan_projection_is_not_domain_state_or_a_typed_owner_column():
     assert values["state"] == "FAILED" and values["scan_kind"] == "e:0"
     assert record_scan_kind("execution", "FAILED", prepared=True) == "e:1"
     assert record_scan_kind("execution ", "STARTED ") == "e:1"
-    for owner in ("ai_task_graphs", "ai_step_tool_operations", "ai_step_run_admissions"):
+    for owner in ("ai_step_tool_operations", "ai_step_run_admissions"):
         assert "scan_kind" not in record_owner_values(owner, {"scan_kind": "k:probe"})
 
 

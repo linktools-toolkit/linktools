@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""MySQL kind comparisons must not hide records in dedicated owners."""
+"""MySQL kind comparisons must preserve candidate ranges and raw key cursors."""
 
 from dataclasses import replace
 
@@ -17,7 +17,7 @@ from .test_state_batch_delete_backends import _record
 
 
 @pytest.mark.asyncio
-async def test_mysql_padded_kind_preserves_both_owners_and_raw_cursor(
+async def test_mysql_padded_graph_kind_preserves_records_and_raw_cursor(
     _mysql_server: object,
 ) -> None:
     with _server_database(_mysql_server) as (_, command):
@@ -47,7 +47,7 @@ async def test_mysql_padded_kind_preserves_both_owners_and_raw_cursor(
             query = replace(query, after_sort_key=second[0].sort_key, after_key=second[0].key)
             assert await store.read(lambda transaction: transaction.list_records(query)) == ()
 
-            # Only owner discovery may broaden. A tab is not SQL padding and
+            # Only candidate bucket selection may broaden. A tab is not SQL padding and
             # must not be stripped from the actual kind comparison.
             distinct = RecordQuery(kind="task_graph \t", limit=1)
             assert await store.read(lambda transaction: transaction.list_records(distinct)) == ()

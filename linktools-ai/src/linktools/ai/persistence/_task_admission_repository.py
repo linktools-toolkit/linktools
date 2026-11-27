@@ -62,6 +62,7 @@ from ._task_events import (
 )
 from ._task_summary import _TaskSummary
 from ._task_state import (
+    GRAPH_RECOVERY_STATES,
     _effective_graph_status,
     _is_sha256,
     _isolated_graph_status,
@@ -71,12 +72,6 @@ from ._task_state import (
 _ValueT = TypeVar("_ValueT")
 
 _logger = environ.get_logger("ai.runtime.state.task_repository")
-_RECOVERABLE_GRAPH_STATES = frozenset(
-    {
-        TaskStatus.PENDING.value,
-        TaskStatus.RUNNING.value,
-    }
-)
 
 
 def _task_submit_result_digest(graph: TaskGraph) -> str:
@@ -670,7 +665,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
             records = await transaction.list_records(
                 RecordQuery(
                     kind="task_graph",
-                    states=_RECOVERABLE_GRAPH_STATES,
+                    states=GRAPH_RECOVERY_STATES,
                     after_sort_key=after_sort_key,
                     after_key=after_key,
                     limit=limit + 1,
@@ -684,7 +679,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
                 _require_canonical_graph_status(header.status)
                 if (
                     record.state != header.status.value
-                    or header.status.value not in _RECOVERABLE_GRAPH_STATES
+                    or header.status.value not in GRAPH_RECOVERY_STATES
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 headers.append(header)

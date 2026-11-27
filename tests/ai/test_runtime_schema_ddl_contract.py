@@ -315,7 +315,7 @@ async def test_selected_native_schema_preserves_canonical_dialect_ddl(
     assert set(selected.tables) == {
         "ai_state_records", "ai_execution_records", "ai_state_facts",
         "ai_state_counters", "ai_state_operations", "ai_step_runs", "ai_messages", "ai_message_sequences",
-        "ai_task_graphs", "ai_step_tool_operations", "ai_step_run_admissions",
+        "ai_step_tool_operations", "ai_step_run_admissions",
         "ai_sessions", "ai_session_turns",
     } | ({"ai_step_events", "ai_trace_events"} if domain is not PersistenceDomain.CONVERSATION else set())
 
@@ -506,7 +506,7 @@ def test_all_business_indexes_bound_columns_and_keep_unique_identities_nonnullab
         "ai_object_chunks", "ai_objects", "ai_state_facts",
         "ai_state_operations", "ai_state_records", "ai_execution_records", "ai_state_counters", "ai_step_events",
         "ai_messages", "ai_step_runs", "ai_message_sequences", "ai_step_snapshots", "ai_trace_events",
-        "ai_task_graphs", "ai_step_tool_operations", "ai_step_run_admissions",
+        "ai_step_tool_operations", "ai_step_run_admissions",
         "ai_sessions", "ai_session_turns",
     }
     for table in metadata.tables.values():
@@ -547,7 +547,6 @@ def test_raw_address_capacity_and_locator_types_match_reviewed_storage_contract(
         ("ai_execution_records", "key"): 360,
         ("ai_execution_records", "scope_key"): 300,
         ("ai_execution_records", "parent_key"): 239,
-        ("ai_task_graphs", "key"): 224,
         ("ai_step_run_admissions", "key"): 231,
         ("ai_step_run_admissions", "scope_key"): 308,
         ("ai_step_run_admissions", "parent_key"): 239,

@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 from ._content_reference_projection import CONTENT_REFERENCE_COLUMNS
 from ._record_owner import (
     EXECUTION_RECORD_KEY_MAX_BYTES, EXECUTION_SORT_KEY_MAX_BYTES, RECORD_OWNER_RELATION_WIDTHS, SCAN_KIND_OWNERS,
-    TASK_GRAPH_KEY_MAX_BYTES, TOOL_OPERATION_KEY_MAX_BYTES,
+    TOOL_OPERATION_KEY_MAX_BYTES,
 )
 from ._turn_sql_schema import TURN_REQUEST_MAX_BYTES, TURN_SESSION_MAX_BYTES
 
@@ -41,7 +41,6 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
         return
     record_key_width = {
         "ai_execution_records": EXECUTION_RECORD_KEY_MAX_BYTES,
-        "ai_task_graphs": TASK_GRAPH_KEY_MAX_BYTES,
         "ai_step_tool_operations": TOOL_OPERATION_KEY_MAX_BYTES,
     }.get(name, RECORD_KEY_MAX_BYTES)
     scope_key_width, parent_key_width = RECORD_OWNER_RELATION_WIDTHS.get(name, (RELATION_KEY_MAX_BYTES, PARENT_KEY_MAX_BYTES))
@@ -149,7 +148,7 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
     if name in SCAN_KIND_OWNERS:
         columns.insert(-2, Column(
             "scan_kind", String(34), nullable=False,
-            comment="Write-through kind and execution recovery candidate projection; never domain authority.",
+            comment="Write-through kind and recovery candidate projection; never domain authority.",
         ))
     if name == "ai_execution_records":
         columns[-2:-2] = [
@@ -173,7 +172,6 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
     omitted = {
         "ai_execution_records": {"payload_bytes"},
         "ai_step_tool_operations": {"kind", "payload_bytes"},
-        "ai_task_graphs": {"kind", "scope_key", "parent_key", "scope_locator", "parent_locator"},
     }.get(name, set())
     records = Table(name, metadata, *(column for column in columns if column.name not in omitted),
                     comment=comment, **sql_table_options())
@@ -181,10 +179,6 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
     if name == "ai_execution_records":
         sql_unique(records, "store_key", "turn_request_route")
         sql_unique(records, "store_key", "turn_occupied_route")
-    if name == "ai_task_graphs":
-        sql_query_index(records, "store_key", "state", "sort_prefix")
-        sql_audit_indexes(records)
-        return
     if name in SCAN_KIND_OWNERS:
         sql_query_index(records, "store_key", "scan_kind", "sort_prefix")
     elif "kind" in records.c:
