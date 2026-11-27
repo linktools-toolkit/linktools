@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Low-level durable codec for Pydantic user-content items."""
 
+import base64
 import json
 from collections.abc import Callable, Mapping
 from typing import cast
@@ -76,6 +77,11 @@ def encode_user_content_item(item: UserContent) -> JsonValue:
                 "content": item.content,
                 "metadata": normalize_json_value(item.metadata),
             }
+        if isinstance(item, BinaryContent):
+            # User-input objects use standard Base64; SDK message archives have their own wire format.
+            wire = _MEDIA_ADAPTER.dump_python(item, mode="json", exclude={"data"}, warnings="error")
+            wire["data"] = base64.b64encode(item.data).decode("ascii")
+            return normalize_json_value(wire)
         if isinstance(item, _MediaContent):
             return normalize_json_value(_MEDIA_ADAPTER.dump_python(item, mode="json", warnings="error"))
         if isinstance(item, CachePoint):

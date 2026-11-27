@@ -341,13 +341,14 @@ async def test_model_messages_select_earlier_turns_after_sqlite_reopen(
                     session.session_id, f"question-{number}", agent=runtime.agents.get(), principal=principal,
                     idempotency_key=f"request-{number}",
                 )
-                assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
                 turn_id = turn.key.turn_id
-                # An overlapping SQLite reader can block the optional no-wait Trace commit.
+                # Even terminal readback can contend with the optional no-wait Trace commit
+                # on the shared SQLite database. This test needs committed Trace evidence.
                 written_turn, error = await asyncio.wait_for(trace_writes.get(), timeout=5)
                 assert written_turn == turn_id
                 if error is not None:
                     raise error
+                assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
                 traces = await runtime.history.turn_trace("chat", turn_id, principal=principal)
                 assert len(traces.items) == 2
                 turns.append(turn_id)

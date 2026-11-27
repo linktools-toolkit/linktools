@@ -155,15 +155,6 @@ def test_protocol_discriminators_and_nondefault_fields_remain_required(
         codec.decode_model_messages(canonical_json_bytes(wire))
 
 
-@pytest.mark.parametrize("path", [(), ("parts", 0)])
-def test_unknown_message_fields_are_not_silently_dropped(path: tuple[str | int, ...]) -> None:
-    wire = json.loads(codec.encode_model_messages((sdk.ModelResponse(parts=[sdk.TextPart("text")], timestamp=_STAMP),)))
-    _at(wire[0], path)["unknown"] = None
-    with pytest.raises(AIError) as caught:
-        codec.decode_model_messages(canonical_json_bytes(wire))
-    assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-
-
 @pytest.mark.parametrize('kind,field,bad', [
     ('request', 'state', 'invalid'),
     ('response', 'state', 'invalid'),

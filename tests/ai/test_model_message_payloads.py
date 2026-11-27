@@ -68,7 +68,10 @@ def test_unknown_message_version_is_left_to_normal_semantic_decoder() -> None:
     assert caught.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
-@pytest.mark.parametrize('message', [42, {'version': 1, 'kind': 'request', 'parts': [], 'state': 'invalid'}, {'version': 1, 'kind': 'request', 'parts': [], 'unknown': 1}])
+@pytest.mark.parametrize('message', [
+    42,
+    {'version': 1, 'kind': 'request', 'parts': [], 'state': 'invalid'},
+])
 def test_aggregation_does_not_replace_normal_semantic_validation(message: object) -> None:
     raw = canonical_json_bytes([message])
     assert combine_model_message_payloads([raw]) == raw

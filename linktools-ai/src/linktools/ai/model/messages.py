@@ -764,7 +764,11 @@ def _decode_message(value: object) -> ModelMessage:
         wire["failed_attempts"] = [dict(attempt) if isinstance(attempt, dict) else attempt
                                    for attempt in wire["failed_attempts"]]
         for index, attempt in enumerate(wire["failed_attempts"]):
-            if isinstance(attempt, dict) and attempt.get("usage") is not None:
+            if not isinstance(attempt, dict):
+                continue
+            if not isinstance(attempt.get("duration"), str):
+                raise ValueError("model request attempt duration must be an ISO duration string")
+            if attempt.get("usage") is not None:
                 _validate_wire_usage_counts(attempt["usage"])
                 usage = _USAGE_ADAPTER.validate_python(attempt["usage"])
                 attempt_usages.append((index, usage))
@@ -803,6 +807,8 @@ def _decode_message(value: object) -> ModelMessage:
         if kind in _CORRELATED_PARTS and "tool_call_id" not in part:
             raise ValueError("durable tool correlation is required")
         if kind == "model-settings-delta":
+            if "top_level" in part and type(part["top_level"]) is not bool:
+                raise ValueError("recorded model settings window flag must be a boolean")
             patches.append((pi, "settings", _recorded_settings(part["settings"])))
             part["settings"] = {}
         elif kind == _SUMMARY_KIND:
