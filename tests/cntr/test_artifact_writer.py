@@ -299,7 +299,7 @@ def test_nginx_network_attachment_resolves_dependencies_without_prepared_enable_
     networks = nginx.docker_compose["services"]["nginx"]["networks"]
 
     assert fresh_manager.installed_state.load_names() == ["portainer"]
-    assert "safeline-ce" in networks
+    assert set(networks) == {"nginx", "safeline-origin"}
     assert not any(container.enable for container in fresh_manager.containers.values())
 
 

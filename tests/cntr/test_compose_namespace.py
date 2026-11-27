@@ -138,7 +138,7 @@ def test_nginx_joins_safeline_tengine_network(monkeypatch, fresh_manager, instal
         owners = [name for name, model in models.items()
                   if "safeline-ce" in (model or {}).get("networks", {})]
         assert owners == ["safeline"]
-        assert attachments["safeline-ce"] == {"ipv4_address": prefix + ".253"}
+        assert set(attachments) == {"nginx", "safeline-origin"}
         assert attachments["safeline-origin"] == {"ipv4_address": origin + ".253"}
         assert "safeline-origin" not in nginx["networks"]
         assert networks["safeline-origin"]["internal"] is True
@@ -149,8 +149,13 @@ def test_nginx_joins_safeline_tengine_network(monkeypatch, fresh_manager, instal
         safeline = models["safeline"]["services"]
         assert "nginx" not in safeline
         assert f"SUBNET_PREFIX={prefix}" in safeline["safeline-mgt"]["environment"]
+        assert safeline["safeline-mgt"]["networks"] == {
+            "safeline-ce": {"ipv4_address": prefix + ".4"},
+            "nginx": None,
+        }
         assert all(set(spec["networks"]) == {"safeline-ce"}
-                   for name, spec in safeline.items() if name != "safeline-tengine")
+                   for name, spec in safeline.items()
+                   if name not in {"safeline-mgt", "safeline-tengine"})
         assert "nginx" not in models["safeline"]["networks"]
         assert safeline["safeline-tengine"]["networks"] == {
             "safeline-ce": {"ipv4_address": prefix + ".254"},
@@ -189,10 +194,9 @@ def test_nginx_joins_safeline_network_when_installed_as_dependency(monkeypatch, 
     assert fresh_manager.installed_state.load_names() == ["portainer"]
     assert set(models) == {"nginx", "safeline", "portainer"}
     assert "safeline-ce" not in models["nginx"]["networks"]
-    prefix = fresh_manager.config.get("SAFELINE_SUBNET_PREFIX")
     origin = fresh_manager.config.get("SAFELINE_ORIGIN_SUBNET_PREFIX")
     networks = models["nginx"]["services"]["nginx"]["networks"]
-    assert networks["safeline-ce"] == {"ipv4_address": prefix + ".253"}
+    assert set(networks) == {"nginx", "safeline-origin"}
     assert networks["safeline-origin"] == {"ipv4_address": origin + ".253"}
     assert set(models["safeline"]["services"]["safeline-tengine"]["networks"]) == {
         "safeline-ce", "safeline-origin",

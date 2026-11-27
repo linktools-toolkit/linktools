@@ -328,7 +328,7 @@ URL/端口参数接收字面值或 ConfigValue；配置键显式使用 ConfigRef
 
 SafeLine 管理网 `safeline-ce` 使用 `SAFELINE_SUBNET_PREFIX`，默认 `172.22.222`。
 已有 `172.22.242.0/24` 网络若不迁移，升级前请显式设置 `SAFELINE_SUBNET_PREFIX=172.22.242`。
-Nginx 仍接入该网访问雷池管理页，业务转发不走管理网。
+Nginx 不加入管理网。只有管理服务额外加入现有 `nginx` 网络，管理域名和 SSO 仍通过 Nginx 反代。
 
 SafeLine 另建私有桥接网 `safeline-origin`，只接入 Nginx（`.253`）和 Tengine（`.254`）。
 业务网默认 `172.22.223.0/24`；与现有网络冲突时，在部署前修改

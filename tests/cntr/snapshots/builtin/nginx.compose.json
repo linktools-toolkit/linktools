@@ -68,9 +68,6 @@
       },
       "networks": {
         "nginx": null,
-        "safeline-ce": {
-          "ipv4_address": "172.22.222.253"
-        },
         "safeline-origin": {
           "ipv4_address": "172.22.223.253"
         }

@@ -655,11 +655,12 @@ upstreams to Docker runtime DNS.
 
 SafeLine owns both bridges. The management bridge `safeline-ce` uses
 `SAFELINE_SUBNET_PREFIX` (default `172.22.222`). All SafeLine services join it;
-Nginx also joins it to proxy the management UI, not for business forwarding.
+Nginx does not join it. Only SafeLine's management service additionally joins
+the existing `nginx` network so the management UI proxy and SSO keep working.
 The internal `safeline-origin` bridge uses `SAFELINE_ORIGIN_SUBNET_PREFIX`
 (default `172.22.223`). Only Nginx (`.253`) and Tengine (`.254`) join it.
-Choose a non-overlapping origin subnet before deployment. Nginx does not own
-or redefine either network. Dependency-only installations use the same
+Choose a non-overlapping origin subnet before deployment. Nginx owns its
+existing `nginx` network, not either SafeLine bridge. Dependency-only installations use the same
 attachment rules.
 
 For WAF-enabled sites the public Nginx listener sends ordinary requests to
