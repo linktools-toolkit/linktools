@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import TYPE_CHECKING
@@ -86,6 +87,26 @@ class LossySessionTrace:
         self._queue: asyncio.Queue[tuple[ModelInteractionStateStepArchive, SessionTraceBatch]] = asyncio.Queue(_MAX_BATCHES)
         self._task: asyncio.Task[None] | None = None
         self._closed = False
+
+    def for_turn(
+        self, archive: object, *, turn_id: str, session_id: str,
+    ) -> tuple[Callable[[StagingAgentRunStore], None], Callable[[str, str | None], None]]:
+        from ._canonical_trace_interactions import _CapturedTurnInteractions
+
+        captured: _CapturedTurnInteractions | None = None
+
+        def capture(staging: StagingAgentRunStore) -> None:
+            nonlocal captured
+            try:
+                captured = _CapturedTurnInteractions.capture(staging, turn_id, session_id, settled_only=True)
+            except Exception as error:
+                _logger.warning("Optional Session Trace capture discarded: %s", type(error).__name__)
+
+        def publish(outcome: str, error_code: str | None) -> None:
+            if captured is not None:
+                self.offer(archive, SessionTraceBatch(captured, outcome, error_code))
+
+        return capture, publish
 
     def offer(self, archive: object, batch: SessionTraceBatch) -> None:
         captured = batch.capture

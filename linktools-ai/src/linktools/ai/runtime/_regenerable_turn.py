@@ -65,7 +65,6 @@ if TYPE_CHECKING:
     from ..persistence.turns import SqlSessionTurns
     from ..persistence.repositories import ExecutionRepositoryImpl
     from ..persistence.runs import StateStepArchive
-    from ._canonical_trace_interactions import _CapturedTurnInteractions
     from ..execution import ExecutionStartReservation, ExecutionStartReservationResult, PendingToolContinuation, PendingDeferredCall
     from ..persistence.commands import StateCommands
     from ..persistence._task_repository import TaskRepositoryImpl
@@ -2055,24 +2054,11 @@ class _RegenerableTurnRunner:
         """Execute after durable admission and publish only if this producer still owns the turn."""
         from ..model.messages import canonical_structured_output_reference
 
-        captured: _CapturedTurnInteractions | None = None
-        capture_trace = None
+        capture_trace = offer_trace = None
         if turn.trace_enabled and turn.generation == 1:
-            from ._canonical_trace_interactions import _CapturedTurnInteractions
-
-            def capture_trace(staging):
-                nonlocal captured
-                try:
-                    captured = _CapturedTurnInteractions.capture(
-                        staging, turn.key.turn_id, turn.key.session_id, settled_only=True,
-                    )
-                except Exception as error:
-                    _logger.warning("Optional Session Trace capture discarded: %s", type(error).__name__)
-
-        def offer_trace(state: str, error_code: str | None = None) -> None:
-            if captured is not None:
-                from ._lossy_session_trace import SessionTraceBatch
-                self._lossy_trace.offer(self._trace_archive, SessionTraceBatch(captured, state, error_code))
+            capture_trace, offer_trace = self._lossy_trace.for_turn(
+                self._trace_archive, turn_id=turn.key.turn_id, session_id=turn.key.session_id,
+            )
 
         structured = binding.output_binding.mode == "structured"
         model_prompt = turn.prompt if turn.model_prompt is None else turn.model_prompt
@@ -2177,7 +2163,8 @@ class _RegenerableTurnRunner:
                         split_source=capability.store._canonical_split_source,
                     )
                     if committed:
-                        offer_trace("waiting")
+                        if offer_trace is not None:
+                            offer_trace("waiting", None)
                         self._publish(turn.key.session_id, {
                             "type": "waiting", "turn_id": turn.key.turn_id, "turn_no": turn.number,
                             "generation": turn.generation, "revision": turn.revision,
@@ -2235,7 +2222,8 @@ class _RegenerableTurnRunner:
                 turn, state="failed", result={"error_code": code},
             )
             if committed:
-                offer_trace("failed", code)
+                if offer_trace is not None:
+                    offer_trace("failed", code)
                 self._terminal(turn, "failed", error_code=code)
             return committed
         committed = await self._finish_retained_turn(
@@ -2244,7 +2232,8 @@ class _RegenerableTurnRunner:
             compacted_context=compacted_context,
         )
         if committed:
-            offer_trace("succeeded")
+            if offer_trace is not None:
+                offer_trace("succeeded", None)
             self._terminal(
                 turn, "succeeded", output=output, messages=context_messages, output_ref=output_ref,
                 compacted_context=compacted_context or (),
