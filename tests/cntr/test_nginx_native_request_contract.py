@@ -682,9 +682,9 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
         assert app.paths == app_paths
 
 
-@pytest.mark.parametrize("waf", [False, True])
+@pytest.mark.parametrize("waf,bypass", [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize("limit,maximum", [(None, 1024 * 1024), ("10m", 10 * 1024 * 1024), (0, None)])
-def test_native_body_limits_with_fixed_length_and_chunked_requests(fresh_manager, tmp_path, waf, limit, maximum):
+def test_native_body_limits_with_fixed_length_and_chunked_requests(fresh_manager, tmp_path, waf, bypass, limit, maximum):
     binary = os.environ.get("CNTR_TEST_NGINX") or shutil.which("nginx")
     if not binary:
         pytest.skip("Native nginx with realip is required")
@@ -724,12 +724,13 @@ def test_native_body_limits_with_fixed_length_and_chunked_requests(fresh_manager
         producer = SimpleNamespace(name="body-fixture", config=Config(None, ConfigSchema(), [DictSource(config)]))
         site = _native_site(app.server_port)
         site.https, site.waf, site.auth = False, waf, False
-        site.waf_bypass = (r"^/bypass",)
+        site.waf_bypass = (r"^/bypass",) if bypass else ()
         site.template_vars = {} if limit is None else {"client_max_body_size": limit}
         business = nginx._render_site_template(
             producer, nginx.get_source_path("templates", "default.conf"), site)
-        # Explicit native limits must override the server policy on both hops.
+        # A business location can lower or raise the inherited site limit.
         business += "\nlocation /small { client_max_body_size 1m; proxy_pass " + site.proxy + "; }"
+        business += "\nlocation /upload { client_max_body_size 2m; proxy_pass " + site.proxy + "; }"
         business += "\nlocation /bypass/unlimited { client_max_body_size 0; proxy_pass " + site.proxy + "; }"
         server = nginx._render_site_template(
             producer, nginx.get_source_path("templates", "server.conf"), site, business=business)
@@ -799,10 +800,14 @@ server {
                 if expected == 200:
                     assert received[-1] == (size, "1" if waf else None)
             assert request(1536 * 1024, chunked, "/small") == 413
-            bypass_size = 1536 * 1024
-            expected = 413 if maximum is not None and bypass_size > maximum else 200
-            assert request(bypass_size, chunked, "/bypass/inherited") == expected
-            if expected == 200:
+            assert request(1536 * 1024, chunked, "/upload") == 200
+            assert received[-1] == (1536 * 1024, "1" if waf else None)
+            assert request(2 * 1024 * 1024 + 1, chunked, "/upload") == 413
+            if bypass:
+                bypass_size = 1536 * 1024
+                expected = 413 if maximum is not None and bypass_size > maximum else 200
+                assert request(bypass_size, chunked, "/bypass/inherited") == expected
+                if expected == 200:
+                    assert received[-1] == (bypass_size, None)
+                assert request(bypass_size, chunked, "/bypass/unlimited") == 200
                 assert received[-1] == (bypass_size, None)
-            assert request(bypass_size, chunked, "/bypass/unlimited") == 200
-            assert received[-1] == (bypass_size, None)

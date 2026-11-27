@@ -672,6 +672,9 @@ authentication run only at that origin. Explicit `waf_bypass` paths use a
 private, site-specific Unix socket on the same origin server, preserving the
 declared exception without exposing another TCP port or duplicating application
 routes. An unavailable Tengine does not fall back to this socket.
+Nginx applies client body limits where the business routes run. The WAF
+ingress does not impose a second limit that could mask a location override;
+SafeLine's own policies still apply.
 Nginx replaces incoming `X-Forwarded-For` with the actual client address before
 forwarding to SafeLine. SafeLine preserves Host and appends its incoming proxy
 address with `$proxy_add_x_forwarded_for`. The TCP origin accepts only the exact
