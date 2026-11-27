@@ -41,7 +41,7 @@ def prepared_config(nginx):
 
 
 def test_waf_forwarding_and_origin_trust_use_only_tengine_peer(fresh_manager):
-    fresh_manager.config.set("SAFELINE_SUBNET_PREFIX", "172.29.171")
+    fresh_manager.config.set("SAFELINE_ORIGIN_SUBNET_PREFIX", "172.29.171")
     fresh_manager.config.set("NGINX_WAF_PORT", 8880)
     nginx = fresh_manager.containers["nginx"]
     rendered = nginx._render_site_template(nginx, nginx.get_source_path("templates", "server.conf"), make_site())
@@ -182,7 +182,7 @@ def test_default_listeners_are_explicit_and_independent_of_server_name(
     assert rendered.count("default_server") == (3 if default else 0)
     assert rendered.count("server_name " + server_name + ";") == 3
     assert "auth_request /_internal/auth;" in rendered
-    assert "proxy_pass http://172.22.222.254:8000;" in rendered
+    assert "proxy_pass http://172.22.223.254:8000;" in rendered
     assert "ssl_certificate " in rendered
 
 

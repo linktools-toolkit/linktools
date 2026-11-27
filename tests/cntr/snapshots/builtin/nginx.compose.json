@@ -69,10 +69,10 @@
       "networks": {
         "nginx": null,
         "safeline-ce": {
-          "aliases": [
-            "nginx-origin"
-          ],
           "ipv4_address": "172.22.222.253"
+        },
+        "safeline-origin": {
+          "ipv4_address": "172.22.223.253"
         }
       },
       "ports": [

@@ -653,27 +653,21 @@ upstreams to Docker runtime DNS.
 
 ### Nginx and SafeLine networks
 
-SafeLine owns the `safeline-ce` bridge and its existing `SAFELINE_SUBNET_PREFIX`
-(default `172.22.222`). All SafeLine services, including Tengine and management,
-join only this bridge. When SafeLine is enabled, Nginx also joins it at `.253`,
-while retaining its own `nginx` bridge for application backends. Tengine keeps
-its fixed `.254` address. Nginx only references SafeLine's network; it does not
-own or redefine its IPAM. Dependency-only SafeLine installations use the same
-attachment rules as direct installations.
+SafeLine owns both bridges. The management bridge `safeline-ce` uses
+`SAFELINE_SUBNET_PREFIX` (default `172.22.222`). All SafeLine services join it;
+Nginx also joins it to proxy the management UI, not for business forwarding.
+The internal `safeline-origin` bridge uses `SAFELINE_ORIGIN_SUBNET_PREFIX`
+(default `172.22.223`). Only Nginx (`.253`) and Tengine (`.254`) join it.
+Choose a non-overlapping origin subnet before deployment. Nginx does not own
+or redefine either network. Dependency-only installations use the same
+attachment rules.
 
-The SafeLine origin contract remains `http://nginx:<NGINX_WAF_PORT>` (default
-`http://nginx:8000`). Compose supplies the `nginx` service DNS name on the shared
-bridge; `nginx-origin` is an optional additional alias. The fixed `.253`/`.254`
-addresses prevent either hop from retaining an obsolete peer IP after container
-recreation. A normal restart usually retains its endpoint; recreation replaces
-it. Neither service borrows the other's network namespace. Nginx's Unix-socket
-healthcheck does not wait for Tengine; only Tengine's startup dependency points
-to healthy Nginx.
-
-For WAF-enabled sites, the public Nginx listener directly proxies ordinary
-requests to Tengine at `.254:<NGINX_WAF_PORT>`. SafeLine returns them to Nginx's
-separate HTTP origin listener at `nginx:<NGINX_WAF_PORT>`. Application routing
-and authentication run only at that origin. Explicit `waf_bypass` paths use a
+For WAF-enabled sites the public Nginx listener sends ordinary requests to
+Tengine's origin-network address at `.254:<NGINX_WAF_PORT>`. Set the SafeLine
+site upstream to the fixed Nginx address on that same network, by default
+`http://172.22.223.253:8000`. Nginx accepts TCP origin requests only from
+Tengine's exact address on the business network. Application routing and
+authentication run only at that origin. Explicit `waf_bypass` paths use a
 private, site-specific Unix socket on the same origin server, preserving the
 declared exception without exposing another TCP port or duplicating application
 routes. An unavailable Tengine does not fall back to this socket.
@@ -704,7 +698,9 @@ remains `9200` mapped to `1443`.
 
 To keep an existing bridge on the previous default `172.22.242.0/24`, explicitly
 set `SAFELINE_SUBNET_PREFIX=172.22.242` before applying the updated configuration.
-Existing valid `http://nginx:<NGINX_WAF_PORT>` origins are not rewritten.
+Apply the updated Nginx and SafeLine configuration together. Manually change
+existing `http://nginx:<NGINX_WAF_PORT>` site upstreams to the fixed business
+address; stored SafeLine sites are not rewritten by LinkTools.
 Changing `SAFELINE_SUBNET_PREFIX` separately remains a network migration, not a
 partial service update. Check it against host/VPN/other Docker routes before
 changing it. Scoped SafeLine removal does not remove a bridge still used by

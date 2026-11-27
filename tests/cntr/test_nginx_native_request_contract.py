@@ -241,7 +241,7 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
         http_port, https_port, health_port = (_reserve_port(reservations) for _ in range(3))
         config = {"NGINX_HTTP_PORT": http_port, "NGINX_HTTPS_PORT": https_port,
                   "NGINX_WAF_PORT": origin_port,
-                  "SAFELINE_SUBNET_PREFIX": "127.0.0"}
+                  "SAFELINE_ORIGIN_SUBNET_PREFIX": "127.0.0"}
         producer = SimpleNamespace(name="native-fixture", config=Config(None, ConfigSchema(), [DictSource(config)]))
         site = _native_site(app_port)
 
@@ -527,7 +527,7 @@ def test_native_fixture_template_contract_without_native_processes(fresh_manager
     producer = SimpleNamespace(name="native-fixture", config=Config(None, ConfigSchema(), [DictSource({
         "NGINX_HTTP_PORT": 8080, "NGINX_HTTPS_PORT": 8443,
         "NGINX_WAF_PORT": 8081,
-        "SAFELINE_SUBNET_PREFIX": "127.0.0",
+        "SAFELINE_ORIGIN_SUBNET_PREFIX": "127.0.0",
     })]))
     site = _native_site(8082)
     business = nginx._render_site_template(producer, nginx.get_source_path("templates", "default.conf"), site)
@@ -720,7 +720,7 @@ def test_native_body_limits_with_fixed_length_and_chunked_requests(fresh_manager
         threading.Thread(target=app.serve_forever, daemon=True).start()
         public_port, origin_port = (_reserve_port(reservations) for _ in range(2))
         config = {"NGINX_HTTP_PORT": public_port, "NGINX_WAF_PORT": origin_port,
-                  "SAFELINE_SUBNET_PREFIX": "127.0.0"}
+                  "SAFELINE_ORIGIN_SUBNET_PREFIX": "127.0.0"}
         producer = SimpleNamespace(name="body-fixture", config=Config(None, ConfigSchema(), [DictSource(config)]))
         site = _native_site(app.server_port)
         site.https, site.waf, site.auth = False, waf, False

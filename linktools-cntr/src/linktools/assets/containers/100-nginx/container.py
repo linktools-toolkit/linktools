@@ -411,7 +411,7 @@ class Container(BaseContainer):
                 nginx=nginx,
                 config=container.config,
                 waf_addresses=lazy_load(lambda: {
-                    name: str(container.config.get("SAFELINE_SUBNET_PREFIX")) + "." + suffix
+                    name: str(container.config.get("SAFELINE_ORIGIN_SUBNET_PREFIX")) + "." + suffix
                     for name, suffix in (("nginx", "253"), ("tengine", "254"))
                 }),
                 template_vars=variables,

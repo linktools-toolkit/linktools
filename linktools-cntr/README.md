@@ -326,13 +326,16 @@ URL/端口参数接收字面值或 ConfigValue；配置键显式使用 ConfigRef
 
 ### Nginx 与 SafeLine 网络
 
-SafeLine 独立拥有 `safeline-ce` 网络，Tengine 和其他 SafeLine 服务只加入这个网络。
-启用 SafeLine 时，Nginx 额外加入该网络，固定为 `.253`；Tengine 固定为 `.254`。
-Nginx 保留自己的应用网络，但 Tengine 不加入它。网段由 `SAFELINE_SUBNET_PREFIX` 指定，默认 `172.22.222`。
+SafeLine 管理网 `safeline-ce` 使用 `SAFELINE_SUBNET_PREFIX`，默认 `172.22.222`。
 已有 `172.22.242.0/24` 网络若不迁移，升级前请显式设置 `SAFELINE_SUBNET_PREFIX=172.22.242`。
+Nginx 仍接入该网访问雷池管理页，业务转发不走管理网。
 
-回源契约为 `http://nginx:<NGINX_WAF_PORT>`，默认 `http://nginx:8000`。
-固定地址避免容器重建后双向代理仍使用旧 IP；两者不共享网络命名空间，Nginx 健康检查不等待 Tengine。
+SafeLine 另建私有桥接网 `safeline-origin`，只接入 Nginx（`.253`）和 Tengine（`.254`）。
+业务网默认 `172.22.223.0/24`；与现有网络冲突时，在部署前修改
+`SAFELINE_ORIGIN_SUBNET_PREFIX`。雷池防护站点的源站填该网的 Nginx 固定地址，
+默认 `http://172.22.223.253:8000`；已保存的 `http://nginx:8000` 需在雷池中改一次，
+不会自动迁移。部署时同时应用 Nginx 和 SafeLine 的配置，使两端接入同一业务网。
+
 回源端口只走业务/认证路由，不再次进入 WAF，也不跳转 HTTPS。入口覆盖 `X-Forwarded-For` 为真实客户端地址；SafeLine 保留 Host 并按原生 `$proxy_add_x_forwarded_for` 追加代理地址。
 该端口不发布到宿主机，仍仅允许 Tengine 的精确 TCP 来源；realip 递归仅信任 `.253`、`.254` 两个代理，不信任整个网段。无需私有回源头，也不因缺少客户端身份直接返回 400；认证与业务按自身规则处理。
 不能把回源指向 Nginx 的公开入口，否则会形成循环。

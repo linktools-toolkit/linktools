@@ -32,7 +32,7 @@ def test_site_waf_bypass_uses_private_origin_socket(fresh_manager):
     rendered = _render_site(nginx, True, (r"^/health$", r"\.(css|js)$"))
     assert 'location ~* "^/health$"' in rendered
     assert r'location ~* "\\.(css|js)$"' in rendered
-    assert "proxy_pass http://172.22.222.254:8000;" in rendered
+    assert "proxy_pass http://172.22.223.254:8000;" in rendered
     assert "proxy_pass http://unix:/run/nginx-waf-123.sock:;" in rendered
     assert "listen unix:/run/nginx-waf-123.sock;" in rendered
     assert "@waf" not in rendered and "418" not in rendered
@@ -111,7 +111,7 @@ def test_safeline_private_dns_suffix_is_http_only(fresh_manager: "ContainerManag
     assert "server_name safeline.lan;" in rendered
     assert "ssl_certificate " not in rendered
     assert "listen 8000" in rendered
-    assert 'proxy_pass http://172.22.222.254:8000;' in rendered
+    assert 'proxy_pass http://172.22.223.254:8000;' in rendered
 
 
 def test_waf_hop_keeps_common_proxy_limits_and_timeouts(fresh_manager):
