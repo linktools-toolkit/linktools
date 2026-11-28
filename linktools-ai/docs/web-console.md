@@ -60,14 +60,16 @@ single-file text preview; it does not enable bulk reads, file attachments
 returned by a tool, dynamically loaded skills, or shell commands. The console
 shows the tool status and public preview, not raw parameters or results.
 
-**Recover** ends an interrupted ordinary turn after confirmation without
-running its tools or model again. Earlier messages remain available. The next
-turn gets a short interruption notice instead of the failed turn's unconfirmed
-tool results. Runtime verifies permission, the exact producer generation, an
-expired lease, and any existing child dispositions before settling the turn.
+**Continue** attempts to recover the interrupted turn without a confirmation
+dialog. If Runtime verifies that the turn cannot continue but can be ended,
+the same button becomes **End turn**. Ending is explicit: previous history is
+kept, and the model and tools for that turn are not rerun. Runtime still
+verifies permission, the exact producer generation, an expired lease, and any
+existing child dispositions before ending the turn.
 
-Call `runtime.sessions.recover_turn(..., mode="resume")` explicitly to continue
-from a retained Step checkpoint or to reconcile an admitted split-store turn.
+The SDK keeps its default of ending the turn. Built-in Web requests resume by default;
+other SDK consumers call `runtime.sessions.recover_turn(..., mode="resume")`
+explicitly to continue a turn or reconcile an admitted split-store turn.
 Pending ordinary tool calls without confirmed outcomes are reported to the model
 as interrupted, not dispatched again. Split-store recovery and interrupted
 cancellation use their owning reconciliation path rather than ordinary end.

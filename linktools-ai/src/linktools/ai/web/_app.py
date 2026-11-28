@@ -677,7 +677,7 @@ class _Console:
             if action == "recover":
                 accepted = await runtime.sessions.recover_turn(
                     session_id, _text(payload, "turn_id"), principal=self.principal,
-                    mode=payload.get("mode", "end"), expected_generation=payload.get("expected_generation"),
+                    mode=payload.get("mode", "resume"), expected_generation=payload.get("expected_generation"),
                 )
                 return _json({"accepted": accepted})
             if action == "cancel":

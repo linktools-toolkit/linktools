@@ -200,7 +200,7 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
             assert row["state"] == "accepted" and row["generation"] == 2 and settled == original
             assert not children and receipt is None
             ended = await http.post("/api/session/recover", params=params, headers=_HEADERS, json={
-                "turn_id": turn_id, "expected_generation": 2, "request_id": "end-after-blocked-recovery",
+                "mode": "end", "turn_id": turn_id, "expected_generation": 2, "request_id": "end-after-blocked-recovery",
             })
             assert ended.status_code == 200 and ended.json() == {"accepted": True}, ended.text
             assert (await turns.get_turn(key))["state"] == "failed"

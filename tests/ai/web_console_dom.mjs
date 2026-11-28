@@ -628,36 +628,40 @@ if(process.argv[3]==='session-published-turn') {
   const recoverRead=deferred('GET /api/sessions/b');
   emitTurn(stopped);
   await recoverRead.requested;
-  recoverRead({turn_id:'b-next-turn',turn_no:2,status:'RECOVERY_REQUIRED',can_recover:true,recovery_mode:'end',recovery_generation:1,
+  recoverRead({turn_id:'b-next-turn',turn_no:2,status:'RECOVERY_REQUIRED',can_recover:true,recovery_generation:1,
     user_input:{prompt:'Next native question',attachments:[]},conversation_committed:false,items:[]});
-  await until('the same button switches to Recover',()=>node('send').textContent==='Recover');
+  await until('the same button switches to Continue',()=>node('send').textContent==='Continue');
   const requestCount=calls.length;
   emitTurn(stopped);
   assert.equal(calls.length,requestCount,'a duplicate stopped notice does not read again');
-  let endConfirmation;
-  globalThis.confirm=message=>{endConfirmation=message;return false;};await node('send').click();
-  assert.match(endConfirmation,/End this turn without rerunning any tools/);
-  assert.equal(calls.length,requestCount,'ending the turn requires confirmation');
-  globalThis.confirm=()=>true;
+  globalThis.confirm=()=>{throw new Error('turn recovery should not open a prompt');};
+  const blocked=deferred('POST /api/sessions/b/recover'),continuing=node('send').click();
+  await blocked.requested;
+  assert.equal(calls.at(-1).body.mode,'resume');
+  blocked({code:'STORAGE_RECOVERY_REQUIRED',safe_details:{abandonable:true,generation:2}},503);
+  await continuing;
+  assert.equal(node('send').textContent,'End turn');
+  assert.equal(calls.length,requestCount+1,'failed continuation does not end the turn automatically');
   const end=deferred('POST /api/sessions/b/recover'),ending=node('send').click();
   await end.requested;
-  const endRequest=calls.find(call=>call.key==='/api/sessions/b/recover').body;
-  assert.deepEqual(endRequest,{turn_id:'b-next-turn',expected_generation:1,request_id:endRequest.request_id});
+  const endRequest=calls.at(-1).body;
+  assert.deepEqual(endRequest,{turn_id:'b-next-turn',mode:'end',expected_generation:2,request_id:endRequest.request_id});
   end({accepted:false});await ending;
   assert.match(node('notice').textContent,/still owned/);
-  assert.equal(node('send').textContent,'Recover');
+  assert.equal(node('send').textContent,'End turn');
   emitTurn({type:'admitted',turn_id:'b-next-turn',turn_no:2,revision:3,generation:3,prompt:'Next native question'});
   assert.equal(node('send').textContent,'Stop');
   const secondRecoverRead=deferred('GET /api/sessions/b');
   emitTurn({...stopped,generation:3});await secondRecoverRead.requested;
-  secondRecoverRead({turn_id:'b-next-turn',turn_no:2,status:'RECOVERY_REQUIRED',can_recover:true,recovery_mode:'resume',
+  secondRecoverRead({turn_id:'b-next-turn',turn_no:2,status:'RECOVERY_REQUIRED',can_recover:true,recovery_generation:3,
     user_input:{prompt:'Next native question',attachments:[]},conversation_committed:false,items:[]});
-  await until('new recovery generation',()=>node('send').textContent==='Recover');
+  await until('new recovery generation',()=>node('send').textContent==='Continue');
   const recoverResponse=deferred('POST /api/sessions/b/recover'),recover=node('send').click();
   await recoverResponse.requested;
   assert.equal(calls.filter(call=>call.key==='/api/sessions/b/recover').at(-1).body.mode,'resume');
   assert.equal(canSend(),false);
   recoverResponse({accepted:true});await recover;
+  globalThis.confirm=()=>true;
   emitTurn({type:'admitted',turn_id:'b-next-turn',turn_no:2,revision:3,generation:4,prompt:'Next native question'});
   assert.equal(node('send').textContent,'Stop');
   emitTurn({type:'terminal',turn_id:'b-next-turn',turn_no:2,revision:4,generation:4,state:'succeeded',

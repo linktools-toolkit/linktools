@@ -159,7 +159,7 @@ async def test_expired_ordinary_turn_can_be_released_without_replay(tmp_path, mo
 
         async with client(create_app(runtime=runtime)) as http:
             released = await http.post("/api/session/recover?session_id=session", headers=_HEADERS, json={
-                "turn_id": turn_id, "expected_generation": 1, "request_id": "explicit-abandon",
+                "mode": "end", "turn_id": turn_id, "expected_generation": 1, "request_id": "explicit-abandon",
             })
             assert released.status_code == 200 and released.json() == {"accepted": True}
             shown = await http.get("/api/session", params={"session_id": "session", "turn_id": turn_id})

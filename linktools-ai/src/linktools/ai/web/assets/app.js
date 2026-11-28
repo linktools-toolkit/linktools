@@ -142,7 +142,9 @@ async function mutate(path, payload, {newAttemptOn=[],scope='',shortRequest=fals
 function activeTurnAction() {
   const id=state.session?.active_turn_id;
   const turn=state.turns.find(row=>row.turn_id===id);
-  return turn?.can_recover===true?'recover':'cancel';
+  if(turn?.can_recover!==true)return 'cancel';
+  return Number.isSafeInteger(turn.recovery_generation) && turn.resumeBlockedGeneration===turn.recovery_generation
+    ? 'end' : 'resume';
 }
 function setDisabled() {
   renderCurrentState();
@@ -207,10 +209,11 @@ function setDisabled() {
       || state.actionsPending.has(`${active.execution_id}:end-stopped`)));
   const send=$('send'), reader=$('reader-stop');
   const turnAction=stop && ordinary ? activeTurnAction() : 'cancel';
-  const recover=turnAction==='recover';
+  const recover=turnAction!=='cancel';
+  const endingTurn=turnAction==='end';
   const stopping=ordinary && stop && !recover && state.turns.some(row=>row.turn_id===turn && row.status==='CANCELLING');
-  const activeLabel=recover?'Recover':stopping?'Stopping…':'Stop';
-  const activeAriaLabel=recover?'Recover current turn':stopping?'Stopping current turn':'Stop current turn';
+  const activeLabel=endingTurn?'End turn':recover?'Continue':stopping?'Stopping…':'Stop';
+  const activeAriaLabel=endingTurn?'End current turn':recover?'Continue current turn':stopping?'Stopping current turn':'Stop current turn';
   send.type=stop?'button':'submit';
   const actionLabel=stop?activeLabel:'Send ↑';
   if(send.textContent!==actionLabel)send.textContent=actionLabel;
@@ -2629,29 +2632,33 @@ async function ordinaryAction(action) {
   const id=state.selectedSession,turn=state.session?.active_turn_id,key=`turn:${turn}`,generation=state.generation;
   if(!id || !turn || state.actionsPending.has(key))return;
   const row=state.turns.find(item=>item.turn_id===turn);
-  const mode=row?.recovery_mode || 'end', observedGeneration=row?.recovery_generation;
-  if(action==='recover' && !confirm(mode==='resume'
-    ? 'Resume this turn only after its previous producer has stopped. Continue?'
-    : 'End this turn without rerunning any tools? Earlier messages will be kept. Any already attempted effects may still be unconfirmed.'))return;
+  const observedGeneration=row?.recovery_generation;
+  if(action==='end' && !Number.isSafeInteger(observedGeneration))return;
   const current=()=>state.generation===generation && state.selectedSession===id && state.session?.active_turn_id===turn;
   if(!current())return;
   state.actionsPending.add(key);setDisabled();
   try {
     const payload={turn_id:turn};
-    if(action==='recover' && mode==='resume')payload.mode='resume';
-    if(action==='recover' && mode==='end' && Number.isSafeInteger(observedGeneration))
-      payload.expected_generation=observedGeneration;
+    if(action!=='cancel')payload.mode=action;
+    if(action==='end')payload.expected_generation=observedGeneration;
     let result;
     try {
-      result=await mutate(sessionURL(id,action),payload);
+      result=await mutate(sessionURL(id,action==='cancel'?'cancel':'recover'),payload);
     } catch(error) {
       const latest=state.turns.find(item=>item.turn_id===turn);
-      if(!current() || latest?.conversation_committed
-         || Number.isSafeInteger(observedGeneration) && (latest?.liveGeneration || 0)>observedGeneration)return;
+      if(!current() || latest?.conversation_committed)return;
+      const details=error.details?.safe_details;
+      if(action==='resume' && details?.abandonable===true && Number.isSafeInteger(details.generation)
+         && Math.max(latest?.liveGeneration || 0, latest?.recovery_generation || 0)<=details.generation){
+        patchOrdinaryTurn({turn_id:turn,recovery_generation:details.generation,resumeBlockedGeneration:details.generation});
+        error.message+=' · This turn cannot continue. End it to send another message; earlier history will be kept.';
+        throw error;
+      }
+      if(Number.isSafeInteger(observedGeneration) && (latest?.liveGeneration || 0)>observedGeneration)return;
       throw error;
     }
     if(current() && !result.accepted)
-      notice(action==='recover'?'The turn is still owned or has already ended. Refresh its status before trying again.'
+      notice(action!=='cancel'?'The turn is still owned or has already ended. Refresh its status before trying again.'
         :'Stop not confirmed. Watch the turn for its final status.');
   } finally {state.actionsPending.delete(key);setDisabled();}
 }
