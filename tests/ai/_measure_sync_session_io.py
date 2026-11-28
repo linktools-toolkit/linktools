@@ -25,7 +25,6 @@ from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import CommitPolicy, ExecutionDeltaType, ExecutionStatus
 from linktools.ai.persistence import Persistence, PersistenceStorage, StateTurnResources
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -54,8 +53,7 @@ async def measure(args: argparse.Namespace) -> dict:
     namespace = f"sync-turn-{uuid4().hex}" if args.mysql_url else "sync-turn"
 
     def features() -> RuntimeFeatures:
-        feature = RuntimeFeatures(namespace)
-        feature.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()), scope="runtime")
+        feature = RuntimeFeatures(namespace, defaults={"execution": {"retain_history": True}})
         feature.agent("default", model="default", allow_tools=())
         return model_features(_Models(_UsageFunctionModel(model)), feature)
 

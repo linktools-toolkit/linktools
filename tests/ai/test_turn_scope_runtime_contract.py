@@ -11,7 +11,6 @@ from typing import Literal
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus
 from linktools.ai.storage import TurnScopeIdentity
 from linktools.ai.errors import AIError, ErrorCode
@@ -160,10 +159,7 @@ async def test_authority_only_context_lives_in_one_task_beyond_handle_and_waiter
     authority = _TurnAuthority()
     assert isinstance(authority, TurnCoordinationBackend)
     assert not isinstance(authority, CacheBackend)
-    features = RuntimeFeatures("scope-contract")
-    features.capability(ExecutionCapability(
-        retain_history=True, commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync(),
-    ), scope="runtime")
+    features = RuntimeFeatures("scope-contract", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync())
     features.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", coordination=authority)
     async with Persistence.open("scope-contract", storage=storage) as persistence, Runtime.open(
@@ -214,8 +210,7 @@ async def test_pending_publish_cannot_install_worker_after_captured_owner_is_los
         return ModelResponse(parts=[TextPart("must not execute")])
 
     authority = _ProjectionAuthority()
-    features = RuntimeFeatures("publish-owner-loss")
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    features = RuntimeFeatures("publish-owner-loss", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     features.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=authority, coordination=authority)
     async with Persistence.open("publish-owner-loss", storage=storage) as persistence, Runtime.open(

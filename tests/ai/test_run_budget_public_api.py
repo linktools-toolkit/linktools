@@ -4,6 +4,7 @@ from linktools.ai.task.engine import TaskEngine
 
 from linktools.ai.persistence import Persistence
 """Shared budgets keep their scope across public execution and graph APIs."""
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import model_features
 
 from pathlib import Path
@@ -18,7 +19,7 @@ import pytest
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, Principal, RunBudget, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 from linktools.ai.inputs import AgentTaskInput
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
@@ -37,7 +38,7 @@ async def test_execution_retries_and_default_forks_share_scope_but_explicit_fork
     capabilities = _capabilities()
     capabilities.capability(TraceCapability(), scope="runtime")
     features = capabilities
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     async with Persistence.open('budget-lineage', storage=PersistenceStorage.in_memory()) as persistence_31, Runtime.open(persistence=persistence_31, features=model_features(RuntimeUsageModels(), features)) as runtime:
         agent = runtime.agents.get()
         root = await agent.start("root", budget=RunBudget(model_requests=10), idempotency_key="budget-root")
@@ -71,7 +72,7 @@ async def test_execution_retries_and_default_forks_share_scope_but_explicit_fork
 @pytest.mark.asyncio
 async def test_session_new_turns_have_independent_budgets() -> None:
     features = _capabilities()
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     async with Persistence.open('budget-session', storage=PersistenceStorage.in_memory()) as persistence_66, Runtime.open(persistence=persistence_66, features=model_features(RuntimeUsageModels(), features)) as runtime:
         session = runtime.agents.get().session("conversation")
         first = await session.start("first", budget=RunBudget(model_requests=1))
@@ -215,7 +216,7 @@ async def test_budget_scope_survives_restart_and_missing_inherited_scope_fails_c
     from linktools.ai.persistence.state import RecordQuery, StateTransaction
 
     features = _capabilities()
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     async with Persistence.open('budget-reopen', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_193, Runtime.open(persistence=persistence_193, features=model_features(RuntimeUsageModels(), features)) as runtime:
         root = await runtime.agents.get().start("first", budget=RunBudget(model_requests=2))
         assert (await root.wait()).result.status is ExecutionStatus.SUCCEEDED

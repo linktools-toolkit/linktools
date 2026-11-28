@@ -17,7 +17,7 @@ def checkpoint_recovery_sources(tmp_path_factory: pytest.TempPathFactory) -> tup
         import asyncio, os, sys
         from pathlib import Path
         from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
-        from linktools.ai.capability import ExecutionCapability, AgentContext
+        from linktools.ai.capability import AgentContext
         from pydantic_ai_harness.step_persistence import StepPersistence
         from tests.ai._runtime_test_helpers import native_checkpoint
         from linktools.ai.core import CommitPolicy, ExecutionStatus, ToolOperationStatus, RunBudget
@@ -63,8 +63,7 @@ def checkpoint_recovery_sources(tmp_path_factory: pytest.TempPathFactory) -> tup
                     await asyncio.Event().wait()
                 return "stored " + str(value)
             async def main():
-                group = RuntimeFeatures("checkpoint-replacement")
-                group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
+                group = RuntimeFeatures("checkpoint-replacement", defaults={"execution": {"retain_history": True}})
                 group.capability(native_checkpoint(database=root / "native.db"))
                 group.tool(write, revision=current_revision, **({"effect_policy": "non_replay_safe"}
                     if original_strict and mode == "create" else {}))
@@ -273,7 +272,7 @@ async def test_default_idempotent_dispatch_obeys_budget_without_entering_leaf() 
 async def test_parallel_idempotent_rich_results_commit_and_reopen(tmp_path: Path, terminal: bool) -> None:
     import asyncio
     from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturn, ToolReturnPart
-    from linktools.ai.capability import AgentContext, ExecutionCapability
+    from linktools.ai.capability import AgentContext
     from pydantic_ai_harness.step_persistence import StepPersistence
     from tests.ai._runtime_test_helpers import native_checkpoint
     from linktools.ai.core import CommitPolicy, ExecutionStatus, ToolOperationStatus
@@ -334,9 +333,7 @@ async def test_parallel_idempotent_rich_results_commit_and_reopen(tmp_path: Path
         await finish_model.wait()
         return ModelResponse([TextPart("complete")])
 
-    group = RuntimeFeatures("idempotent-parallel")
-    group.capability(ExecutionCapability(retain_history=True,
-        commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync()))
+    group = RuntimeFeatures("idempotent-parallel", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync())
     if not terminal:
         group.capability(native_checkpoint())
     group.tool(first)

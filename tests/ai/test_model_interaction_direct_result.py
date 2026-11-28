@@ -17,7 +17,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RequestUsage
 
-from linktools.ai.capability import AgentContext, ExecutionCapability, TraceCapability
+from linktools.ai.capability import AgentContext, TraceCapability
 from linktools.ai.core import ExecutionStatus, JsonValue, Principal
 from linktools.ai.execution import ModelInteractionItem
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -77,7 +77,7 @@ def _features(
     provider_release: asyncio.Event | None = None,
     direct_last: bool = False,
 ) -> RuntimeFeatures:
-    features = RuntimeFeatures("direct-results")
+    features = RuntimeFeatures("direct-results", defaults={"execution": {"retain_history": True}})
     for name in ("direct", "provider"):
         def model(selected: str) -> FunctionModel:
             async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
@@ -94,7 +94,6 @@ def _features(
         features.model(name, _InputBinding(model(name)))
     if not direct_last:
         features.capability(direct or _DirectResponse(), id="direct-response")
-    features.capability(ExecutionCapability(retain_history=True))
     features.capability(TraceCapability())
     if direct_last:
         features.capability(direct or _DirectResponse(), id="direct-response")
@@ -324,12 +323,11 @@ async def test_direct_tool_response_then_provider_result_keeps_both_interactions
         assert len(returns) == 1 and returns[0].content == "tool result"
         yield "final answer"
 
-    features = RuntimeFeatures("direct-tool")
+    features = RuntimeFeatures("direct-tool", defaults={"execution": {"retain_history": True}})
     features.model("default", _InputBinding(FunctionModel(stream_function=stream, model_name="provider")))
     features.agent("default", allow_tools=("lookup",), allow_skills=(), allow_subagents=())
     features.tool(lookup, effect_policy="none")
     features.capability(ToolResponse(), id="direct-tool-response")
-    features.capability(ExecutionCapability(retain_history=True))
     features.capability(TraceCapability())
     storage = PersistenceStorage.sqlite(tmp_path / "tool.sqlite")
 

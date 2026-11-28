@@ -319,9 +319,9 @@ async def test_native_reference_rejects_unknown_actual_model_before_loading():
     assert loads == calls == []
 
 
-@pytest.mark.parametrize("mode", ("session", "execution", "runtime-scope"))
+@pytest.mark.parametrize("mode", ("session", "runtime-scope"))
 def test_native_declarations_do_not_silently_supply_host_services(mode):
-    from linktools.ai.capability import ExecutionCapability, SessionCapability
+    from linktools.ai.capability import SessionCapability
     if mode == "runtime-scope":
         contribution = CapabilityContribution.from_opaque(
             "capability", "plain", AbstractCapability(), scope="runtime",
@@ -330,7 +330,7 @@ def test_native_declarations_do_not_silently_supply_host_services(mode):
             contribution.materialize_capability()
         assert caught.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
         return
-    capability = SessionCapability() if mode == "session" else ExecutionCapability()
+    capability = SessionCapability()
     with pytest.raises(AIError):
         Agent(model=FunctionModel(lambda messages, info: ModelResponse(parts=[TextPart("unexpected")])),
               capabilities=[capability])

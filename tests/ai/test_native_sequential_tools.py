@@ -6,9 +6,8 @@ import asyncio
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
-from pydantic_ai_harness.step_persistence import StepPersistence
 
-from linktools.ai.capability import AgentContext
+from linktools.ai.capability import AgentContext, SessionCapability
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -56,26 +55,22 @@ async def test_native_step_tools_honor_frozen_sequential_declaration(tmp_path, s
     async with Persistence.open(
         "native-sequential", storage=PersistenceStorage.sqlite(tmp_path / "state.db"),
     ) as state:
-        steps = await state.create_step_store()
-        features.capability(StepPersistence(store=steps, capture_frontier=True), scope="runtime")
-        try:
-            async with Runtime.open(
-                persistence=state, features=features, authorization=Policy(),
-            ) as runtime, asyncio.timeout(10):
-                actor = runtime.default_principal
-                await runtime.sessions.create_turn_session("session", principal=actor)
-                turn = await runtime.sessions.start(
-                    "session", "write", agent="default", principal=actor, idempotency_key="one",
-                )
-                try:
-                    await entered_first.wait()
-                    if not sequential:
-                        await entered_second.wait()
-                finally:
-                    release.set()
-                assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
-        finally:
-            await steps.close()
+        features.capability(SessionCapability(checkpoints=True), scope="runtime")
+        async with Runtime.open(
+            persistence=state, features=features, authorization=Policy(),
+        ) as runtime, asyncio.timeout(10):
+            actor = runtime.default_principal
+            await runtime.sessions.create_turn_session("session", principal=actor)
+            turn = await runtime.sessions.start(
+                "session", "write", agent="default", principal=actor, idempotency_key="one",
+            )
+            try:
+                await entered_first.wait()
+                if not sequential:
+                    await entered_second.wait()
+            finally:
+                release.set()
+            assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
     if sequential:
         assert order == [("start", 1), ("finish", 1), ("start", 2), ("finish", 2)]
     else:

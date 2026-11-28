@@ -17,7 +17,7 @@ def test_recovery_preserves_published_partial_tool_result(tmp_path: Path, rich: 
         import asyncio, os, sys
         from pathlib import Path
         from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart, ToolReturn
-        from linktools.ai.capability import AgentContext, ExecutionCapability, TraceCapability
+        from linktools.ai.capability import AgentContext, TraceCapability
         from pydantic_ai_harness.step_persistence import StepPersistence
         from tests.ai._runtime_test_helpers import native_checkpoint
         from linktools.ai.core import CommitPolicy, ExecutionStatus
@@ -51,8 +51,7 @@ def test_recovery_preserves_published_partial_tool_result(tmp_path: Path, rich: 
             assert mode == "create", "resume must not regenerate calls"
             return ModelResponse([ToolCallPart("first", {}, "a"), ToolCallPart("second", {}, "b")])
         async def main():
-            group = RuntimeFeatures("partial-retry")
-            group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
+            group = RuntimeFeatures("partial-retry", defaults={"execution": {"retain_history": True}})
             group.capability(native_checkpoint())
             group.capability(TraceCapability())
             group.tool(first)

@@ -11,7 +11,6 @@ import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import ExecutionStatus, Principal, RunBudget
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -20,6 +19,7 @@ from linktools.ai.persistence._runtime_commands import StateCommands
 from linktools.ai.runtime import Runtime
 from linktools.ai.runtime._local import LocalExecutionBackend
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import RuntimeUsageModels, _UsageFunctionModel, model_features
 from .test_run_budget_public_api import _capabilities
 
@@ -57,7 +57,7 @@ async def test_budget_usage_view_skips_bodies_and_preserves_pending_and_custom_s
 
     monkeypatch.setattr(StateCommands, "_confirm_conversation_context", confirm_context)
     features = _capabilities()
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     async with Persistence.open("budget-view", storage=PersistenceStorage.in_memory()) as persistence:
         async with Runtime.open(persistence=persistence, features=model_features(_LargeModels(), features)) as runtime:
             agent = runtime.agents.get()

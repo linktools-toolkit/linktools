@@ -22,6 +22,7 @@ class CompiledAgent:
     tool_policy: "tuple[str, ...]"
     mcp_policy: "tuple[str, ...]"
     runtime_contributions: "tuple[CapabilityContribution[object], ...]" = ()
+    retain_history: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.spec, AgentSpec):

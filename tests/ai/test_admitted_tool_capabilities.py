@@ -6,7 +6,7 @@ import pytest
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturn, ToolReturnPart
 
-from linktools.ai.capability import AgentContext, ReferencedInputsCapability, SessionCapability, StepPersistenceCapability
+from linktools.ai.capability import AgentContext, ReferencedInputsCapability, SessionCapability
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistencePlan, PersistenceStorage
@@ -25,7 +25,7 @@ class _HostAuthorization(TenantAuthorizationPolicy):
     """Authorize the SQL fixtures' session operations."""
 
 
-def _features(seen, *, step=None):
+def _features(seen, *, checkpoints=False):
     class BoundCapability(AbstractCapability):
         pass
 
@@ -39,8 +39,8 @@ def _features(seen, *, step=None):
         return ModelResponse(parts=[ToolCallPart("inspect", {}, tool_call_id="inspect-1")])
 
     features = RuntimeFeatures("admitted-tool-capabilities")
-    if step is not None:
-        features.capability(step, scope="runtime")
+    if checkpoints:
+        features.capability(SessionCapability(checkpoints=True), scope="runtime")
     features.capability(BoundCapability(), id=_SELECTED.id, revision=_SELECTED.revision, scope="agent")
     features.tool(inspect, effect_policy="none")
     for name, allowed in (("enabled", (_SELECTED.id,)), ("disabled", ())):
@@ -68,12 +68,11 @@ async def test_standalone_tool_context_has_selected_identity_and_revision():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("step", (StepPersistenceCapability(), SessionCapability(checkpoints=True)))
-async def test_native_tool_context_omits_registered_but_unselected_capability(tmp_path, step):
+async def test_native_tool_context_omits_registered_but_unselected_capability(tmp_path):
     seen = []
     async with Runtime.open(
         "admitted-tool-capabilities", storage=PersistenceStorage.sqlite(tmp_path / "context.db"),
-        features=_features(seen, step=step), authorization=_HostAuthorization(),
+        features=_features(seen, checkpoints=True), authorization=_HostAuthorization(),
     ) as runtime:
         actor = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=actor)
@@ -176,7 +175,7 @@ async def test_referenced_input_capability_remains_unavailable_without_same_stor
     features.agent("default", allow_tools=(), allow_capabilities=(_SOURCE.id,), allow_skills=(), allow_subagents=())
     model_features(_Models(_UsageFunctionModel(forbidden)), features)
     if split:
-        features.capability(StepPersistenceCapability(), scope="runtime")
+        features.capability(SessionCapability(checkpoints=True), scope="runtime")
         execution = StorageRoute.sqlite(tmp_path / "execution.db")
         storage = PersistenceStorage(PersistencePlan(
             conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),

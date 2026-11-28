@@ -187,7 +187,7 @@ async def test_restored_history_enforces_current_policy(tmp_path):
 async def test_restored_history_ignores_source_routes_and_cache(tmp_path, monkeypatch, captured):
     import shutil
 
-    from linktools.ai.capability import ExecutionCapability, TraceCapability
+    from linktools.ai.capability import TraceCapability
     from linktools.ai.snapshot import Snapshot
     from linktools.ai.persistence import PersistenceDomain
     from linktools.ai.storage import StorageRoute
@@ -208,7 +208,7 @@ async def test_restored_history_ignores_source_routes_and_cache(tmp_path, monkey
     routes[PersistenceDomain.TRACE] = routes[PersistenceDomain.TRACE].with_cache(cache)
     # Portable archives intentionally cover checkpoint-free retained history.
     # Native checkpoint dependencies are rejected by the dedicated backup tests.
-    group = _features(ExecutionCapability(retain_history=True), TraceCapability())
+    group = _features(TraceCapability(), retain_history=True)
     policy = Policy()
     group.model("default", _FeatureModels())
     capture = group.borrow()

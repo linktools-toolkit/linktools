@@ -330,8 +330,7 @@ Checkpoint safety writes. To choose a different Trace hot cache, pass that
 backend to `with_cache` instead.
 
 Missing write buffers make batch policies await source publication without an
-implicit queue. `ExecutionCapability` is optional: when omitted, Runtime uses
-sync commit; any coordination resource comes from PersistenceStorage. A terminal preference must
+implicit queue. By default, Runtime uses synchronous execution commit; any coordination resource comes from PersistenceStorage. A terminal preference must
 be declared explicitly and remains subject to coordination and safety rules.
 Runtime drains its own work on close, but never closes borrowed hot caches,
 write buffers, coordination resources, SQL engines, or Metrics datasets.

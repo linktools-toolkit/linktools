@@ -6,15 +6,15 @@ from contextlib import asynccontextmanager
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
-from pydantic_ai_harness.step_persistence import StepPersistence
 
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
-from linktools.ai.capability import AssetCapability, ExecutionCapability, SkillInput
+from linktools.ai.capability import AssetCapability, SkillInput, SessionCapability
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.storage import StorageOverlay
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 
 
@@ -24,15 +24,11 @@ class _SessionHostPolicy(TenantAuthorizationPolicy):
 
 @asynccontextmanager
 async def _open_runtime(tmp_path, features):
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     async with Persistence.open("canonical-tools", storage=PersistenceStorage.from_root(tmp_path)) as state:
-        native = await state.create_step_store()
-        try:
-            features.capability(StepPersistence(store=native, capture_frontier=True), scope="runtime")
-            async with Runtime.open(persistence=state, features=features, authorization=_SessionHostPolicy()) as runtime:
-                yield state, runtime
-        finally:
-            await native.close()
+        features.capability(SessionCapability(checkpoints=True), scope="runtime")
+        async with Runtime.open(persistence=state, features=features, authorization=_SessionHostPolicy()) as runtime:
+            yield state, runtime
 
 
 @pytest.mark.asyncio

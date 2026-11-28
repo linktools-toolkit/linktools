@@ -12,7 +12,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo
 
 from linktools.ai.asset import AssetKey, AssetStore
-from linktools.ai.capability import AssetCapability, ExecutionCapability
+from linktools.ai.capability import AssetCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus, PersistenceDomain, Principal, canonical_json_bytes, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionInputContext, ExecutionRecord, ExecutionRequest, ExecutionStartReservation, ExecutionStartReservationResult
@@ -54,9 +54,8 @@ async def test_source_first_rule_admission_survives_deleted_head_before_context(
     async with _assets() as assets:
         key = AssetKey("rule", "admission.md")
         await assets.put(key, body.encode())
-        features = RuntimeFeatures("rules")
+        features = RuntimeFeatures("rules", defaults={"execution": {"retain_history": True}})
         features.capability(AssetCapability(assets))
-        features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
         features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
         async with Persistence.open("rule-admission", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db")) as state:
             async with Runtime.open(persistence=state, features=model_features(

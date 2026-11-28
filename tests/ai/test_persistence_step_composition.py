@@ -15,7 +15,6 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
@@ -100,8 +99,7 @@ async def test_local_native_factory_runs_checkpointed_agent_and_reopens(tmp_path
     async with Persistence.open("native-agent", storage=storage) as persistence:
         native = await persistence.create_step_store()
         try:
-            features = RuntimeFeatures("native-agent")
-            features.capability(ExecutionCapability(retain_history=True))
+            features = RuntimeFeatures("native-agent", defaults={"execution": {"retain_history": True}})
             features.capability(StepPersistence(store=native, capture_frontier=True))
             features.agent("default", model="default", allow_tools=())
             async with Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
@@ -287,8 +285,7 @@ async def test_local_native_handoff_backup_recovers_same_execution(tmp_path: Pat
         return ModelResponse(parts=[TextPart("recovered")])
 
     def features(native, model):
-        group = RuntimeFeatures("native-handoff")
-        group.capability(ExecutionCapability(retain_history=True))
+        group = RuntimeFeatures("native-handoff", defaults={"execution": {"retain_history": True}})
         group.capability(StepPersistence(store=native, capture_frontier=True))
         group.agent("default", model="default", allow_tools=())
         return model_features(_Models(_UsageFunctionModel(model)), group)

@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from pydantic_ai_harness.step_persistence import StepPersistence
-from linktools.ai.capability import ExecutionCapability, MemoryCapability
+from linktools.ai.capability import MemoryCapability
 
 import pytest
 from pydantic_ai.models.test import TestModel
@@ -63,8 +63,7 @@ class _NoToolsModels(_NoToolsBinding):
 
 @pytest.mark.asyncio
 async def test_captured_session_context_ignores_later_turns_and_metadata(tmp_path: Path) -> None:
-    group = RuntimeFeatures("context")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group = RuntimeFeatures("context", defaults={"execution": {"retain_history": True}})
     group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", system_prompt="original-only behavior", allow_tools=(), allow_skills=(), allow_subagents=())
     group.agent("candidate", model="default", system_prompt="candidate-only behavior", allow_tools=(), allow_skills=(), allow_subagents=())
@@ -154,8 +153,7 @@ async def test_captured_memory_preserves_versions_in_new_execution_scope(
 async def test_captured_agent_task_and_graph_restore_context_after_restart(tmp_path: Path) -> None:
     from linktools.ai.inputs import CaptureGraphRequest
 
-    group = RuntimeFeatures("context-graph")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group = RuntimeFeatures("context-graph", defaults={"execution": {"retain_history": True}})
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     principal = Principal("owner", "default")
     async with Persistence.open('captured-graph-context', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_109, _open_native_runtime(persistence_109, group) as runtime, TaskEngine.open(persistence=persistence_109, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
@@ -320,8 +318,7 @@ async def test_large_captured_context_survives_portable_storage_snapshot(tmp_pat
 
 @pytest.mark.asyncio
 async def test_reprojection_uses_captured_history_without_reopening_source_session(tmp_path: Path) -> None:
-    group = RuntimeFeatures("reproject-context")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group = RuntimeFeatures("reproject-context", defaults={"execution": {"retain_history": True}})
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
 
     async def first_builder(context: AgentTaskInputContext) -> str:
@@ -474,8 +471,7 @@ async def test_execution_capture_preserves_detached_accepted_provenance(
     from pydantic_ai.messages import BinaryContent, TextContent
     from linktools.ai.model import MaterializedUserContent
 
-    group = RuntimeFeatures("capture-provenance")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group = RuntimeFeatures("capture-provenance", defaults={"execution": {"retain_history": True}})
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     principal = Principal("owner", "default")
     metadata = {"nested": {"labels": ["original"]}}

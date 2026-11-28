@@ -5,7 +5,6 @@
 import asyncio
 
 from linktools.ai.persistence import Persistence
-from linktools.ai.capability import ExecutionCapability
 from datetime import datetime, timezone
 
 import pytest
@@ -457,8 +456,7 @@ async def test_sql_session_history_survives_runtime_storage_reopen(tmp_path, loc
 
     namespace = "session-history-sql"
     principal = Principal("owner", "tenant")
-    features = RuntimeFeatures(namespace)
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures(namespace, defaults={"execution": {"retain_history": True}})
     features.agent("default", allow_tools=(), allow_capabilities=())
     model_features(_Models(_UsageFunctionModel(model)), features)
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")

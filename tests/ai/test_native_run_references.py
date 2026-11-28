@@ -363,7 +363,7 @@ async def test_default_runtime_metadata_uses_the_smaller_run_representation(tmp_
 @pytest.mark.asyncio
 async def test_execution_only_provisioning_supports_default_nonrestart_trace_reads(tmp_path: Path) -> None:
     from pydantic_ai.messages import ModelResponse, TextPart
-    from linktools.ai.capability import ExecutionCapability, TraceCapability
+    from linktools.ai.capability import TraceCapability
     from linktools.ai.core import ExecutionStatus
     from linktools.ai.persistence import PersistenceStorage
     from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -371,8 +371,7 @@ async def test_execution_only_provisioning_supports_default_nonrestart_trace_rea
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'execution-only.db'}")
     await provision_runtime_database(engine, domains=(PersistenceDomain.EXECUTION,))
-    features = RuntimeFeatures("selected-schema")
-    features.capability(ExecutionCapability(retain_history=True))
+    features = RuntimeFeatures("selected-schema", defaults={"execution": {"retain_history": True}})
     features.capability(TraceCapability())
     features.agent("default", model="default", allow_tools=())
 

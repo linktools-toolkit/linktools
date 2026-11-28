@@ -491,7 +491,7 @@ async def test_split_admission_unknown_preserves_only_committed_turn_after_resta
                     **store._turn_values(key), generation=1,
                 ).values(lease_until=0))
                 assert expired.rowcount == 1
-            assert await runtime.sessions.recover_turn("session", key.turn_id, principal=principal)
+            assert await runtime.sessions.recover_turn("session", key.turn_id, mode="resume", principal=principal)
 
             async def released():
                 return await runtime.history.turn_result("session", key.turn_id, principal=principal)
@@ -1872,7 +1872,6 @@ async def test_idempotent_replay_does_not_claim_active_tool_execution(
 
 
 def _split_terminal_setup(root):
-    from linktools.ai.capability import StepPersistenceCapability
     from linktools.ai.persistence import PersistencePlan
     from linktools.ai.storage import StorageRoute
 
@@ -1886,7 +1885,7 @@ def _split_terminal_setup(root):
         conversation=StorageRoute.sqlite(root / "conversation.db"), execution=step, checkpoint=step,
     ))
     features = RuntimeFeatures("application")
-    features.capability(StepPersistenceCapability(), scope="runtime")
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
     features.agent("default", model="default", allow_tools=(), allow_subagents=())
     return storage, model_features(_Models(_UsageFunctionModel(model)), features)
 
@@ -1951,12 +1950,12 @@ async def test_split_storage_handoff_reconciles_prepared_checkpoint_after_restar
             assert row["state"] == "accepted" and row["split_source_receipt"] is None
             assert (await turns.get_session("session"))["active_turn_id"] == key.turn_id.encode()
             await _expire(turns, key, generation=1)
-            assert await runtime.sessions.recover_turn("session", key.turn_id, principal=principal)
+            assert await runtime.sessions.recover_turn("session", key.turn_id, mode="resume", principal=principal)
             published = await source._read_pin(source._identity(key, 1))
             assert published.phase == "published" and published.pin == sealed.pin
         else:
             assert (row["state"], row["split_source_receipt"]) == ("succeeded", sealed.pin.receipt_id.encode())
-        assert not await runtime.sessions.recover_turn("session", key.turn_id, principal=principal)
+        assert not await runtime.sessions.recover_turn("session", key.turn_id, mode="resume", principal=principal)
         replay = await _send_split_terminal(runtime)
         assert replay.key == key
         terminal = await replay.wait_final(timeout_seconds=10)
@@ -2261,7 +2260,7 @@ def _crash_session_bootstrap(root, phase, turn_id=None):
         ):
             if phase == "recovered_before_terminal":
                 await _expire(state.session_turns, SessionTurnKey(_SESSION, turn_id), generation=1)
-                assert await runtime.sessions.recover_turn(_SESSION, turn_id, principal=runtime.default_principal)
+                assert await runtime.sessions.recover_turn(_SESSION, turn_id, mode="resume", principal=runtime.default_principal)
             else:
                 await runtime.agents.get().create_session(_SESSION)
                 turn = await _send(runtime)
@@ -2326,14 +2325,14 @@ async def test_recovery_preserves_bootstrap_and_effect_confirmation_boundaries(t
             expired = await turns.get_turn(key)
             for _ in range(2):
                 with pytest.raises(AIError) as unavailable:
-                    await runtime.sessions.recover_turn(_SESSION, turn_id, principal=principal)
+                    await runtime.sessions.recover_turn(_SESSION, turn_id, mode="resume", principal=principal)
                 assert unavailable.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
                 assert await turns.get_turn(key) == expired
             assert (await turns.get_session(_SESSION))["active_turn_id"] == key.turn_id.encode()
             assert not provider_log.exists() and not effect_log.exists()
             return
 
-        assert await runtime.sessions.recover_turn(_SESSION, turn_id, principal=principal)
+        assert await runtime.sessions.recover_turn(_SESSION, turn_id, mode="resume", principal=principal)
         recovered = await _send(runtime)
         assert recovered.key == key
         terminal = await recovered.wait_final(timeout_seconds=10)
@@ -2459,7 +2458,7 @@ async def test_terminal_transaction_rollback_keeps_session_cursor_unchanged(
                     **store._turn_values(turn.key), generation=row["generation"],
                 ).values(lease_until=0))
                 assert expired.rowcount == 1
-            assert await sessions.abandon_turn("session", turn.key.turn_id,
+            assert await sessions.recover_turn("session", turn.key.turn_id,
                                                expected_generation=row["generation"], principal=principal)
             failed = await replay.result()
             assert failed.status is ExecutionStatus.FAILED

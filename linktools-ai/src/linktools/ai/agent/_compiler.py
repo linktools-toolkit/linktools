@@ -72,6 +72,12 @@ class AgentCompiler:
         if not isinstance(agent_settings, dict):
             raise TypeError("agent defaults must be a JSON object")
         self._defaults = _AgentDefaults(**agent_settings)
+        execution_settings = settings.get("execution", {})
+        if not isinstance(execution_settings, dict):
+            raise TypeError("execution defaults must be a JSON object")
+        self._retain_history = execution_settings.get("retain_history", False)
+        if not isinstance(self._retain_history, bool):
+            raise TypeError("execution.retain_history must be bool")
         self._repository_instructions = repository_instructions
         self._runtime_contributions = tuple(item for item in candidates if item.scope == "runtime")
         candidates = tuple(item for item in candidates if item.scope == "agent")
@@ -501,6 +507,7 @@ class AgentCompiler:
             tool_policy=tuple(tool_policy),
             mcp_policy=tuple(mcp_policy),
             runtime_contributions=self._runtime_contributions,
+            retain_history=self._retain_history,
         )
 
 

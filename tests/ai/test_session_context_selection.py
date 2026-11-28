@@ -8,19 +8,19 @@ from contextlib import AsyncExitStack
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, UserPromptPart
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._session_turn_sql import SessionTurnKey, SqlSessionTurnReader
 from linktools.ai.runtime import Runtime
 
+from ._runtime_test_helpers import configure_execution
 from .test_runtime_session_start_preparation import _features as _base_features
 
 
 def _features(model):
     features = _base_features(model)
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     return features
 
 pytestmark = pytest.mark.asyncio

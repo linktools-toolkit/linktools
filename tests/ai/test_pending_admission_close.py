@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -38,8 +37,7 @@ async def test_native_close_drains_committed_admission_after_caller_cancellation
         return ModelResponse(parts=[TextPart("answer")])
 
     name = "native-admission-close"
-    features = RuntimeFeatures(name)
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures(name, defaults={"execution": {"retain_history": True}})
     features.agent("default", model="default", allow_tools=())
     model_features(_Models(_UsageFunctionModel(model)), features)
     storage = PersistenceStorage.from_root(tmp_path)
@@ -113,14 +111,14 @@ async def test_native_close_drains_committed_admission_after_caller_cancellation
             "session", "question", agent=reopened.agents.get(), principal=principal, idempotency_key="request",
         )
         assert duplicate.key == key and calls == 0
-        assert not await reopened.sessions.recover_turn("session", key.turn_id, principal=principal)
+        assert not await reopened.sessions.recover_turn("session", key.turn_id, mode="resume", principal=principal)
         turns = state.session_turns
         async with turns._context.engine.begin() as connection:
             expired = await connection.execute(turns._turns.update().filter_by(
                 **turns._turn_values(key), generation=1, state="accepted",
             ).values(lease_until=0))
             assert expired.rowcount == 1
-        assert await reopened.sessions.recover_turn("session", key.turn_id, principal=principal)
+        assert await reopened.sessions.recover_turn("session", key.turn_id, mode="resume", principal=principal)
         result = await duplicate.wait_final(timeout_seconds=5)
         assert result.key == key and result.status is ExecutionStatus.SUCCEEDED
         assert result.view["output"] == {"text": "answer"} and calls == 1

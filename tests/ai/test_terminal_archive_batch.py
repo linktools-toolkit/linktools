@@ -13,7 +13,7 @@ from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, Tex
 import pytest
 from sqlalchemy import event, select
 
-from linktools.ai.capability import StepPersistenceCapability, TraceCapability
+from linktools.ai.capability import SessionCapability, TraceCapability
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, InMemoryStepStore, RunRecord
 from linktools.ai.core import (
     ExecutionEventType, ExecutionStatus, Principal, ResourceRef, StopReason, TenantAuthorizationPolicy, UsageMetrics,
@@ -307,7 +307,7 @@ async def test_native_session_terminal_archive_retains_ordered_tool_history_with
     storage = _storage("sqlite", tmp_path)
     calls: list[str] = []
     application = _application(calls)
-    application.capability(StepPersistenceCapability(), scope="runtime")
+    application.capability(SessionCapability(checkpoints=True), scope="runtime")
     features = model_features(_ToolModels(), application)
     authorization = _NativeSessionHost()
     async with (

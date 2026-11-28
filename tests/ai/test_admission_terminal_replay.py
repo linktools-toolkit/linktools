@@ -10,7 +10,6 @@ import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import canonical_sha256, CommitPolicy, ExecutionStatus, IdempotencyStatus, ResourceKind, RunBudget
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import Execution, ExecutionStartReservation, ExecutionStartReservationResult
@@ -62,10 +61,7 @@ async def _terminal_race(
         monkeypatch.setattr(coordination, "release_turn", release_turn)
     storage = (PersistenceStorage.in_memory(coordination=coordination) if backend == "memory" else
                PersistenceStorage.sqlite(tmp_path / "state.db", coordination=coordination))
-    features = RuntimeFeatures("terminal-replay")
-    features.capability(ExecutionCapability(retain_history=True, commit=(
-        CommitPolicy.terminal() if mode == "pending" else CommitPolicy.sync()
-    )), scope="runtime")
+    features = RuntimeFeatures("terminal-replay", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal() if mode == "pending" else CommitPolicy.sync())
     features.agent("default", model="default", allow_tools=())
     model_features(_Models(_UsageFunctionModel(provider)), features)
 
@@ -261,8 +257,7 @@ async def test_admission_terminal_replay_does_not_restart_live_winner(
         await finish.wait()
         return ModelResponse(parts=[TextPart("one result")])
 
-    features = RuntimeFeatures("live-replay")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("live-replay", defaults={"execution": {"retain_history": True}})
     features.agent("default", model="default", allow_tools=())
     model_features(_Models(_UsageFunctionModel(provider)), features)
     storage = PersistenceStorage.sqlite(

@@ -9,7 +9,7 @@ from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, Wra
 
 from ..errors import AIError, ErrorCode
 from ..core import CommitPolicy, validate_capability_id
-from ..capability import ExecutionCapability, TraceCapability, StepPersistenceCapability
+from ..capability import TraceCapability, StepPersistenceCapability
 from ..persistence import PersistenceDomain
 from ..persistence.capabilities import CapabilityPersistence
 
@@ -27,9 +27,7 @@ def validate_persistence_capabilities(
             for child in feature.capabilities:
                 collect(child)
             return
-        if isinstance(feature, ExecutionCapability) and feature.retain_history:
-            domain = PersistenceDomain.CONVERSATION
-        elif isinstance(feature, (StepPersistence, StepPersistenceCapability)):
+        if isinstance(feature, (StepPersistence, StepPersistenceCapability)):
             domain = PersistenceDomain.CHECKPOINT
         elif isinstance(feature, TraceCapability):
             domain = PersistenceDomain.TRACE
@@ -43,7 +41,7 @@ def validate_persistence_capabilities(
         collect(capability)
 
 
-__all__ = ["validate_persistence_capabilities", "capability_persistence_ids", "execution_configuration"]
+__all__ = ["validate_persistence_capabilities", "capability_persistence_ids"]
 
 
 def capability_persistence_ids(
@@ -78,30 +76,3 @@ def capability_persistence_ids(
     for identity, capability in capabilities:
         collect(capability, identity)
     return tuple(identities)
-
-
-def execution_configuration(
-    capabilities: Sequence[AbstractCapability[object]],
-) -> ExecutionCapability:
-    """Select the declared execution policy without binding or mutating its tree."""
-    selected: ExecutionCapability | None = None
-
-    def select(capability: AbstractCapability[object]) -> None:
-        nonlocal selected
-        if isinstance(capability, ExecutionCapability):
-            if selected is not None:
-                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            selected = capability
-
-    def collect(capability: AbstractCapability[object]) -> None:
-        if isinstance(capability, WrapperCapability):
-            collect(capability.wrapped)
-        elif isinstance(capability, CombinedCapability):
-            for child in capability.capabilities:
-                collect(child)
-        else:
-            capability.apply(select)
-
-    for capability in capabilities:
-        collect(capability)
-    return ExecutionCapability() if selected is None else selected

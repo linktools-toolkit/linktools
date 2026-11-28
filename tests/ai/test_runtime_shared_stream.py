@@ -15,7 +15,6 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics
@@ -90,7 +89,6 @@ async def test_two_runtimes_observe_preview_before_completion(tmp_path) -> None:
     from .test_runtime_content_cache_integration import CountingObjects, _put
 
     backend = _CombinedCache()
-    group.capability(ExecutionCapability(), scope="runtime")
     metrics = Metrics.in_memory()
     start = datetime.now(timezone.utc) - timedelta(seconds=1)
 
@@ -182,7 +180,6 @@ async def test_covered_remote_observation_needs_no_periodic_tree_or_model_reads(
         return ModelResponse(parts=[TextPart("done")])
 
     group = RuntimeFeatures("covered-observers")
-    group.capability(ExecutionCapability(), scope="runtime")
     group.capability(TraceCapability(), scope="runtime")
     group.tool(pause, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("pause",))
@@ -285,7 +282,6 @@ async def test_remote_cursor_resumes_preview_without_cancelling_producer(tmp_pat
     group = RuntimeFeatures[None]("shared-reconnect")
     group.agent("default", model="default", allow_tools=())
     backend = _CountingStreamBackend()
-    group.capability(ExecutionCapability(), scope="runtime")
     models = _Models(FunctionModel(stream_function=model))
     path = tmp_path / "state.db"
     async with Persistence.open('reconnect', storage=PersistenceStorage.sqlite(path, coordination=backend)) as persistence_168, Runtime.open(persistence=persistence_168, features=model_features(models, group)) as owner:
@@ -673,7 +669,6 @@ async def test_waiting_resume_opens_each_durable_admission_once(tmp_path) -> Non
     application = workspace_features("application", workspace=workspace, defaults={"execution": {"auto_recover": True}})
     application.agent("default", model="default", allow_tools=("read_file",))
     backend = _CountingStreamBackend()
-    application.capability(ExecutionCapability(), scope="runtime")
     path = tmp_path / "resume.db"
     state = PersistenceStorage.sqlite(path, coordination=backend)
     async with Persistence.open('resume-preview', storage=state) as persistence_516, Runtime.open(persistence=persistence_516, features=model_features(_ToolModels(), application)) as owner:
@@ -872,7 +867,6 @@ async def test_nondurable_runtime_keeps_combined_cache_without_opening_shared_st
          coordination=cache)
     )
     group = RuntimeFeatures[None]("local-preview")
-    group.capability(ExecutionCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     async with Persistence.open('local-preview', storage=storage) as persistence_715, Runtime.open(persistence=persistence_715, features=model_features(_Models(TestModel()), group)) as runtime:
         execution = await runtime.agents.get().run("hello", timeout_seconds=5)

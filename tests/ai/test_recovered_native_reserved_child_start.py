@@ -10,7 +10,7 @@ from traceback import extract_tb
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 
-from linktools.ai.capability import ExecutionCapability, StepPersistenceCapability
+from linktools.ai.capability import SessionCapability
 from linktools.ai.core import ExecutionStatus, IdempotencyStatus, Principal, ToolOperationStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionStartClaim
@@ -19,6 +19,7 @@ from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.runtime._native_subagent import NativeSubagentAdmission
 from linktools.ai.runtime._subagent import SubagentDispatcher
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import _wait_for_committed
 from .test_canonical_turn_subagents import _HostAuthorization, _model
 
@@ -57,11 +58,11 @@ async def test_recovered_native_start_requires_retained_receipt_and_pristine_chi
     monkeypatch.setattr(NativeSubagentAdmission, "commit_start", stop_before_start)
     monkeypatch.setattr(SubagentDispatcher, "dispatch", observe_dispatch)
     name = "native-reserved-child-start"
-    features = RuntimeFeatures(name)
+    features = RuntimeFeatures(name, defaults={"execution": {"retain_history": True}})
     features.model("parent", _model("parent", parent))
     features.model("child", _model("child", child))
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    features.capability(StepPersistenceCapability(), scope="runtime")
+    configure_execution(features, retain_history=True)
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
     features.agent("default", model="parent", allow_subagents=("child",), allow_tools=(), allow_skills=())
     features.agent("child", model="child", allow_subagents=(), allow_tools=(), allow_skills=())
 

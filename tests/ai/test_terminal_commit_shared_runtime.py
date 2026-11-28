@@ -3,6 +3,7 @@
 
 from linktools.ai.persistence import Persistence
 """Cross-owner observation and cancellation of coordinated pending turns."""
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import model_features
 import asyncio
 from contextlib import asynccontextmanager
@@ -11,7 +12,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability, SessionCapability
+from linktools.ai.capability import SessionCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
@@ -53,7 +54,7 @@ class _TurnNoticeChannel:
 
 def _group(terminal: bool = True, *, auto_recover: bool = False):
     group = RuntimeFeatures('shared-pending', defaults={"execution": {"auto_recover": auto_recover}})
-    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync()), scope='runtime')
+    configure_execution(group, retain_history=True, commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync())
     group.agent('default', model='default', allow_tools=())
     if not terminal:
         # The synchronous canonical writer also exercises durable native Step.
@@ -239,8 +240,7 @@ async def test_lost_pending_lease_never_executes_effect(tmp_path: Path) -> None:
         entered.set()
         await finish.wait()
         return ModelResponse(parts=[ToolCallPart('effect', {}, tool_call_id='call')])
-    group = RuntimeFeatures('lost-pending')
-    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    group = RuntimeFeatures('lost-pending', defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     group.tool(effect, effect_policy='replay_safe')
     group.agent('default', model='default', allow_tools=('effect',))
     storage = PersistenceStorage.sqlite(tmp_path / 'state.db', cache=cache, coordination=cache)

@@ -10,6 +10,7 @@ from linktools.ai.core import Principal, ResourceKind, ResourceRef
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.history._service import DefaultExecutionHistoryService
 
+from ._runtime_test_helpers import configure_execution
 from .test_model_interaction_lifecycle_paging import _reader, _interaction
 
 pytestmark = pytest.mark.asyncio
@@ -173,14 +174,14 @@ async def test_exact_batch_real_archive_and_sql_read_reduction(tmp_path, backend
 
 
 async def test_exact_batch_http_content_and_permission_parity() -> None:
-    from linktools.ai.capability import ExecutionCapability, TraceCapability
+    from linktools.ai.capability import TraceCapability
     from linktools.ai.runtime import Runtime, RuntimeFeatures
     from linktools.ai.persistence import Persistence, PersistenceStorage
     from linktools.ai.web import create_app
     from ._runtime_test_helpers import RuntimeUsageModels, model_features
     from .test_web_console import client
     features = model_features(RuntimeUsageModels(), RuntimeFeatures("batch-http"))
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     features.capability(TraceCapability(), scope="runtime")
     async with Persistence.open("batch-http", storage=PersistenceStorage.in_memory()) as state:
         async with Runtime.open(persistence=state, features=features) as runtime:

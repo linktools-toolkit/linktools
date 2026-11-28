@@ -126,7 +126,7 @@ async def test_unknown_release_must_not_report_success_without_envelope(tmp_path
     async with _host(storage, calls, effects) as (state, runtime):
         joined = await _send(runtime, "effect input", "request")
         assert joined.key == turn.key
-        assert await runtime.sessions.recover_turn(_SESSION, turn.key.turn_id, principal=principal)
+        assert await runtime.sessions.recover_turn(_SESSION, turn.key.turn_id, mode="resume", principal=principal)
         result = await joined.wait_final(timeout_seconds=5)
         page = await runtime.history.turn_session(_SESSION, principal=principal)
         assert result.status is ExecutionStatus.SUCCEEDED
@@ -229,7 +229,7 @@ async def test_completed_receipt_old_handoff_after_later_turn(tmp_path, monkeypa
         page = await runtime.history.turn_session(_SESSION, principal=principal)
 
     async with _host(storage, calls, effects) as (_, runtime):
-        assert not await runtime.sessions.recover_turn(_SESSION, first.key.turn_id, principal=principal)
+        assert not await runtime.sessions.recover_turn(_SESSION, first.key.turn_id, mode="resume", principal=principal)
         replay = await _send(runtime, "effect input", "first")
         assert replay.key == first.key
         assert (await replay.wait_final(timeout_seconds=5)).view == first_result.view

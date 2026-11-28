@@ -21,7 +21,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import AgentInfo
 
-from linktools.ai.capability import AgentContext, ExecutionCapability, ReferencedInputsCapability, TraceCapability
+from linktools.ai.capability import AgentContext, ReferencedInputsCapability, TraceCapability
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.model import ReferencedContent
 from linktools.ai.model.messages import decode_user_content_item
@@ -87,10 +87,9 @@ async def test_parallel_native_tool_outputs_keep_ids_after_reverse_completion_an
         assert "private-reconstruction-parameter" not in " ".join(part.model_response_str() for part in native)
         return ModelResponse(parts=[TextPart("done")])
 
-    group = RuntimeFeatures("native-tool-ownership")
+    group = RuntimeFeatures("native-tool-ownership", defaults={"execution": {"retain_history": True}})
     for tool in (read_a, read_b, finish):
         group.tool(tool, effect_policy="replay_safe")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.capability(TraceCapability(record_http_bodies=True), scope="runtime")
     group.capability(ReferencedInputsCapability(load), id=_SOURCE.id, revision=_SOURCE.revision, scope="agent")
     group.agent("default", allow_tools=("read_a", "read_b", "finish"), allow_skills=(), allow_subagents=())
@@ -186,10 +185,9 @@ async def test_native_capability_tools_bind_original_producer_before_hydration(t
                    for part in message.parts for item in (part.content if isinstance(part.content, list) else [part.content]))
         return ModelResponse(parts=[TextPart("done")])
 
-    group = RuntimeFeatures("native-reference-origin")
+    group = RuntimeFeatures("native-reference-origin", defaults={"execution": {"retain_history": True}})
     group.capability(NativeTools(), scope="agent")
     group.capability(TraceCapability(), scope="runtime")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.capability(ReferencedInputsCapability(load, authorized_load_many=batch), id=_SOURCE.id,
                      revision=_SOURCE.revision, scope="agent")
     group.agent("default", allow_tools=(), allow_skills=(), allow_subagents=())

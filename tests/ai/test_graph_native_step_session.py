@@ -9,7 +9,6 @@ import pytest
 from pydantic_ai.messages import BinaryContent, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai_harness.step_persistence import StepPersistence
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import CommitPolicy, TaskStatus, TenantAuthorizationPolicy
 from linktools.ai.history import History
 from linktools.ai.inputs import AgentTaskInput
@@ -21,6 +20,7 @@ from linktools.ai.task import Task, TaskGraph, TaskNode
 from linktools.ai.task.engine import TaskEngine
 from linktools.ai.workspace import Workspace
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features, workspace_features
 
 
@@ -90,7 +90,7 @@ async def test_graph_step_reopens_exact_session_result_without_trace(
         stack.push_async_callback(native.close)
         features = (workspace_features(namespace, workspace=Workspace.load(workspace))
                     if files or attachment == "cwd" else RuntimeFeatures(namespace))
-        features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()), scope="runtime")
+        configure_execution(features, retain_history=True)
         features.capability(StepPersistence(store=native, capture_frontier=True), scope="runtime")
         features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
         model_features(_Models(_UsageFunctionModel(model)), features)

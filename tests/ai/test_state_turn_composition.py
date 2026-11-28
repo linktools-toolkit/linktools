@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus, PersistenceDomain
 from linktools.ai.storage import TurnScopeIdentity
 from linktools.ai.errors import AIError, ErrorCode
@@ -373,8 +372,7 @@ async def test_runtime_selects_source_authority_before_sync_execution_reservatio
 
     monkeypatch.setattr(StateTurnCoordination, "claim_turn", blocked_claim)
     monkeypatch.setattr(StateTurnCoordination, "release_turn", blocked_release)
-    features = RuntimeFeatures("source-turns")
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()), scope="runtime")
+    features = RuntimeFeatures("source-turns", defaults={"execution": {"retain_history": True}})
     features.agent("default", model="default", allow_tools=())
     features = model_features(_Models(_UsageFunctionModel(model)), features)
     cache = _BorrowedCache()

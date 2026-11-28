@@ -8,7 +8,7 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai_harness.step_persistence import StepPersistence
 
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.inputs import AgentTaskInput
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -33,8 +33,7 @@ async def test_graph_trace_settles_without_copying_accepted_session_prefix(tmp_p
     async with Persistence.open("native-graph-trace", storage=storage) as state:
         step = await state.create_step_store()
         try:
-            features = RuntimeFeatures("native-graph-trace")
-            features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+            features = RuntimeFeatures("native-graph-trace", defaults={"execution": {"retain_history": True}})
             features.capability(StepPersistence(store=step, capture_frontier=True), scope="runtime")
             features.capability(TraceCapability(), scope="runtime")
             features.agent("default", model="default", allow_tools=())

@@ -14,7 +14,7 @@ from pydantic_ai.exceptions import ApprovalRequired
 from pydantic_ai.messages import ToolReturnPart
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
-from linktools.ai.capability import AgentContext, ExecutionCapability, StepPersistenceCapability, TraceCapability
+from linktools.ai.capability import AgentContext, StepPersistenceCapability, TraceCapability
 from linktools.ai.core import ApprovalDecision, CommitPolicy, Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ApprovalDecisionRequest
@@ -98,12 +98,11 @@ async def test_completed_parallel_return_survives_reopen(
         calls.append(index)
         return "approved"
 
-    features = RuntimeFeatures("parallel-reopen")
+    features = RuntimeFeatures("parallel-reopen", defaults={"execution": {"retain_history": True}})
     features.model("offline", _Binding(stream))
     features.agent("worker", model="offline", allow_tools=("completed_tool", "approved_tool"))
     features.tool(completed_tool, effect_policy="none")
     features.tool(approved_tool, effect_policy="none")
-    features.capability(ExecutionCapability(retain_history=True))
     features.capability(StepPersistenceCapability())
     if buffered_trace:
         features.capability(TraceCapability(commit=CommitPolicy.batch(

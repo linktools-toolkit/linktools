@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, UserPromptPart
 
-from linktools.ai.capability import AgentContext, ExecutionCapability
+from linktools.ai.capability import AgentContext
 from linktools.ai.core import CommitPolicy, ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -17,6 +17,7 @@ from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.storage._database import SqlStorageContext
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features, workspace_features
 
 
@@ -38,8 +39,7 @@ async def test_pending_session_commits_once_and_retains_canonical_replay(
         await release.wait()
         return ModelResponse(parts=[TextPart("answer")])
 
-    group = RuntimeFeatures("pending")
-    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    group = RuntimeFeatures("pending", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     group.agent("default", model="default", allow_tools=())
     features = model_features(_Models(_UsageFunctionModel(model)), group)
     database = tmp_path / "state.db"
@@ -130,8 +130,7 @@ async def test_strict_effect_promotes_but_idempotent_tool_stays_pending(
             assert await runtime._state.execution.executions.get(owner['execution'], tenant_id=owner['tenant']) is None
             return ModelResponse(parts=[ToolCallPart('lookup', {}, tool_call_id='lookup-call')])
         return ModelResponse(parts=[TextPart('answer')])
-    group = RuntimeFeatures('tool-pending')
-    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    group = RuntimeFeatures('tool-pending', defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     group.tool(lookup, effect_policy=effect_policy)
     group.agent('default', model='default', allow_tools=('lookup',))
     async with Persistence.open('pending-tool', storage=state) as persistence_120, Runtime.open(persistence=persistence_120, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
@@ -168,8 +167,7 @@ async def test_pending_cancel_promotes_and_quiesces_before_cancelled(tmp_path: P
             await asyncio.Event().wait()
         finally:
             stopped.set()
-    group = RuntimeFeatures('cancel-pending')
-    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    group = RuntimeFeatures('cancel-pending', defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     group.agent('default', model='default', allow_tools=())
     state = PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
     async with Persistence.open('pending-cancel', storage=state) as persistence_155, Runtime.open(persistence=persistence_155, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
@@ -194,8 +192,7 @@ async def test_pending_watch_observes_progress_and_confirmed_terminal(tmp_path: 
         entered.set()
         await release.wait()
         return ModelResponse(parts=[TextPart('answer')])
-    group = RuntimeFeatures('watch-pending')
-    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    group = RuntimeFeatures('watch-pending', defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     group.agent('default', model='default', allow_tools=())
     state = PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
     async with Persistence.open('pending-watch', storage=state) as persistence_182, Runtime.open(persistence=persistence_182, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
@@ -233,7 +230,7 @@ async def test_pending_approval_promotes_before_persisting_frontier(tmp_path: Pa
     from .test_runtime_approval_composition import _ToolModels
     workspace = Workspace.load(tmp_path, policy=WorkspacePolicy(tool_permissions=ToolPermissionPolicy(default='ask')))
     group = workspace_features('approval-pending', workspace=workspace)
-    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    configure_execution(group, retain_history=True, commit=CommitPolicy.terminal())
     group.agent('default', model='default', allow_tools=('read_file',))
     state = PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
     async with Persistence.open('pending-approval', storage=state) as persistence_221, Runtime.open(persistence=persistence_221, features=model_features(_ToolModels(), group)) as runtime:
@@ -251,8 +248,7 @@ async def test_pending_approval_promotes_before_persisting_frontier(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_pending_sessionless_agent_commits_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    group = RuntimeFeatures('standalone-pending')
-    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    group = RuntimeFeatures('standalone-pending', defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     group.agent('default', model='default', allow_tools=())
     commits = []
     cleanups = []
@@ -288,8 +284,7 @@ async def test_memory_pending_session_force_close_promotes_before_closing() -> N
     async def model(messages, info):
         entered.set()
         await asyncio.Event().wait()
-    group = RuntimeFeatures('close-pending')
-    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    group = RuntimeFeatures('close-pending', defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     group.agent('default', model='default', allow_tools=())
     async with Persistence.open('close-pending', storage=PersistenceStorage.in_memory(coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))) as persistence_271, Runtime.open(persistence=persistence_271, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session')
@@ -307,8 +302,7 @@ async def test_memory_pending_session_force_close_promotes_before_closing() -> N
 async def test_pending_unknown_commit_reconciles_without_replaying_model_or_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    group = RuntimeFeatures('unknown-pending')
-    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    group = RuntimeFeatures('unknown-pending', defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     group.agent('default', model='default', allow_tools=())
     calls = []
     async def model(messages, info):
@@ -358,8 +352,7 @@ async def test_pending_unknown_commit_reconciles_without_replaying_model_or_comm
 async def test_standalone_confirmed_rollback_allows_new_execution_without_fabricating_corruption(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    group = RuntimeFeatures('rollback-pending')
-    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    group = RuntimeFeatures('rollback-pending', defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     group.agent('default', model='default', allow_tools=())
     async def model(messages, info):
         return ModelResponse(parts=[TextPart('answer')])

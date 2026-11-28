@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionTerminalCommit, ExecutionTerminalCommitResult
@@ -29,9 +29,8 @@ async def test_retained_terminal_replay_confirms_canonical_receipt(
     async def respond(messages, info):
         return ModelResponse(parts=[TextPart("retained answer")])
 
-    features = RuntimeFeatures("terminal-receipt-replay")
+    features = RuntimeFeatures("terminal-receipt-replay", defaults={"execution": {"retain_history": True}})
     features.agent("default", model="default", allow_tools=())
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(TraceCapability(), scope="runtime")
     execution_route = StorageRoute.sqlite(tmp_path / "execution.db")
     storage = (PersistenceStorage.from_plan(PersistencePlan(

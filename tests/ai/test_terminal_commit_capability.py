@@ -4,6 +4,7 @@
 from linktools.ai.persistence import Persistence
 from linktools.ai.task.engine import TaskEngine
 """Conversation guarantees are fixed at admission and preserved through recovery."""
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import model_features
 
 from dataclasses import replace
@@ -16,7 +17,7 @@ from linktools.ai.capability import AgentContext
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import TraceCapability, ExecutionCapability
+from linktools.ai.capability import TraceCapability
 from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime import Runtime
@@ -36,49 +37,12 @@ from ._runtime_test_helpers import RuntimeUsageModels
 from .test_runtime_binding_contract import _execution
 
 
-def _conversation_feature(combined: bool) -> AbstractCapability[AgentContext[None]]:
-    capability = ExecutionCapability(retain_history=True)
-    assert isinstance(capability, AbstractCapability)
-    return CombinedCapability([capability]) if combined else capability
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize("combined", (False, True), ids=("native", "combined"))
-async def test_conversation_uses_native_runtime_registration(combined: bool) -> None:
-    group: RuntimeFeatures[None] = RuntimeFeatures("application")
-    group.capability(_conversation_feature(combined), id="conversation-feature" if combined else None, scope="runtime")
+async def test_conversation_retention_does_not_register_a_capability() -> None:
+    group = RuntimeFeatures("application", defaults={"execution": {"retain_history": True}})
     capture = await group.resolve()
-    assert len(capture.contributions) == 1
-    contribution = capture.contributions[0]
-    assert contribution.scope == "runtime"
-    captured: list[AbstractCapability[object]] = []
-    contribution.value.apply(captured.append)
-    assert any(isinstance(value, ExecutionCapability) for value in captured)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("combined", (False, True), ids=("native", "combined"))
-async def test_conversation_rejects_agent_scope(combined: bool) -> None:
-    group: RuntimeFeatures[None] = RuntimeFeatures("application")
-    group.capability(_conversation_feature(combined), id="conversation-feature" if combined else None, scope="agent")
-    with pytest.raises(AIError) as invalid:
-        async with Persistence.open('conversation-feature', storage=PersistenceStorage.in_memory()) as persistence_58, Runtime.open(persistence=persistence_58, features=model_features(RuntimeUsageModels(), group)):
-            raise AssertionError("Agent-scoped Conversation was accepted")
-    assert invalid.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-
-
-@pytest.mark.asyncio
-async def test_conversation_rejects_duplicate_native_id_across_contributions() -> None:
-    group: RuntimeFeatures[None] = RuntimeFeatures("application")
-    for policy_id in ("first-policy", "second-policy"):
-        group.capability(
-            CombinedCapability([ExecutionCapability(retain_history=True)]),
-            id=policy_id, scope="runtime",
-        )
-    with pytest.raises(AIError) as invalid:
-        async with Persistence.open('conversation-feature', storage=PersistenceStorage.in_memory()) as persistence_75, Runtime.open(persistence=persistence_75, features=model_features(RuntimeUsageModels(), group)):
-            raise AssertionError("Duplicate Conversation capabilities were accepted")
-    assert invalid.value.code is ErrorCode.CAPABILITY_CONFLICT
+    assert not capture.contributions
+    assert capture.defaults["execution"] == {"retain_history": True}
 
 
 @pytest.mark.parametrize("persisted", (False, True), ids=("domain", "persisted"))
@@ -139,11 +103,9 @@ def test_conversation_rejects_malformed_wire_and_constructor_values(invalid: obj
 async def test_admitted_policy_preserves_stronger_durability(
     tmp_path: Path, conversation: bool, restart: bool, trace: bool, combined: bool,
 ) -> None:
-    group: RuntimeFeatures[None] = RuntimeFeatures("application")
+    group: RuntimeFeatures[None] = RuntimeFeatures("application", defaults={"execution": {"retain_history": conversation}})
     group.agent("default", model="default", allow_capabilities=())
     policies: list[AbstractCapability[AgentContext[None]]] = []
-    if conversation:
-        policies.append(ExecutionCapability(retain_history=True))
     if restart:
         policies.append(native_checkpoint())
     if trace:
@@ -170,8 +132,7 @@ async def test_task_admission_keeps_conversation_disabled() -> None:
         return "done"
 
     task = Task("answer", answer, effect_policy="none")
-    group: RuntimeFeatures[None] = RuntimeFeatures("application")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group: RuntimeFeatures[None] = RuntimeFeatures("application", defaults={"execution": {"retain_history": True}})
     storage = PersistenceStorage.in_memory()
     async with Persistence.open('conversation-feature', storage=storage) as persistence_180, Runtime.open(persistence=persistence_180, features=model_features(RuntimeUsageModels(), group)) as runtime, TaskEngine.open(persistence=persistence_180) as engine:
         graph = await engine.with_definitions(task).start(
@@ -196,7 +157,7 @@ async def test_reopening_cannot_reinterpret_admitted_conversation(
         group: RuntimeFeatures[None] = RuntimeFeatures("application")
         group.agent("default", model="default", allow_capabilities=())
         if enabled:
-            group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+            configure_execution(group, retain_history=True)
         storage = PersistenceStorage.sqlite(database)
         async with Persistence.open('conversation-feature', storage=storage) as persistence_207, Runtime.open(persistence=persistence_207, features=model_features(RuntimeUsageModels(), group)) as runtime:
             execution = await runtime.agents.get().start("answer", idempotency_key="answer")
@@ -217,7 +178,7 @@ async def test_current_execution_record_retains_conversation_through_recovery(
 
     group: RuntimeFeatures[None] = RuntimeFeatures("application", defaults={"execution": {"auto_recover": True}})
     group.capability(native_checkpoint(), scope="runtime")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(group, retain_history=True)
     storage_path = tmp_path / "runtime"
     storage = PersistenceStorage.from_root(storage_path, exclusive_writer=True)
 

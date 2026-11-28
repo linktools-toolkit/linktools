@@ -9,7 +9,6 @@ from pydantic_ai.capabilities import ProcessHistory
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai_harness.step_persistence import SqliteStepStore, StepPersistence
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
@@ -34,9 +33,8 @@ async def test_cold_runtime_continues_sticky_snapshot_with_source_owned_history(
         return ModelResponse(parts=[TextPart("continued")])
 
     def features(model):
-        result = RuntimeFeatures("sticky-native")
+        result = RuntimeFeatures("sticky-native", defaults={"execution": {"retain_history": retain_history}})
         result.agent("default", allow_tools=())
-        result.capability(ExecutionCapability(retain_history=retain_history), scope="runtime")
         result.capability(ProcessHistory(lambda _messages: [ModelRequest(parts=[UserPromptPart("sticky context")])]),
                           id="sticky", scope="runtime")
         result.capability(StepPersistence(store=SqliteStepStore(database=tmp_path / "steps.db"), capture_frontier=True),

@@ -5,12 +5,12 @@ from linktools.ai.task.engine import TaskEngine
 
 from linktools.ai.persistence import Persistence
 """Public admission deadlines retain their durable scope without hot-path reads."""
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import model_features
 
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
 from pathlib import Path
-from linktools.ai.capability import ExecutionCapability
 from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint
 
@@ -49,7 +49,7 @@ def _group(contexts: list[AgentContext[None]]) -> RuntimeFeatures[None]:
     group: RuntimeFeatures[None] = RuntimeFeatures("deadline")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     group.capability(_Capture(contexts), scope="runtime")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(group, retain_history=True)
     return group
 
 

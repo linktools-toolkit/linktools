@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from linktools.ai.capability import AgentContext, ExecutionCapability, TraceCapability, StepPersistenceCapability
+from linktools.ai.capability import AgentContext, TraceCapability, StepPersistenceCapability
 from linktools.ai.core import CommitPolicy, Principal, TaskStatus
 from linktools.ai.inputs import AgentTaskInput
 from linktools.ai.persistence import PersistenceStorage
@@ -97,11 +97,10 @@ async def test_parallel_tools_remain_writable_while_another_tool_flushes(tmp_pat
         calls.append(label)
         return {'label': label, 'text': 'Synthetic page'}
 
-    features = RuntimeFeatures('parallel-trace-flush')
+    features = RuntimeFeatures('parallel-trace-flush', defaults={"execution": {"retain_history": True}})
     features.model('offline', ModelBinding(stream))
     features.agent('worker', model='offline', allow_tools=('read_synthetic',))
     features.tool(read_synthetic, effect_policy='none')
-    features.capability(ExecutionCapability(commit=CommitPolicy.sync(), retain_history=True))
     features.capability(StepPersistenceCapability())
     features.capability(TraceCapability(commit=CommitPolicy.batch(
         buffer=LatencyBuffer(max_bytes=2**22), batch_size=128, flush_interval=3)

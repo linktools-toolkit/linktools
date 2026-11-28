@@ -12,7 +12,6 @@ import pytest
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, SessionStatus
-from linktools.ai.capability import ExecutionCapability
 from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
@@ -36,8 +35,7 @@ async def test_admission_capture_is_stable_while_cancellation_stops_provider(
         calls.append(messages)
         return ModelResponse(parts=[TextPart("answer")])
 
-    group = RuntimeFeatures("launch-change")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group = RuntimeFeatures("launch-change", defaults={"execution": {"retain_history": True}})
     if restart:
         group.capability(native_checkpoint(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
@@ -122,8 +120,7 @@ async def test_other_runtime_claims_before_delayed_worker_without_duplicate_prov
         await release_provider.wait()
         return ModelResponse(parts=[TextPart("answer")])
 
-    group = RuntimeFeatures("launch-winner")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group = RuntimeFeatures("launch-winner", defaults={"execution": {"retain_history": True}})
     if restart:
         group.capability(native_checkpoint(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
@@ -174,8 +171,7 @@ async def test_restartable_launch_reuses_reads_but_requires_attempt_claim(
         calls.append("provider")
         return ModelResponse(parts=[TextPart("answer")])
 
-    features = RuntimeFeatures("application")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("application", defaults={"execution": {"retain_history": True}})
     features.capability(native_checkpoint(), scope="runtime")
     features.agent("default", model="default", allow_tools=())
     storage = (_split_sqlite_storage if split_storage else PersistenceStorage.sqlite)(tmp_path / "state.db")
@@ -244,8 +240,7 @@ async def test_confirmed_local_durable_event_reader_keeps_source_authorization(t
         await finish.wait()
         return ModelResponse(parts=[TextPart("answer")])
 
-    features = RuntimeFeatures("durable-event-read")
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()), scope="runtime")
+    features = RuntimeFeatures("durable-event-read", defaults={"execution": {"retain_history": True}})
     features.agent("default", model="default", allow_tools=())
     cache = InMemoryCacheBackend(max_bytes=2**24)
     storage = PersistenceStorage.sqlite(tmp_path / "events.db", cache=cache,

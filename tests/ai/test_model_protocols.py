@@ -338,7 +338,7 @@ def test_model_declaration_inspection_does_not_open_connections(monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("factory,api,name", PROTOCOLS)
 async def test_web_protocol_diagnostics_and_native_history_after_agent_removal(monkeypatch, tmp_path, factory, api, name):
-    from linktools.ai.capability import ExecutionCapability, StepPersistenceCapability, TraceCapability
+    from linktools.ai.capability import SessionCapability, TraceCapability
     from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
     from linktools.ai.runtime import Runtime, RuntimeFeatures
     from linktools.ai.persistence import PersistenceStorage
@@ -354,8 +354,7 @@ async def test_web_protocol_diagnostics_and_native_history_after_agent_removal(m
     features.model("default", models)
     features.agent("old", model="default", allow_tools=())
     features.capability(TraceCapability(), scope="runtime")
-    features.capability(ExecutionCapability(), scope="runtime")
-    features.capability(StepPersistenceCapability(), scope="runtime")
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
     class HostAuthorization(TenantAuthorizationPolicy):
         pass
 
@@ -388,7 +387,6 @@ async def test_web_protocol_diagnostics_and_native_history_after_agent_removal(m
     replacement.model("default", models)
     replacement.agent("replacement", model="default", allow_tools=())
     replacement.capability(TraceCapability(), scope="runtime")
-    replacement.capability(ExecutionCapability(), scope="runtime")
     async with (
         Persistence.open("default", storage=storage) as persistence,
         Runtime.open(persistence=persistence, features=replacement, authorization=authorization) as runtime,

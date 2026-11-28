@@ -10,7 +10,6 @@ from contextlib import aclosing
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.usage import RequestUsage
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import AuthorizationAction, ExecutionStatus, TenantAuthorizationPolicy, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -35,8 +34,7 @@ async def test_public_sql_sdk_session_creates_and_replays_native_turn(tmp_path):
         calls.append(True)
         return ModelResponse(parts=[TextPart("native")], usage=RequestUsage(input_tokens=7, output_tokens=11))
 
-    features = RuntimeFeatures("sdk-native-session")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("sdk-native-session", defaults={"execution": {"retain_history": True}})
     features.agent("default", allow_tools=(), allow_capabilities=())
     model_features(_Models(_UsageFunctionModel(model)), features)
     async with (
@@ -125,8 +123,7 @@ async def test_public_sql_sdk_session_creates_and_replays_native_turn(tmp_path):
 @pytest.mark.asyncio
 async def test_sql_host_without_session_authorization_does_not_fall_back(tmp_path):
     runtime_name = "sdk-sql-no-session-auth"
-    features = RuntimeFeatures(runtime_name)
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures(runtime_name, defaults={"execution": {"retain_history": True}})
     features.agent("default", allow_tools=(), allow_capabilities=())
 
     async def model(_messages, _info):
@@ -168,8 +165,7 @@ async def test_native_sdk_freezes_effective_agent_planning_and_thinking(tmp_path
         return ModelResponse(parts=[TextPart("done")])
 
     def features(*, revision, planning, thinking):
-        result = RuntimeFeatures("sdk-native-defaults")
-        result.capability(ExecutionCapability(retain_history=True), scope="runtime")
+        result = RuntimeFeatures("sdk-native-defaults", defaults={"execution": {"retain_history": True}})
         result.agent("default", revision=revision, allow_tools=(), allow_capabilities=(), planning=planning, thinking=thinking)
         return model_features(_Models(_UsageFunctionModel(model)), result)
 
@@ -235,8 +231,7 @@ async def test_agent_bound_native_session_mutations_use_canonical_revisions(tmp_
     async def model(_messages, _info):
         return ModelResponse(parts=[TextPart("done")])
 
-    features = RuntimeFeatures("sdk-native-mutations")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("sdk-native-mutations", defaults={"execution": {"retain_history": True}})
     features.agent("default", allow_tools=(), allow_capabilities=())
     model_features(_Models(_UsageFunctionModel(model)), features)
     async with (

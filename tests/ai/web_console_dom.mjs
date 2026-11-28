@@ -628,45 +628,34 @@ if(process.argv[3]==='session-published-turn') {
   const recoverRead=deferred('GET /api/sessions/b');
   emitTurn(stopped);
   await recoverRead.requested;
-  recoverRead({turn_id:'b-next-turn',turn_no:2,status:'RECOVERY_REQUIRED',can_recover:true,
+  recoverRead({turn_id:'b-next-turn',turn_no:2,status:'RECOVERY_REQUIRED',can_recover:true,recovery_mode:'end',recovery_generation:1,
     user_input:{prompt:'Next native question',attachments:[]},conversation_committed:false,items:[]});
   await until('the same button switches to Recover',()=>node('send').textContent==='Recover');
   const requestCount=calls.length;
   emitTurn(stopped);
   assert.equal(calls.length,requestCount,'a duplicate stopped notice does not read again');
-  const unable={code:'STORAGE_RECOVERY_REQUIRED',safe_details:{
-    reason:'pending_tool_receipt_name_mismatch',abandonable:true,generation:2,
-  }};
-  const refusedRecovery=deferred('POST /api/sessions/b/recover'),refusal=node('send').click();
-  await refusedRecovery.requested;refusedRecovery(unable,503);await refusal;
-  assert.equal(node('send').textContent,'Recover');
-  assert.equal(node('send').getAttribute('aria-label'),'Recover current turn');
-  assert.equal(calls.filter(call=>call.key==='/api/sessions/b/abandon').length,0,'the first recovery attempt does not end the turn');
   let endConfirmation;
   globalThis.confirm=message=>{endConfirmation=message;return false;};await node('send').click();
   assert.match(endConfirmation,/End this turn without rerunning any tools/);
-  assert.equal(calls.filter(call=>call.key==='/api/sessions/b/abandon').length,0,'ending the turn needs separate consent');
+  assert.equal(calls.length,requestCount,'ending the turn requires confirmation');
   globalThis.confirm=()=>true;
-  const abandon=deferred('POST /api/sessions/b/abandon'),ending=node('send').click();
-  await abandon.requested;
-  const abandonRequest=calls.find(call=>call.key==='/api/sessions/b/abandon').body;
-  assert.equal(abandonRequest.turn_id,'b-next-turn');assert.equal(abandonRequest.expected_generation,2);
-  abandon({accepted:false});await ending;
-  assert.match(node('notice').textContent,/lease to expire/);
-  assert.equal(node('send').textContent,'Recover','ending uses the same Recover control');
+  const end=deferred('POST /api/sessions/b/recover'),ending=node('send').click();
+  await end.requested;
+  const endRequest=calls.find(call=>call.key==='/api/sessions/b/recover').body;
+  assert.deepEqual(endRequest,{turn_id:'b-next-turn',expected_generation:1,request_id:endRequest.request_id});
+  end({accepted:false});await ending;
+  assert.match(node('notice').textContent,/still owned/);
+  assert.equal(node('send').textContent,'Recover');
   emitTurn({type:'admitted',turn_id:'b-next-turn',turn_no:2,revision:3,generation:3,prompt:'Next native question'});
-  assert.equal(node('send').textContent,'Stop','new admission clears the previous recovery blocker');
+  assert.equal(node('send').textContent,'Stop');
   const secondRecoverRead=deferred('GET /api/sessions/b');
   emitTurn({...stopped,generation:3});await secondRecoverRead.requested;
-  secondRecoverRead({turn_id:'b-next-turn',turn_no:2,status:'RECOVERY_REQUIRED',can_recover:true,
+  secondRecoverRead({turn_id:'b-next-turn',turn_no:2,status:'RECOVERY_REQUIRED',can_recover:true,recovery_mode:'resume',
     user_input:{prompt:'Next native question',attachments:[]},conversation_committed:false,items:[]});
   await until('new recovery generation',()=>node('send').textContent==='Recover');
-  const lateFailure=deferred('POST /api/sessions/b/recover'),stale=node('send').click();
-  await lateFailure.requested;lateFailure(unable,503);await stale;
-  assert.equal(node('send').textContent,'Recover');
-  assert.equal(calls.filter(call=>call.key==='/api/sessions/b/abandon').length,1,'older recovery failure cannot arm a newer producer');
   const recoverResponse=deferred('POST /api/sessions/b/recover'),recover=node('send').click();
   await recoverResponse.requested;
+  assert.equal(calls.filter(call=>call.key==='/api/sessions/b/recover').at(-1).body.mode,'resume');
   assert.equal(canSend(),false);
   recoverResponse({accepted:true});await recover;
   emitTurn({type:'admitted',turn_id:'b-next-turn',turn_no:2,revision:3,generation:4,prompt:'Next native question'});

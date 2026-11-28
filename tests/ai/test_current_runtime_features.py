@@ -5,7 +5,7 @@
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 
-from linktools.ai.capability import AgentContext, ExecutionCapability, MemoryCapability
+from linktools.ai.capability import AgentContext, MemoryCapability
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -58,12 +58,11 @@ async def test_current_runtime_uses_new_runtime_hooks_for_next_run(tmp_path):
     async with Runtime.open("current", storage=PersistenceStorage.sqlite(tmp_path / "state.db"), features=features) as runtime:
         first = await runtime.agents.get().start("first", idempotency_key="first")
         assert (await first.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
-        features.capability(ExecutionCapability(retain_history=True))
         features.capability(MemoryCapability(scope="current"))
         second = await runtime.agents.get().start("second", idempotency_key="second")
         assert (await second.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
         record = await runtime._state.execution.executions.get(second.execution_id, tenant_id="default")
-        assert record.conversation and record.memory_scope == "current"
+        assert not record.conversation and record.memory_scope == "current"
 
 
 @pytest.mark.asyncio
@@ -136,10 +135,11 @@ async def test_current_runtime_rejects_replacing_an_open_workspace_root(tmp_path
 
 @pytest.mark.asyncio
 async def test_current_runtime_rejects_agent_scoped_persistence_added_after_open():
+    from linktools.ai.capability import TraceCapability
     from linktools.ai.errors import AIError, ErrorCode
     features = model_features(RuntimeUsageModels(), RuntimeFeatures(workspace_factory=None))
     async with Runtime.open("late-invalid-scope", storage=PersistenceStorage.in_memory(), features=features) as runtime:
-        features.capability(ExecutionCapability(), scope="agent")
+        features.capability(TraceCapability(), scope="agent")
         with pytest.raises(AIError) as error:
             await runtime.agents.get().start("invalid scope")
         assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID

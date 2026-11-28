@@ -78,7 +78,7 @@ Idempotent tools alone do not make an uncommitted execution recoverable.
 ## Capability and service ownership
 
 Runtime capability declarations are imported from `linktools.ai.capability`,
-including `ExecutionCapability`, `SessionCapability`, `StepPersistenceCapability`,
+including `SessionCapability`, `StepPersistenceCapability`,
 and `TraceCapability`. The project step declaration binds native Harness hooks;
 explicit native `StepPersistence` declarations remain supported.
 `linktools.ai.runtime` owns Runtime entry points, services, and the
@@ -133,12 +133,11 @@ result retains its original identity and effect receipt.
 
 ```python
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.capability import ExecutionCapability, StepPersistenceCapability, TraceCapability
+from linktools.ai.capability import StepPersistenceCapability, TraceCapability
 
-chat = RuntimeFeatures("chat")
+chat = RuntimeFeatures("chat", defaults={"execution": {"retain_history": True}})
 chat.agent("default", model="default")
-chat.capability(ExecutionCapability(retain_history=True))
-# Runtime.open(..., features=chat) retains model context and supports execution forks.
+# Runtime.open(..., features=chat) retains standalone context and supports execution forks.
 
 persistent_work = RuntimeFeatures("persistent-work")
 persistent_work.agent("default", model="default")
@@ -147,7 +146,7 @@ persistent_work.capability(TraceCapability())
 # Runtime.open(..., features=persistent_work) supports recovery and audit.
 ```
 
-`ExecutionCapability(retain_history=True)` retains committed model context for future turns and
+`defaults["execution"]["retain_history"] = True` retains committed model context for future turns and
 execution forks. Session creation, listing, resume, metadata, and display history
 are enabled by the default `SessionCapability`, independently of Conversation.
 Register `SessionCapability(enabled=False)` at Runtime scope to disable Session
@@ -218,7 +217,7 @@ Checkpoint recovery keeps its structured context independently of this option.
 A route bundles its backend with an optional borrowed hot-read cache, for example
 `StorageRoute.sqlite("state.db", cache=cache)`. Cache identity is not part of
 persistence identity. Session and Conversation use the root `PersistenceStorage`
-resource; `ExecutionCapability(retain_history=True)` only selects context retention. Set
+resource; `defaults["execution"]["retain_history"] = True` only selects context retention. Set
 `PersistencePlan(conversation=route, ...)` to customize that domain.
 For plan-based construction, caches live on the routes rather than a second
 `PersistenceStorage` cache argument. Convenience factories such as
@@ -251,7 +250,6 @@ application = ACPApplication.for_workspace(
     features=features,
     storage=PersistenceStorage.sqlite(database_path),
     authorization=host_session_authorization,
-    execution=ExecutionCapability(retain_history=True),
 )
 ```
 
@@ -261,8 +259,7 @@ plain text or a single fixed approval tool; other tool profiles use one SQL stor
 group for Conversation, Step and tool receipts.
 
 Text-only sessions and supported read-only tool configurations do not require
-checkpoints. The optional Execution declaration controls independent Execution
-retention and commit behavior; by default ACP retains Execution history. To
+checkpoints. The Execution defaults and commit policy apply independently from native ACP sessions. To
 supply coordination, use `PersistenceStorage(..., coordination=cache)` or its
 convenience factories. A cache attached only to storage does not enable turn or
 stream coordination.
@@ -394,10 +391,9 @@ Trace and explicit capability writes freeze actual business payload bytes; a
 successful append is admission, not source durability. They keep separate scopes
 even if they share a backend. See [payload and failure contracts](storage-caching.md#runtime-observation-publication).
 
-`ExecutionCapability(commit=CommitPolicy.sync())` is the default: new turns use
+`RuntimeFeatures(execution_commit=CommitPolicy.sync())` is the default: new turns use
 durable admission even when coordination is configured. Execution timing is
-independent of Conversation retention and Session activation. Register one
-explicit Runtime-scoped `ExecutionCapability` to replace that default;
+independent of Conversation retention and Session activation. Set `RuntimeFeatures.execution_commit` at construction to replace that default.
 `Runtime.open` has no separate execution commit parameter or buffering mode.
 Shared admission ownership and idempotency coordination remain active for all
 policies, including a sync caller joining an already-admitted terminal-policy turn.
@@ -414,16 +410,16 @@ Execution selects terminal. Without Trace, the existing eligible
 Execution-terminal path without a payload buffer remains available.
 
 ```python
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 from linktools.ai.core import CommitPolicy
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime import RuntimeFeatures
 
-features = RuntimeFeatures("traced-chat")
+features = RuntimeFeatures(
+    "traced-chat", defaults={"execution": {"retain_history": True}},
+    execution_commit=CommitPolicy.terminal(buffer=write_buffer),
+)
 features.agent("default", model="default")
-features.capability(ExecutionCapability(
-    retain_history=True, commit=CommitPolicy.terminal(buffer=write_buffer),
-))
 features.capability(TraceCapability(commit=CommitPolicy.terminal(buffer=write_buffer)))
 # write_buffer and coordination are explicitly supplied, host-owned resources.
 # Register the model binding, then open Persistence and pass it to Runtime.open().
@@ -489,8 +485,9 @@ lost lease never permits two canonical terminal results.
 - Runtime policies are current host configuration, outside durable Agent binding
   identity. Reopening uses the newly supplied host policies while restoring
   historical Agent behavior. Put model-visible, versioned behavior in Agent scope.
-- For per-run history retention, Checkpoint and Trace, use `ExecutionCapability`,
-  native `StepPersistence` and `TraceCapability` types in native `requires`, `wraps` and `wrapped_by` ordering declarations.
+- For native Checkpoint and Trace ordering, use the `StepPersistence`
+  and `TraceCapability` types in `requires`, `wraps` and `wrapped_by` declarations.
+  Execution retention is managed internally, not a public SDK ordering target.
   References to an original instance do not survive per-run copies, as described
   by the native SDK ordering contract.
 - Native hook ordering, `for_agent` and `for_run` remain in effect. Instances are

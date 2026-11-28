@@ -11,7 +11,7 @@ from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import ExecutionCapability, SessionCapability
+from linktools.ai.capability import SessionCapability
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -72,13 +72,12 @@ async def test_successful_model_identity_survives_sqlite_reopen(tmp_path, select
 
     def features():
         first, capabilities = models_and_capabilities()
-        result = RuntimeFeatures("fallback-identity")
+        result = RuntimeFeatures("fallback-identity", defaults={"execution": {"retain_history": True}})
         result.agent("default", allow_tools=(), allow_skills=(), allow_subagents=())
         result.model("default", _Binding(first))
         for index, capability in enumerate(capabilities):
             result.capability(capability, id=f"identity-{index}")
         result.capability(SessionCapability(checkpoints=checkpoints))
-        result.capability(ExecutionCapability(retain_history=True))
         return result
 
     async def assert_persisted(persistence):
@@ -116,12 +115,11 @@ async def test_parallel_fallback_and_primary_keep_distinct_response_identities(t
 
         return FunctionModel(stream_function=stream, model_name=name)
 
-    features = RuntimeFeatures("parallel-identities")
+    features = RuntimeFeatures("parallel-identities", defaults={"execution": {"retain_history": True}})
     for agent, selected in (("recovering", "failed"), ("direct", "primary")):
         features.agent(agent, model=agent, allow_tools=(), allow_skills=(), allow_subagents=())
         features.model(agent, _Binding(model(selected)))
     features.capability(ModelFallback(model("fallback")), id="fallback")
-    features.capability(ExecutionCapability(retain_history=True))
     storage = PersistenceStorage.sqlite(tmp_path / "parallel.sqlite")
     async with Persistence.open("parallel-identities", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=features, authorization=_SessionAuthorization(),

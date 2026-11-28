@@ -10,7 +10,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, UserPromptPart
 from sqlalchemy import event
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 
-from linktools.ai.capability import ExecutionCapability, SessionCapability
+from linktools.ai.capability import SessionCapability
 from linktools.ai.core import ExecutionStatus, Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -138,8 +138,7 @@ async def test_window_keeps_corruption_checks(tmp_path, damage):
 
 @pytest.mark.asyncio
 async def test_memory_window_pages_committed_turns() -> None:
-    features = RuntimeFeatures("window")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("window", defaults={"execution": {"retain_history": True}})
     features.agent("default", model="default", allow_tools=())
 
     async def respond(_messages, _info):

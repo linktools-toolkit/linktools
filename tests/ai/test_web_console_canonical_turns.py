@@ -8,11 +8,10 @@ from contextlib import AsyncExitStack
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart
-from pydantic_ai_harness.step_persistence import StepPersistence
 
 pytest.importorskip("starlette")
 
-from linktools.ai.capability import ExecutionCapability
+from linktools.ai.capability import SessionCapability
 from linktools.ai.core import PromptLimits, TenantAuthorizationPolicy
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.turns import SessionTurnKey
@@ -35,16 +34,13 @@ async def test_sql_web_conversation_uses_one_send_stream_and_history_contract(tm
             ThinkingPart("displayable thought", signature="private-provider-signature"), TextPart("done"),
         ])
 
-    features = RuntimeFeatures("web-canonical")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("web-canonical", defaults={"execution": {"retain_history": True}})
     async with AsyncExitStack() as stack:
         state = await stack.enter_async_context(Persistence.open(
             "web-canonical", storage=PersistenceStorage.from_root(tmp_path),
         ))
         if step_enabled:
-            native = await state.create_step_store()
-            stack.push_async_callback(native.close)
-            features.capability(StepPersistence(store=native, capture_frontier=True), scope="runtime")
+            features.capability(SessionCapability(checkpoints=True), scope="runtime")
         runtime = await stack.enter_async_context(Runtime.open(
             persistence=state, features=model_features(_Models(_UsageFunctionModel(model)), features),
             authorization=WorkspacePolicy(),
@@ -156,9 +152,8 @@ async def test_web_upload_sends_binary_to_default_agent_and_keeps_it_in_object_s
         )
         return ModelResponse(parts=[TextPart("done")])
 
-    features = RuntimeFeatures("web-upload", limits=limits)
+    features = RuntimeFeatures("web-upload", limits=limits, defaults={"execution": {"retain_history": True}})
     features.agent("default", allow_tools=(), allow_skills=(), allow_subagents=())
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     model_features(_Models(_UsageFunctionModel(model)), features)
     storage = PersistenceStorage.from_root(tmp_path)
     async with (

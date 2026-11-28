@@ -3,7 +3,7 @@
 import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 
-from linktools.ai.capability import AgentContext, ProviderMessagesCapability, SessionCapability, StepPersistenceCapability, TraceCapability
+from linktools.ai.capability import AgentContext, ProviderMessagesCapability, SessionCapability, TraceCapability
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistencePlan, PersistenceStorage
@@ -119,7 +119,7 @@ async def test_selected_projection_requires_same_store_step_for_native_turns(tmp
     features.agent("default", allow_tools=(), allow_capabilities=(_REF.id,), allow_skills=(), allow_subagents=())
     model_features(_Models(_UsageFunctionModel(model)), features)
     if split:
-        features.capability(StepPersistenceCapability())
+        features.capability(SessionCapability(checkpoints=True))
         execution = StorageRoute.sqlite(tmp_path / "execution.db")
         conversation = StorageRoute.sqlite(tmp_path / "conversation.db")
         storage = PersistenceStorage(PersistencePlan(execution=execution, conversation=conversation, checkpoint=execution))

@@ -8,7 +8,7 @@ import pytest
 from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
 from linktools.ai.runtime import Runtime
@@ -39,8 +39,8 @@ async def test_public_terminal_trace_payload_and_control_share_transaction(
 
     buffer = InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)
     features = model_features(_FeatureModels(_FeatureFunctionModel(model)), _features(
-        ExecutionCapability(retain_history=retain_history, commit=CommitPolicy.sync()),
         TraceCapability(commit=CommitPolicy.terminal(buffer=buffer)),
+        retain_history=retain_history,
     ))
     async with Persistence.open("public-terminal-trace", storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as persistence:
         async with Runtime.open(persistence=persistence, features=features, metrics=None) as runtime:

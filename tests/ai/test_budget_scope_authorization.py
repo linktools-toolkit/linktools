@@ -15,7 +15,6 @@ from linktools.ai.persistence import Persistence
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, Principal, RunBudget, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.execution import ExecutionRequest
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
@@ -34,8 +33,7 @@ _TASK = TaskBindingContract("adapter.task", 1, "none", {}, None, 1, 0)
 
 @pytest_asyncio.fixture
 async def budget_runtime() -> AsyncIterator[_BudgetRuntime]:
-    group = RuntimeFeatures("scope-authorization")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group = RuntimeFeatures("scope-authorization", defaults={"execution": {"retain_history": True}})
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     storage = PersistenceStorage.in_memory()
     authorization = TenantAuthorizationPolicy("default")

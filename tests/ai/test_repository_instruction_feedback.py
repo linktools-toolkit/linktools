@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 
-from linktools.ai.capability import AgentContext, CapabilityContribution, ExecutionCapability, TraceCapability
+from linktools.ai.capability import AgentContext, CapabilityContribution, TraceCapability
 from linktools.ai.core import ApprovalDecision, ExecutionStatus, service_principal
 from linktools.ai.errors import ErrorCode
 from linktools.ai.execution import ApprovalDecisionRequest
@@ -15,6 +15,7 @@ from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime
 from linktools.ai.workspace import ToolPermissionPolicy, ToolPermissionRule, Workspace, WorkspacePolicy
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import (
     _Models,
     _UsageFunctionModel,
@@ -125,7 +126,7 @@ async def test_instruction_feedback_does_not_override_same_response_final_answer
         ])
 
     features = workspace_features("instruction-final", workspace=Workspace.load(tmp_path))
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     features.capability(TraceCapability(), scope="runtime")
     features.agent("reader", allow_tools=("read_file",), tool_retries=0, output_retries=0,
                    output_schema={"type": "object", "properties": {"answer": {"type": "string"}},

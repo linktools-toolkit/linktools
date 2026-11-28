@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import ExecutionCapability, StepPersistenceCapability
+from linktools.ai.capability import StepPersistenceCapability
 from linktools.ai.core import (
     AuthorizationAction, ExecutionStatus, Principal, ResourceKind, ResourceRef,
     TaskStatus, TenantAuthorizationPolicy,
@@ -26,6 +26,7 @@ from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeExecutions, RuntimeSessions, Session
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import RuntimeUsageModels, _Models, model_features
 
 pytestmark = pytest.mark.asyncio
@@ -33,7 +34,7 @@ pytestmark = pytest.mark.asyncio
 
 async def test_session_and_execution_entry_points_return_bound_entities() -> None:
     features = model_features(RuntimeUsageModels())
-    features.capability(ExecutionCapability(retain_history=True))
+    configure_execution(features, retain_history=True)
     actor = Principal("caller", "default", "service")
     async with Runtime.open("entity-handles", storage=PersistenceStorage.in_memory(), features=features) as runtime:
         assert runtime.agents.get().session("lazy").principal is runtime.default_principal

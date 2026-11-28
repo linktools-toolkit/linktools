@@ -16,7 +16,7 @@ from pydantic_ai.models.function import AgentInfo
 from pydantic_ai.tools import RunContext
 
 from linktools.ai.asset import AssetKey, AssetVersionRef
-from linktools.ai.capability import AgentContext, ExecutionCapability, ReferencedInputsCapability, SessionCapability
+from linktools.ai.capability import AgentContext, ReferencedInputsCapability, SessionCapability
 from linktools.ai.core import ApprovalDecision, ExecutionStatus, Principal, TenantAuthorizationPolicy, ToolOperationStatus
 from linktools.ai.execution import ApprovalDecisionRequest, ExecutionInputContext
 from linktools.ai.inputs import ExecutionContextArchive
@@ -134,9 +134,8 @@ async def test_original_input_reopens_while_session_metadata_remains_live(tmp_pa
         return _BODY
 
     def features() -> RuntimeFeatures:
-        value = RuntimeFeatures("original-input-reopen")
+        value = RuntimeFeatures("original-input-reopen", defaults={"execution": {"retain_history": True}})
         value.tool(inspect_input, effect_policy="replay_safe")
-        value.capability(ExecutionCapability(retain_history=True))
         value.capability(SessionCapability(checkpoints=True))
         value.capability(ReferencedInputsCapability(load), id=_SOURCE.id, revision=1, scope="agent")
         value.agent("default", allow_tools=("inspect_input",), allow_skills=(), allow_subagents=())

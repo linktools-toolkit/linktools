@@ -20,7 +20,7 @@ except ModuleNotFoundError:
     _acp = None
     _acp_schema = None
 
-from .capability import ExecutionCapability, FileSystemCapability
+from .capability import FileSystemCapability
 from .runtime import RuntimeFeatures
 from .persistence import PersistenceStorage
 from .core import (
@@ -466,7 +466,6 @@ class ACPApplication:
     workspace: Workspace
     features: RuntimeFeatures
     storage: PersistenceStorage
-    execution: ExecutionCapability | None = None
     authorization: AuthorizationPolicy | None = None
     list_session_ids: Callable[[Principal], Awaitable[Sequence[str]]] | None = None
 
@@ -477,21 +476,23 @@ class ACPApplication:
         *,
         features: RuntimeFeatures,
         storage: PersistenceStorage,
-        execution: ExecutionCapability | None = None,
         authorization: AuthorizationPolicy | None = None,
         list_session_ids: Callable[[Principal], Awaitable[Sequence[str]]] | None = None,
     ) -> "ACPApplication":
-        """Assemble workspace and execution capabilities into the given features."""
-        return cls(workspace, features, storage, execution, authorization, list_session_ids)
+        """Assemble workspace capabilities into the given features."""
+        return cls(workspace, features, storage, authorization, list_session_ids)
 
     def __post_init__(self) -> None:
         """Complete this application's feature declarations once, before serving."""
+        defaults = dict(self.features.defaults)
+        execution = defaults.get("execution", {})
+        assert isinstance(execution, dict)
+        if "retain_history" not in execution:
+            defaults["execution"] = {**execution, "retain_history": True}
+            object.__setattr__(self, "features", self.features.with_defaults(defaults))
         self.features.capability(FileSystemCapability(self.workspace))
         from .capability import ShellCapability
         self.features.capability(ShellCapability())
-        self.features.capability(
-            ExecutionCapability(retain_history=True) if self.execution is None else self.execution
-        )
 
     async def serve(self) -> None:
         async with Runtime.open(

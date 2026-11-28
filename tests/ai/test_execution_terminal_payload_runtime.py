@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -50,9 +49,7 @@ async def test_completed_turns_release_execution_buffer_ownership(
     async def model(messages, info):
         return ModelResponse(parts=[TextPart("answer")])
 
-    features = RuntimeFeatures("execution-buffer-owner-release")
-    features.capability(ExecutionCapability(retain_history=True,
-        commit=CommitPolicy.terminal(buffer=buffer)), scope="runtime")
+    features = RuntimeFeatures("execution-buffer-owner-release", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal(buffer=buffer))
     features.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.sqlite(tmp_path / "state.db",
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
@@ -126,9 +123,7 @@ async def test_rejected_start_releases_buffer_owner_after_exact_cleanup(
         calls += 1
         return ModelResponse(parts=[TextPart("answer")])
 
-    features = RuntimeFeatures("execution-buffer-rejected-start")
-    features.capability(ExecutionCapability(retain_history=True,
-        commit=CommitPolicy.terminal(buffer=buffer)), scope="runtime")
+    features = RuntimeFeatures("execution-buffer-rejected-start", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal(buffer=buffer))
     features.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.sqlite(tmp_path / "state.db",
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
@@ -200,9 +195,7 @@ async def test_pending_payloads_and_checkpoint_are_read_from_buffer_before_sourc
             raise asyncio.CancelledError
         return ModelResponse(parts=[TextPart(answer)])
 
-    features = RuntimeFeatures("execution-payload-buffer")
-    features.capability(ExecutionCapability(retain_history=True,
-        commit=CommitPolicy.terminal(buffer=buffer)), scope="runtime")
+    features = RuntimeFeatures("execution-payload-buffer", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal(buffer=buffer))
     features.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", object_store=objects,
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
@@ -281,9 +274,7 @@ async def test_pending_payload_dispatch_retains_exact_source_evidence(
         calls += 1
         return ModelResponse(parts=[TextPart("answer")])
 
-    features = RuntimeFeatures("execution-payload-interference")
-    features.capability(ExecutionCapability(retain_history=True,
-        commit=CommitPolicy.terminal(buffer=buffer)), scope="runtime")
+    features = RuntimeFeatures("execution-payload-interference", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal(buffer=buffer))
     features.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.sqlite(tmp_path / "state.db",
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))

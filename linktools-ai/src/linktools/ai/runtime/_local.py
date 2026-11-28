@@ -1134,14 +1134,7 @@ class LocalExecutionBackend:
         return await self._input_materializer.restore(execution.stored_user_input)
 
     async def _can_prepare_initial_attempt(self, execution: ExecutionRecord, binding: AgentBinding | None = None) -> bool:
-        binding = await self._execution_binding(execution, binding)
-        policy = _runtime_feature_policy(binding.compiled_agent.runtime_contributions)
-        trace_commit = next((leaf.commit for feature in policy.capabilities for leaf in runtime_feature_leaves(feature)
-                             if isinstance(leaf, TraceCapability)), None)
         if (type(self) is not LocalExecutionBackend
-                or execution.durable_trace and (
-                    trace_commit is None or trace_commit.mode != "terminal"
-                    or self._execution_buffer is None and trace_commit.buffer is None)
                 or execution.binding_kind != "agent"
                 or execution.parent_execution_id is not None
                 or execution.requires_task_invocation_capture
@@ -1194,14 +1187,25 @@ class LocalExecutionBackend:
     ) -> str | None:
         execution = reservation.execution
         binding = await self._execution_binding(execution, request.resolved_binding)
-        if (_runtime_feature_policy(binding.compiled_agent.runtime_contributions).execution.commit.mode != "terminal" or execution.restart_checkpoints
+        policy = _runtime_feature_policy(binding.compiled_agent.runtime_contributions)
+        if (self._commit.mode != "terminal" or execution.restart_checkpoints
                 or coordination is None or self._pending_turns.coordination is None
                 or not self._pending_turns.coordination.supports_pending_views
-                or not execution.conversation or not await self._can_prepare_initial_attempt(execution, request.resolved_binding)
+                or not execution.conversation or not await self._can_prepare_initial_attempt(execution, binding)
                 or execution.budget_scope_id is not None or execution.memory_scope is not None
                 or not self._conversation_durable or not self._execution_objects_durable
                 or not isinstance(self._run_store, RuntimeAgentRunStore)):
             return None
+        # Trace cannot publish against a pending owner that has no source row.
+        # Until promotion, the pending terminal commit owns the entire Trace prefix.
+        if execution.durable_trace:
+            trace_commit = next((
+                leaf.commit for feature in policy.capabilities for leaf in runtime_feature_leaves(feature)
+                if isinstance(leaf, TraceCapability)
+            ), None)
+            if (trace_commit is None or trace_commit.mode != "terminal"
+                    or self._execution_buffer is None and trace_commit.buffer is None):
+                return None
         if (execution.planning or execution.fork_base_execution_id is not None
                 or execution.previous_execution_id is not None):
             return None

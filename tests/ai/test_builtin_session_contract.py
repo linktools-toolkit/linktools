@@ -9,13 +9,13 @@ from copy import deepcopy
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus, Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistencePlan, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.storage import InMemoryCacheBackend, StorageRoute
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 
 
@@ -43,7 +43,7 @@ async def _open(path, model, *, retain=False, backend="sqlite", cache=None, comm
     features = RuntimeFeatures(_NAMESPACE)
     features.agent("default", model="default", allow_tools=())
     if retain:
-        features.capability(ExecutionCapability(retain_history=True, commit=commit or CommitPolicy.sync()), scope="runtime")
+        configure_execution(features, retain_history=True, commit=commit or CommitPolicy.sync())
     async with Runtime.open(
         _NAMESPACE, storage=_storage(path, backend, cache), tenant_id="tenant",
         features=model_features(_Models(_UsageFunctionModel(model)), features),
@@ -286,9 +286,8 @@ async def test_memory_unretained_context_unavailable_even_after_execution_header
             idle = await runtime.sessions.wait_inactive("session", principal=_OWNER, timeout_seconds=5)
             assert idle.active_execution_id is None and idle.history_quality == "unavailable"
 
-        retained = RuntimeFeatures(_NAMESPACE)
+        retained = RuntimeFeatures(_NAMESPACE, defaults={"execution": {"retain_history": True}})
         retained.agent("default", model="default", allow_tools=())
-        retained.capability(ExecutionCapability(retain_history=True), scope="runtime")
         async with Runtime.open(persistence=persistence, features=model_features(models, retained)) as runtime:
             session = await runtime.sessions.get("session", principal=_OWNER)
             assert (await runtime.sessions.reconcile("session", principal=_OWNER)).history_quality == "unavailable"
@@ -322,9 +321,8 @@ async def test_memory_coordination_does_not_opt_default_execution_into_terminal_
         await finish.wait()
         return ModelResponse(parts=[TextPart("answer")])
 
-    features = RuntimeFeatures(_NAMESPACE)
+    features = RuntimeFeatures(_NAMESPACE, defaults={"execution": {"retain_history": True}})
     features.agent("default", model="default", allow_tools=())
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open(
         _NAMESPACE, storage=PersistenceStorage.in_memory(cache=cache, coordination=cache), tenant_id="tenant",
         features=model_features(_Models(_UsageFunctionModel(model)), features),

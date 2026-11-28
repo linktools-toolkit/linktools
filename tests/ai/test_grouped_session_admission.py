@@ -9,7 +9,7 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 from sqlalchemy import event
 
-from linktools.ai.capability import ExecutionCapability, StepPersistenceCapability
+from linktools.ai.capability import SessionCapability
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -25,10 +25,9 @@ class _HostAuthorization(TenantAuthorizationPolicy):
 
 @asynccontextmanager
 async def _native_runtime(path, model, *, tool=None):
-    features = RuntimeFeatures("native-admission")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("native-admission", defaults={"execution": {"retain_history": True}})
     if tool is not None:
-        features.capability(StepPersistenceCapability(), scope="runtime")
+        features.capability(SessionCapability(checkpoints=True), scope="runtime")
         features.tool(tool, effect_policy="non_replay_safe")
     features.agent("default", model="default", allow_tools=() if tool is None else (tool.__name__,))
     features = model_features(_Models(_UsageFunctionModel(model)), features)
@@ -89,7 +88,7 @@ async def test_native_admission_reads_exact_receipt_after_unknown_ack(tmp_path, 
             assert accepted_row["generation"] == 1 and accepted_row["state"] == "accepted"
             same = await _native_start(runtime)
             assert same.key == first_key and launched == 0
-            assert not await runtime.sessions.recover_turn("session", first_key.turn_id, principal=runtime.default_principal)
+            assert not await runtime.sessions.recover_turn("session", first_key.turn_id, mode="resume", principal=runtime.default_principal)
             # Deterministically move only the fixture's lease to the past. The
             # public recovery call must acquire the next generation itself.
             async with turns._context.engine.begin() as connection:
@@ -97,7 +96,7 @@ async def test_native_admission_reads_exact_receipt_after_unknown_ack(tmp_path, 
                     **turns._turn_values(first_key), generation=1, state="accepted",
                 ).values(lease_until=0))
                 assert changed.rowcount == 1
-            assert await runtime.sessions.recover_turn("session", first_key.turn_id, principal=runtime.default_principal)
+            assert await runtime.sessions.recover_turn("session", first_key.turn_id, mode="resume", principal=runtime.default_principal)
             assert (await same.wait_final(timeout_seconds=8)).status is ExecutionStatus.SUCCEEDED
             assert (await turns.get_turn(first_key))["generation"] == 2
         else:

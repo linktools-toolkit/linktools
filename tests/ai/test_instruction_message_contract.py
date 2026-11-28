@@ -24,7 +24,6 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from pydantic_ai.toolsets import FunctionToolset
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import ExecutionStatus, canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -311,9 +310,8 @@ async def _runtime_deferred_session(
         def materialize(self) -> FunctionModel:
             return FunctionModel(stream_function=stream)
 
-    features = RuntimeFeatures("deferred-instructions")
+    features = RuntimeFeatures("deferred-instructions", defaults={"execution": {"retain_history": True}})
     features.model("default", Binding())
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(SessionCapability(checkpoints=True), scope="runtime")
     tool = features.tool(activated, name="activated", revision=1, effect_policy="none")
     if requires_approval:

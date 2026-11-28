@@ -12,7 +12,6 @@ from pathlib import Path
 import pytest
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
@@ -63,7 +62,6 @@ async def _runtimes(tmp_path, cache, *, finish_provider: asyncio.Event | None = 
 
     group = RuntimeFeatures[None]("stream-lifecycle")
     group.agent("default", model="default", allow_tools=())
-    group.capability(ExecutionCapability(), scope="runtime")
     models = _Models(FunctionModel(stream_function=model))
     path = tmp_path / "state.db"
     async with Persistence.open('stream-lifecycle', storage=PersistenceStorage.sqlite(path, coordination=cache)) as persistence_66, Runtime.open(persistence=persistence_66, features=model_features(models, group)) as owner:
@@ -252,7 +250,6 @@ async def test_remote_watch_before_first_admission_receives_later_preview(tmp_pa
     cache = _Streams()
     group = RuntimeFeatures("early-preview")
     group.agent("default", model="default", allow_tools=())
-    group.capability(ExecutionCapability(), scope="runtime")
     models = _Models(FunctionModel(stream_function=model))
     path = tmp_path / "early.db"
     async with Persistence.open('early-preview', storage=PersistenceStorage.sqlite(path, coordination=cache)) as persistence_256, Runtime.open(persistence=persistence_256, features=model_features(models, group)) as owner:

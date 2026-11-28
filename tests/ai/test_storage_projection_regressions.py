@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, UserPromptPart
 
-from linktools.ai.capability import AgentContext, ExecutionCapability
+from linktools.ai.capability import AgentContext
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import CommitPolicy, ExecutionStatus, TenantAuthorizationPolicy, canonical_json_bytes
 from linktools.ai.runtime import Runtime
@@ -42,8 +42,7 @@ async def test_promotion_archives_accepted_context(
             assert await runtime._state.execution.executions.get(owner['execution'], tenant_id=owner['tenant']) is None
             return ModelResponse(parts=[ToolCallPart('lookup', {}, tool_call_id='lookup-call')])
         return ModelResponse(parts=[TextPart('answer')])
-    group = RuntimeFeatures('tool-pending')
-    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    group = RuntimeFeatures('tool-pending', defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     group.tool(lookup, effect_policy=effect_policy)
     group.agent('default', model='default', allow_tools=('lookup',))
     async with Persistence.open('pending-tool', storage=state) as persistence_43, Runtime.open(persistence=persistence_43, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
@@ -87,8 +86,7 @@ async def test_native_session_admission_reuses_verified_turn_history(tmp_path: P
         seen.append(visible[-1])
         return ModelResponse(parts=[TextPart("answer")])
 
-    features = RuntimeFeatures("review-context")
-    features.capability(ExecutionCapability(retain_history=True))
+    features = RuntimeFeatures("review-context", defaults={"execution": {"retain_history": True}})
     features.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.from_root(tmp_path / "context")
     async with (
@@ -130,9 +128,8 @@ async def test_session_admission_captures_current_rules_without_rewriting_histor
         observed.append(info.instructions or "")
         return ModelResponse(parts=[TextPart("answer")])
 
-    features = RuntimeFeatures("current-instructions")
+    features = RuntimeFeatures("current-instructions", defaults={"execution": {"retain_history": True}})
     features.capability(AssetCapability(assets))
-    features.capability(ExecutionCapability(retain_history=True))
     features.agent("default", model="default", allow_tools=())
     rule = AssetKey("rule", "current.md")
     expected = None
@@ -217,8 +214,7 @@ async def test_projection_boundary_read_budget(tmp_path: Path, monkeypatch: pyte
     async def model(messages, info):
         count = sum(isinstance(part, ToolReturnPart) for message in messages for part in message.parts)
         return ModelResponse(parts=[ToolCallPart('lookup', {}, tool_call_id=f'call-{count}')]) if count < rounds else ModelResponse(parts=[TextPart('done')])
-    features = RuntimeFeatures('review-boundaries')
-    features.capability(ExecutionCapability(retain_history=True))
+    features = RuntimeFeatures('review-boundaries', defaults={"execution": {"retain_history": True}})
     features.capability(TraceCapability(commit=CommitPolicy.sync()))
     features.capability(native_checkpoint())
     features.tool(lookup, effect_policy='none')
@@ -281,8 +277,7 @@ async def test_native_admission_does_not_stage_a_second_large_history_owner(tmp_
         return ModelResponse(parts=[TextPart(large if calls == 1 else "done")])
 
     namespace = "review-pending-large"
-    features = RuntimeFeatures(namespace)
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()))
+    features = RuntimeFeatures(namespace, defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     storage = PersistenceStorage.sqlite(
         tmp_path / "pending.db", coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024),

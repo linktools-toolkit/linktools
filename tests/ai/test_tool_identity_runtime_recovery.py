@@ -10,7 +10,7 @@ import sys
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 
-from linktools.ai.capability import AgentContext, ExecutionCapability, TraceCapability
+from linktools.ai.capability import AgentContext, TraceCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus, Principal
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -65,9 +65,8 @@ async def test_nested_tool_identity_matches_durable_ancestry_and_independent_sou
             return ModelResponse([TextPart("complete")])
         return ModelResponse([ToolCallPart("inspect_call", {}, "leaf-call")])
 
-    features = RuntimeFeatures("nested-identity")
+    features = RuntimeFeatures("nested-identity", defaults={"execution": {"retain_history": True}})
     features.capability(TraceCapability(commit=commit), scope="runtime")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.model("root", _Models(_UsageFunctionModel(delegate("child"))))
     features.model("leaf-model", _Models(_UsageFunctionModel(leaf)))
     features.tool(inspect_call, effect_policy="none")
@@ -92,12 +91,12 @@ import asyncio, json, os, sys
 from dataclasses import asdict
 from pathlib import Path
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
-from linktools.ai.capability import AgentContext, ExecutionCapability, TraceCapability
+from linktools.ai.capability import AgentContext, TraceCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus, Principal
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.storage import InMemoryCacheBackend
-from tests.ai._runtime_test_helpers import _Models, _UsageFunctionModel, model_features, native_checkpoint
+from tests.ai._runtime_test_helpers import configure_execution, _Models, _UsageFunctionModel, model_features, native_checkpoint
 root, stage, mode = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 principal = Principal('original-actor', 'tenant', 'service')
 async def inspect_call(ctx: AgentContext[None]) -> str:
@@ -138,7 +137,7 @@ async def main():
     buffer=InMemoryCacheBackend(max_bytes=4*1024*1024)
     commit=(CommitPolicy.batch(buffer=buffer,batch_size=128,flush_interval=60) if mode=='batch' else CommitPolicy.terminal(buffer=buffer))
     features.capability(TraceCapability(commit=commit),scope='runtime')
-    features.capability(ExecutionCapability(retain_history=True),scope='runtime')
+    configure_execution(features, retain_history=True)
     features.capability(native_checkpoint(),scope='runtime')
     features.tool(inspect_call,effect_policy='none')
     features.agent('default',allow_tools=('inspect_call',))

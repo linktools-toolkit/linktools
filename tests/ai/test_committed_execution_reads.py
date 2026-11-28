@@ -13,7 +13,6 @@ from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.execution import CancelExecutionRequest
 from linktools.ai.storage import InMemoryCacheBackend, _write_cache
@@ -39,9 +38,8 @@ async def test_committed_execution_results_ignore_remote_observation_cache(
             await release.wait()
         yield "finished"
 
-    group = RuntimeFeatures("committed-read")
+    group = RuntimeFeatures("committed-read", defaults={"execution": {"retain_history": True}})
     group.agent("default", model="default", allow_tools=())
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     # This test observes a source-admitted execution through a stale reader.
     group.capability(native_checkpoint(), scope="runtime")
     database = tmp_path / "runtime.db"
@@ -101,9 +99,8 @@ async def test_native_next_turn_uses_canonical_continuation_across_runtimes(tmp_
         else:
             yield "second output"
 
-    group = RuntimeFeatures("committed-session")
+    group = RuntimeFeatures("committed-session", defaults={"execution": {"retain_history": True}})
     group.agent("default", model="default", allow_tools=())
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features = model_features(_Models(FunctionModel(stream_function=model)), group)
     database = tmp_path / "session.db"
     async with AsyncExitStack() as stack:
@@ -157,9 +154,8 @@ async def test_terminal_consumption_reuses_confirmed_status_for_handoff(
     async def model(messages, info):
         yield "finished"
 
-    group = RuntimeFeatures("terminal-consumption")
+    group = RuntimeFeatures("terminal-consumption", defaults={"execution": {"retain_history": True}})
     group.agent("default", model="default", allow_tools=())
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Persistence.open('terminal-consumption', storage=PersistenceStorage.sqlite(tmp_path / 'runtime.db')) as persistence_96, Runtime.open(persistence=persistence_96, features=model_features(_Models(FunctionModel(stream_function=model)), group)) as runtime:
         execution = await runtime.agents.get().start("first", idempotency_key="first")
         await execution.wait()

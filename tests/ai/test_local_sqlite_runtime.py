@@ -214,7 +214,6 @@ async def test_local_sqlite_unknown_terminal_keeps_owner_until_same_commit_is_co
 ) -> None:
     import asyncio
     from pydantic_ai.messages import ModelResponse, TextPart
-    from linktools.ai.capability import ExecutionCapability
     from linktools.ai.core import CommitPolicy, ExecutionStatus
     from linktools.ai.runtime import Runtime, RuntimeFeatures
     from linktools.ai.storage import InMemoryCacheBackend
@@ -226,8 +225,7 @@ async def test_local_sqlite_unknown_terminal_keeps_owner_until_same_commit_is_co
         calls.append(messages)
         return ModelResponse(parts=[TextPart('confirmed once')])
 
-    features = RuntimeFeatures('local-unknown')
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope='runtime')
+    features = RuntimeFeatures('local-unknown', defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     features.agent('default', model='default', allow_tools=())
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True,
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))

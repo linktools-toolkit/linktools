@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 
-from linktools.ai.capability import AgentContext, ExecutionCapability, TraceCapability
+from linktools.ai.capability import AgentContext, TraceCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus, PersistenceDomain, ToolOperationStatus, WriteBufferEntry
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import CancelExecutionRequest
@@ -96,8 +96,7 @@ async def test_revoked_failed_owner_retries_exact_cleanup_without_replaying_effe
             return ModelResponse(parts=[TextPart("lost current turn")])
 
         def features() -> RuntimeFeatures:
-            values = RuntimeFeatures("revoked-buffer")
-            values.capability(ExecutionCapability(retain_history=True, commit=policy))
+            values = RuntimeFeatures("revoked-buffer", defaults={"execution": {"retain_history": True}}, execution_commit=policy)
             values.capability(TraceCapability(commit=policy))
             values.tool(effect, effect_policy="non_replay_safe")
             values.agent("default", model="default", allow_tools=("effect",))
@@ -226,8 +225,7 @@ async def test_terminal_handoff_cleans_only_revoked_failed_execution_while_peer_
             return ModelResponse(parts=[TextPart("lost turn")])
 
         def features() -> RuntimeFeatures:
-            values = RuntimeFeatures("isolated-cleanup")
-            values.capability(ExecutionCapability(retain_history=True, commit=policy))
+            values = RuntimeFeatures("isolated-cleanup", defaults={"execution": {"retain_history": True}}, execution_commit=policy)
             values.capability(TraceCapability(commit=policy))
             values.tool(effect, effect_policy="non_replay_safe")
             values.agent("default", model="default", allow_tools=("effect",))

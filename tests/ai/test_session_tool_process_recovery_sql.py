@@ -95,9 +95,9 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
         assert receipt.status is ToolOperationStatus.COMPLETED and receipt.tool_call_id == "stable-call"
         repeated = await _send(runtime)
         assert repeated.key == key and await turns.get_turn(key) == accepted
-        assert not await runtime.sessions.recover_turn(_SESSION, turn_id, principal=principal)
+        assert not await runtime.sessions.recover_turn(_SESSION, turn_id, mode="resume", principal=principal)
         await _expire(turns, key, generation=1)
-        assert await runtime.sessions.recover_turn(_SESSION, turn_id, principal=principal)
+        assert await runtime.sessions.recover_turn(_SESSION, turn_id, mode="resume", principal=principal)
         result = await repeated.wait_final(timeout_seconds=15)
         assert result.key == key and result.status is ExecutionStatus.SUCCEEDED
         assert result.view["output"] == {"text": "done"}

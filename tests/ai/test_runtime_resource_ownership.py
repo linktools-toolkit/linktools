@@ -19,6 +19,7 @@ from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.storage import StorageOverlay
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import RuntimeUsageModels, model_features
 
 pytestmark = pytest.mark.asyncio
@@ -383,17 +384,17 @@ async def test_late_asset_replacement_does_not_transfer_or_alias_open_store() ->
 
 
 async def test_late_execution_buffer_replacement_is_not_silently_ignored() -> None:
-    from linktools.ai.capability import ExecutionCapability
     from linktools.ai.core import CommitPolicy
     from .test_execution_terminal_payload_runtime import _PayloadBuffer
 
-    features = _features()
+    configuration = CommitPolicy.terminal(buffer=_PayloadBuffer())
+    features = configure_execution(_features(), commit=configuration)
     async with Runtime.open("buffer-owner", storage=PersistenceStorage.in_memory(), features=features) as runtime:
-        features.capability(ExecutionCapability(commit=CommitPolicy.terminal(buffer=_PayloadBuffer())))
+        configure_execution(features, commit=CommitPolicy.terminal(buffer=_PayloadBuffer()))
         with pytest.raises(AIError) as error:
             await runtime.agents.get().start("new buffer")
         assert error.value.safe_details["reason"] == "runtime_resource_replacement"
-        features.capability(ExecutionCapability(commit=CommitPolicy.terminal()))
+        configure_execution(features, commit=configuration)
         assert (await runtime.agents.get().run("same resources")).result.output == {"text": "done"}
 
 

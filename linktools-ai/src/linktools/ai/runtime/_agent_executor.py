@@ -89,7 +89,6 @@ from ..capability import (
     tool_context_dedupe_from_metadata,
     tool_plan_safe_from_metadata,
     validate_tool_metadata,
-    ExecutionCapability,
     FileSystemCapability,
     TraceCapability,
     MemoryCapability,
@@ -434,7 +433,7 @@ class AgentExecutor:
             ("subagents", compiled.selected_subagents and (
                 not native_subagents or not canonical_step or split_step
             )),
-            ("checkpoints", (policy.session.checkpoints or policy.restart_checkpoints) != canonical_step),
+            ("checkpoints", policy.session.checkpoints != canonical_step),
             ("tool_response_fixture", policy.tool_responses is not None),
         ) if selected]
         if unsupported:
@@ -1568,6 +1567,7 @@ async def _materialize_agent(
     runtime_policy = _runtime_feature_policy(compiled_agent.runtime_contributions)
     platform = await compose_platform_capabilities(
         runtime_capabilities=bound_runtime_capabilities,
+        retain_history=compiled_agent.retain_history,
         capability_revisions=runtime_policy.capability_revisions,
         initial_output_retries_used=scope.output_retries_used,
         transcript_start=(scope.run_store.checkpoint_transcript_start(

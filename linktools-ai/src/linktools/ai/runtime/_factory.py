@@ -255,7 +255,8 @@ async def compose_runtime_components(
         _validate_candidate_uniqueness(candidates)
         policy = _runtime_feature_policy(candidates)
         runtime_capabilities = policy.capabilities
-        execution_capability, session_capability = policy.execution, policy.session
+        execution_commit = CommitPolicy.sync() if captured is None else captured.execution_commit
+        session_capability = policy.session
         memory_scope, tool_responses = policy.memory_scope, policy.tool_responses
         capability_revisions, capability_ids = policy.capability_revisions, policy.capability_ids
         skill_sources = SkillSourceRegistry(tuple(
@@ -290,7 +291,8 @@ async def compose_runtime_components(
                         or selected_workspace.root != workspace.root or selected_workspace.policy != workspace.policy)
                         or current.workspace_factory is not workspace_factory
                         or any(asset_sources.get(key) is not reader for key, reader in _resolution_asset_readers(current).items())
-                        or _runtime_feature_policy(current.contributions).execution.commit.buffer is not policy.execution.commit.buffer):
+                        or current.execution_commit.buffer is not execution_commit.buffer
+                        or current.execution_commit.mode != execution_commit.mode):
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
                                   safe_details={"reason": "runtime_resource_replacement"})
             return current
@@ -438,7 +440,7 @@ async def compose_runtime_components(
             lifecycle=lifecycle,
             run_store=run_store,
             metrics=metrics,
-            commit=execution_capability.commit,
+            commit=execution_commit,
             catalog=catalog,
             compiler=compiler,
             authorization=selected_authorization,
@@ -737,6 +739,7 @@ async def _build_local_components(
             state.object_store(PersistenceDomain.EXECUTION),
             authorization,
             execution_trace_atomic=execution_trace_atomic,
+            commit=commit,
             sessions=state.conversation.sessions,
             resolve_task_admissions=lambda: state.task.admissions,
             catalog=catalog,
@@ -919,23 +922,17 @@ async def _build_local_components(
             from ._tool import RuntimeToolOperationBridge
 
             policy = _runtime_feature_policy(binding.compiled_agent.runtime_contributions)
-            if policy.session.checkpoints:
-                coowned = all(member.storage_group is conversation_group for member in (
-                    state.execution.executions.state_store, state.checkpoint.tools.state_store,
-                ))
-                if not coowned and split_sql_source is None:
-                    raise AIError(
-                        ErrorCode.STORAGE_CAPABILITY_MISSING,
-                        "Session checkpoints require coowned SQL storage or a supported split SQL topology",
-                    )
-                native = await prepare_session_step()
-            else:
-                if not policy.restart_checkpoints:
-                    return None
-                values = await prepare_runtime_capabilities(binding.compiled_agent)
-                steps = tuple(leaf for value in values for leaf in runtime_feature_leaves(value)
-                              if isinstance(leaf, StepPersistence))
-                native = AtomicStepPersistence.adapt(steps[0]) if len(steps) == 1 else None
+            if not policy.session.checkpoints:
+                return None
+            coowned = all(member.storage_group is conversation_group for member in (
+                state.execution.executions.state_store, state.checkpoint.tools.state_store,
+            ))
+            if not coowned and split_sql_source is None:
+                raise AIError(
+                    ErrorCode.STORAGE_CAPABILITY_MISSING,
+                    "Session checkpoints require coowned SQL storage or a supported split SQL topology",
+                )
+            native = await prepare_session_step()
             if (type(native) is not AtomicStepPersistence or type(native.store) is not SqlStepStore
                     or native.store.store_key != SqlStepStore.scope_key(namespace=namespace, tenant_id=tenant_id)):
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY, "Canonical Step requires native SQL persistence")
@@ -948,7 +945,6 @@ async def _build_local_components(
                     raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING,
                                   "Cross-store Step requires provisioned separate Conversation and Execution/Checkpoint databases")
 
-                from ..capability import ExecutionCapability
                 from ._canonical_split_step import _CanonicalSplitStep
 
                 compiled = binding.compiled_agent
@@ -975,7 +971,7 @@ async def _build_local_components(
                         or compiled.selected_subagents or compiled.selected_capabilities
                         or binding.output_binding.mode != "text"
                         or policy.durable_trace or policy.memory_scope is not None
-                        or any(type(leaf) not in (StepPersistence, StepPersistenceCapability, ExecutionCapability)
+                        or any(type(leaf) not in (StepPersistence, StepPersistenceCapability)
                                for item in policy.capabilities for leaf in runtime_feature_leaves(item))):
                     raise AIError(
                         ErrorCode.STORAGE_CAPABILITY_MISSING,

@@ -6,13 +6,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import ExecutionStatus, Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.session import CreateSessionRequest
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime import Runtime
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import RuntimeUsageModels, model_features
 
 pytestmark = pytest.mark.asyncio
@@ -21,7 +21,7 @@ pytestmark = pytest.mark.asyncio
 async def test_existing_session_start_uses_session_agent_without_display(monkeypatch):
     features = model_features(RuntimeUsageModels())
     features.agent("other", model="default")
-    features.capability(ExecutionCapability(retain_history=True))
+    configure_execution(features, retain_history=True)
     actor = Principal("caller", "default", "service")
     async with Runtime.open("strict-start", storage=PersistenceStorage.in_memory(), features=features) as runtime:
         await runtime.sessions.create("other", CreateSessionRequest(actor, "session", "create"))

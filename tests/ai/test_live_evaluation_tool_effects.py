@@ -9,7 +9,7 @@ import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo
 
-from linktools.ai.capability import AgentContext, ExecutionCapability, MemoryCapability
+from linktools.ai.capability import AgentContext, MemoryCapability
 from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus, canonical_sha256
 from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationPolicy,
@@ -315,8 +315,7 @@ async def test_imported_memory_obeys_effect_limit_without_current_memory_declara
 
 @pytest.mark.asyncio
 async def test_retry_and_fork_keep_tool_limit_while_new_runs_default_to_live(tmp_path: Path) -> None:
-    features = RuntimeFeatures(workspace_factory=None)
-    features.capability(ExecutionCapability(retain_history=True))
+    features = RuntimeFeatures(workspace_factory=None, defaults={"execution": {"retain_history": True}})
     features.agent("default", allow_skills=(), allow_subagents=())
     effects: list[str] = []
 

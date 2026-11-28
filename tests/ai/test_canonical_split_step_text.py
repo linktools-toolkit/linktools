@@ -11,7 +11,7 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.capability import StepPersistenceCapability
+from linktools.ai.capability import SessionCapability
 from linktools.ai.core import Principal, TenantAuthorizationPolicy
 from linktools.ai.history import History
 from linktools.ai.migrate import provision_database
@@ -108,7 +108,7 @@ async def _assert_split_step_text_roundtrip(storage: PersistenceStorage) -> None
         return ModelResponse(parts=[TextPart("retained in the source database")])
 
     features = RuntimeFeatures(namespace)
-    features.capability(StepPersistenceCapability())
+    features.capability(SessionCapability(checkpoints=True))
     features.agent("default", model="default", allow_tools=())
     async with Persistence.open(namespace, storage=storage) as state:
         async with Runtime.open(

@@ -7,7 +7,6 @@ import asyncio
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import AuthorizationAction, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceStorage
@@ -27,8 +26,7 @@ class _Authorization(TenantAuthorizationPolicy):
 
 
 def _features(model):
-    features = RuntimeFeatures("native-session-receipts")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("native-session-receipts", defaults={"execution": {"retain_history": True}})
     features.agent("default", allow_tools=(), allow_capabilities=())
     return model_features(_Models(_UsageFunctionModel(model)), features)
 

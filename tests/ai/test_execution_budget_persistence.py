@@ -19,7 +19,7 @@ from pydantic_ai.models.function import AgentInfo
 from pydantic_ai.usage import RequestUsage
 from pydantic_ai_harness.step_persistence import StepPersistence
 
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability, SessionCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.spec import AgentUsageLimits
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
@@ -57,13 +57,12 @@ async def test_sqlite_execution_without_shared_budget_keeps_public_history(tmp_p
 
     storage = PersistenceStorage.from_root(tmp_path / "current-history")
     authorization = HostAuthorization()
-    accepted = RuntimeFeatures("application")
+    accepted = RuntimeFeatures("application", defaults={"execution": {"retain_history": True}})
     accepted.agent("default", model="default", allow_tools=(), usage_limits=AgentUsageLimits(output_tokens=250))
-    accepted.capability(ExecutionCapability(retain_history=True), scope="runtime")
     accepted.capability(TraceCapability(), scope="runtime")
     async with Persistence.open("older-history", storage=storage) as persistence:
         native = await persistence.create_step_store()
-        accepted.capability(StepPersistence(store=native, capture_frontier=True), scope="runtime")
+        accepted.capability(SessionCapability(checkpoints=True), scope="runtime")
         try:
             async with Runtime.open(
                 persistence=persistence, features=model_features(helpers.RuntimeUsageModels(), accepted),

@@ -8,7 +8,7 @@ from ._runtime_test_helpers import model_features
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability, SessionCapability, TraceCapability
+from linktools.ai.capability import SessionCapability, StepPersistenceCapability, TraceCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import CommitPolicy, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
@@ -23,8 +23,8 @@ class _HostAuthorization(TenantAuthorizationPolicy):
     """Supply the explicit authorization owner required by native SQL sessions."""
 
 
-def _features(*capabilities):
-    features = RuntimeFeatures('owner-contract')
+def _features(*capabilities, retain_history=False):
+    features = RuntimeFeatures('owner-contract', defaults={"execution": {"retain_history": retain_history}})
     features.agent('default', model='default', allow_tools=())
     for capability in capabilities:
         features.capability(capability, scope='runtime')
@@ -40,7 +40,7 @@ def _models():
 @pytest.mark.asyncio
 @pytest.mark.parametrize('explicit', [False, True])
 async def test_default_session_owner_and_explicit_replacement_work_without_conversation(tmp_path, explicit):
-    declarations = (SessionCapability(), ExecutionCapability()) if explicit else ()
+    declarations = (SessionCapability(),) if explicit else ()
     async with Persistence.open('owner-contract', storage=PersistenceStorage.sqlite(tmp_path / 'state.db')) as persistence_36, Runtime.open(authorization=_HostAuthorization(), persistence=persistence_36, features=model_features(_models(), _features(*declarations))) as runtime:
         session = await runtime.agents.get().create_session('session')
         turn = await runtime.agents.get().start('question', session_id=session.session_id)
@@ -92,8 +92,7 @@ async def test_disabled_session_does_not_disable_independent_execution_or_cold_r
 @pytest.mark.asyncio
 async def test_same_live_source_binds_two_runtimes_without_owner_leakage(tmp_path):
     session_policy = SessionCapability(enabled=False)
-    execution_policy = ExecutionCapability(commit=CommitPolicy.sync())
-    features = _features(session_policy, execution_policy)
+    features = _features(session_policy)
     models = _models()
     features.model("default", models)
     capture = features.borrow()
@@ -113,7 +112,6 @@ async def test_same_live_source_binds_two_runtimes_without_owner_leakage(tmp_pat
             record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
             assert record is not None and not record.conversation
     assert session_policy.enabled is False
-    assert execution_policy.commit == CommitPolicy.sync()
     async with Persistence.open('owner-contract', storage=PersistenceStorage.sqlite(tmp_path / 'default.db')) as persistence_110, Runtime.open(authorization=_HostAuthorization(), persistence=persistence_110, features=model_features(models, _features())) as default:
         session = await default.agents.get().create_session('session')
         assert (await default.sessions.get("session", principal=default.default_principal)).session_id == 'session'
@@ -145,6 +143,8 @@ async def test_session_checkpoints_do_not_enable_step_for_standalone_execution(t
         session = await agent.create_session('session')
         turn = await agent.start('session question', session_id=session.session_id)
         assert (await turn.wait_final(timeout_seconds=5)).view['output'] == {'text': 'answer'}
+        row = await state.session_turn_reader.get_turn(turn.key)
+        assert row['request_json']['session_checkpoints'] is True
 
         steps = await state.create_step_store()
         try:
@@ -157,6 +157,31 @@ async def test_session_checkpoints_do_not_enable_step_for_standalone_execution(t
         assert (await execution.wait(timeout_seconds=5)).result.output == {'text': 'answer'}
         record = await state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert record is not None and not record.restart_checkpoints
+
+
+@pytest.mark.asyncio
+async def test_standalone_step_does_not_enable_checkpoints_for_session(tmp_path):
+    features = model_features(_models(), _features(StepPersistenceCapability()))
+    async with (
+        Persistence.open('owner-contract', storage=PersistenceStorage.sqlite(tmp_path / 'state.db')) as state,
+        Runtime.open(persistence=state, features=features, authorization=_HostAuthorization()) as runtime,
+    ):
+        agent = runtime.agents.get()
+        session = await agent.create_session('session')
+        turn = await agent.start('session question', session_id=session.session_id)
+        assert (await turn.wait_final(timeout_seconds=5)).view['output'] == {'text': 'answer'}
+        row = await state.session_turn_reader.get_turn(turn.key)
+        assert row['request_json']['session_checkpoints'] is False
+        steps = await state.create_step_store()
+        try:
+            assert await steps.latest_snapshot(run_id=turn.key.turn_id) is None
+        finally:
+            await steps.close()
+
+        execution = await agent.start('independent question')
+        assert (await execution.wait(timeout_seconds=5)).result.output == {'text': 'answer'}
+        record = await state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        assert record is not None and record.restart_checkpoints
 
 
 @pytest.mark.asyncio

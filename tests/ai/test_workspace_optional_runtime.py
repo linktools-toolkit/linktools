@@ -3,6 +3,7 @@
 
 from linktools.ai.persistence import Persistence
 """Workspace-optional Runtime behavior and file-source boundaries."""
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import model_features
 
 from ._runtime_test_helpers import workspace_features
@@ -20,7 +21,6 @@ from linktools.ai.capability import AssetCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime import _factory as runtime_factory
@@ -54,8 +54,7 @@ class _RecordingLocalSandbox:
 
 @pytest.mark.asyncio
 async def test_workspace_less_runtime_runs_session_and_history() -> None:
-    features = RuntimeFeatures("conversation")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("conversation", defaults={"execution": {"retain_history": True}})
     async with Persistence.open('web-chat', storage=PersistenceStorage.in_memory()) as persistence_57, Runtime.open(persistence=persistence_57, features=model_features(RuntimeUsageModels(), features)) as runtime:
         assert runtime.namespace == "web-chat"
         session = await runtime.agents.get("default").create_session("chat")
@@ -68,8 +67,7 @@ async def test_workspace_less_runtime_runs_session_and_history() -> None:
 
 @pytest.mark.asyncio
 async def test_workspace_less_runtime_rejects_files_and_explicit_cwd() -> None:
-    features = RuntimeFeatures("conversation")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("conversation", defaults={"execution": {"retain_history": True}})
     async with Persistence.open('web-chat', storage=PersistenceStorage.in_memory()) as persistence_75, Runtime.open(persistence=persistence_75, features=model_features(RuntimeUsageModels(), features)) as runtime:
         with pytest.raises(AIError) as files_error:
             await runtime.agents.get("default").run(
@@ -214,15 +212,14 @@ async def test_existing_workspace_cwd_requires_workspace_for_new_turn(
 
     storage = PersistenceStorage.from_root(storage_root)
     features = workspace_features("workspace", workspace=workspace)
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     async with Runtime.open(
         "workspace", storage=storage, authorization=HostAuthorization(),
         features=model_features(RuntimeUsageModels(), features),
     ) as runtime:
         await runtime.agents.get("default").create_session("cwd-session", cwd=".")
 
-    features = RuntimeFeatures("conversation")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("conversation", defaults={"execution": {"retain_history": True}})
     async with Runtime.open(
         "workspace", storage=storage, authorization=HostAuthorization(),
         features=model_features(RuntimeUsageModels(), features),

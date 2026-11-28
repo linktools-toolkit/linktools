@@ -241,7 +241,7 @@ async def test_web_native_crashed_producer_keeps_occupancy_until_explicit_contro
                 assert replayed.status_code == 200 and replayed.json()["accepted"], replayed.text
                 assert (await _get(http, metadata))["session"]["active_turn_id"] == turn_id
             recovered = await http.post("/api/session/recover?session_id=session", headers=_HEADERS,
-                                        json={"turn_id": turn_id, "request_id": "recover"})
+                                        json={"mode": "resume", "turn_id": turn_id, "request_id": "recover"})
             assert recovered.status_code == 200 and recovered.json()["accepted"], recovered.text
             expected = "SUCCEEDED" if control == "recover" else "CANCELLED"
             terminal = await _wait_for_committed(lambda: _get(http, path),

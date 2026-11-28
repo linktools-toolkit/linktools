@@ -14,7 +14,7 @@ from pydantic_ai.tools import ToolDefinition
 from pydantic_ai_harness.step_persistence import StepPersistence
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.capability import AgentContext, ExecutionCapability, ToolCallFailed
+from linktools.ai.capability import AgentContext, ToolCallFailed
 from linktools.ai.core import ExecutionStatus, ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import CancelExecutionRequest
@@ -187,8 +187,7 @@ async def test_fresh_runtime_terminal_uses_receipts_without_effect_scans(
         return (ModelResponse(parts=[TextPart("done")]) if returns else
                 ModelResponse(parts=[ToolCallPart("work", {}, tool_call_id="call")]))
 
-    features = RuntimeFeatures("terminal-receipts")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("terminal-receipts", defaults={"execution": {"retain_history": True}})
     features.capability(native_checkpoint(), scope="runtime")
     features.tool(work, effect_policy="non_replay_safe")
     features.agent("default", model="default", allow_tools=("work",))

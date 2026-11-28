@@ -527,24 +527,25 @@ class RuntimeSessions(Generic[AppT]):
             tenant_id=runtime.tenant_id, authorization=runtime._authorization,
         )
 
-    async def abandon_turn(
-        self, session_id: str, turn_id: str, *, expected_generation: int, principal: Principal,
+    async def recover_turn(
+        self, session_id: str, turn_id: str, *, principal: Principal,
+        mode: Literal["end", "resume"] = "end", expected_generation: int | None = None,
     ) -> bool:
-        """Mark an expired ordinary turn failed and free its session without replaying it."""
+        """End an expired ordinary turn without replay unless continuation is explicit."""
         runner, runtime = self._require_turn_sessions()
         validate_session_id(session_id)
         validate_execution_id(turn_id)
-        if type(expected_generation) is not int or expected_generation < 1:
+        if mode not in ("end", "resume"):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "mode"})
+        if expected_generation is not None and (
+            mode != "end" or type(expected_generation) is not int or expected_generation < 1
+        ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "expected_generation"})
-        return await runner.abandon_session_turn(
-            SessionTurnKey(session_id, turn_id), expected_generation=expected_generation, principal=principal,
-            tenant_id=runtime.tenant_id, authorization=runtime._authorization,
-        )
-
-    async def recover_turn(self, session_id: str, turn_id: str, *, principal: Principal) -> bool:
-        runner, runtime = self._require_turn_sessions()
-        validate_session_id(session_id)
-        validate_execution_id(turn_id)
+        if mode == "end":
+            return await runner.abandon_session_turn(
+                SessionTurnKey(session_id, turn_id), expected_generation=expected_generation, principal=principal,
+                tenant_id=runtime.tenant_id, authorization=runtime._authorization,
+            )
         resolver = runtime._binding_resolver
         if resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)

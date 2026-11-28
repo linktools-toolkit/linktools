@@ -13,7 +13,7 @@ import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo
 
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.persistence import PersistenceStorage
@@ -75,13 +75,12 @@ async def test_child_stream_failure_details_survive_parent_history_and_reopen(
         )])
 
     binding, clients = _binding(monkeypatch, transport, retries=1)
-    features = RuntimeFeatures("child-stream-failure")
+    features = RuntimeFeatures("child-stream-failure", defaults={"execution": {"retain_history": True}})
     features.model("parent", _Models(_UsageFunctionModel(parent)))
     features.model("child", binding)
     features.agent("default", model="parent", allow_tools=(), allow_skills=(), allow_subagents=("child",))
     features.agent("child", model="child", allow_tools=(), allow_skills=(), allow_subagents=())
     features.capability(TraceCapability(), scope="runtime")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
 
     def storage() -> PersistenceStorage:
         return PersistenceStorage.sqlite(tmp_path / "state.db")

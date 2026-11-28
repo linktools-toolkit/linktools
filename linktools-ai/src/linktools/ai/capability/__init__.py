@@ -71,13 +71,11 @@ from ..spec import mcp_server_selector, mcp_tool_selector
 
 from ._memory import MemoryCapability
 from ._session import SessionCapability
-from ._execution import ExecutionCapability
 
 __all__ = [
     "MCPInputResolver", "ReferencedInputResult", "ReferencedInputsCapability", "ProviderMessagesCapability",
     "SessionCapability",
     "MemoryCapability",
-    "ExecutionCapability",
     "ToolResponseFixture",
     "TraceCapability",
     "StepPersistenceCapability",

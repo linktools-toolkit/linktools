@@ -15,7 +15,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolRetu
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
-from linktools.ai.capability import ExecutionCapability, SessionCapability, StepPersistenceCapability
+from linktools.ai.capability import SessionCapability
 from linktools.ai.core import ApprovalDecision, ApprovalStatus, CommitPolicy, ExecutionStatus, Principal, SessionStatus, WorkspaceFileInput
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
@@ -29,6 +29,7 @@ from linktools.ai.storage import InMemoryCacheBackend, StorageOverlay, StorageRo
 from linktools.ai.session import SessionRecord
 from linktools.ai.workspace import ToolPermissionPolicy, ToolPermissionRule, Workspace, WorkspacePolicy
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import (
     _Models,
     _UsageFunctionModel,
@@ -224,7 +225,7 @@ async def test_session_reloads_known_scopes_before_first_model_request(
     if native:
         features.capability(SessionCapability(checkpoints=capture_frontier and not split_selects_step_only), scope="runtime")
     else:
-        features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+        configure_execution(features, retain_history=True)
     features.agent("reader", model="default", allow_tools=("read_file",), allow_subagents=())
     features = model_features(_Models(_UsageFunctionModel(model)), features)
 
@@ -309,7 +310,7 @@ async def test_session_reloads_known_scopes_before_first_model_request(
                         pytest.fail("Unsupported split Step workspace reached the provider")
 
                     configured = workspace_features("scope-memory", workspace=Workspace.load(workspace_root))
-                    configured.capability(StepPersistenceCapability(), scope="runtime")
+                    configured.capability(SessionCapability(checkpoints=True), scope="runtime")
                     configured.agent("reader", model="default", allow_tools=(), allow_subagents=())
                     model_features(_Models(_UsageFunctionModel(model_without_tools)), configured)
                     async with Runtime.open(persistence=reopened, features=configured, **auth) as runtime:
@@ -337,7 +338,7 @@ async def test_session_remembers_initial_cwd_scopes_and_refresh_failure_is_not_c
         return ModelResponse(parts=[TextPart("done")])
 
     features = workspace_features("cwd-scopes", workspace=Workspace.load(tmp_path))
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     features.agent("reader", model="default", allow_tools=())
     async with Persistence.open("cwd-scopes", storage=PersistenceStorage.in_memory()) as persistence:
         async with Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
@@ -604,7 +605,7 @@ async def test_attachment_scopes_are_in_first_request_and_sources_are_deduplicat
             tmp_path, policy=WorkspacePolicy(max_repository_instruction_documents=2),
         ))
         if not native:
-            features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+            configure_execution(features, retain_history=True)
         features.agent("reader", model="default", allow_tools=(), allow_subagents=())
         features = model_features(_Models(_UsageFunctionModel(model)), features)
         storage = PersistenceStorage.from_root(tmp_path / "state") if native else PersistenceStorage.in_memory()
@@ -653,7 +654,7 @@ async def test_initial_scope_union_is_validated_before_session_scope_write(
     features = workspace_features("initial-limits", workspace=Workspace.load(
         tmp_path, policy=WorkspacePolicy(max_repository_instruction_documents=2),
     ))
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     features.agent("reader", model="default", allow_tools=())
     features = model_features(_Models(_UsageFunctionModel(model)), features)
     async with Persistence.open("initial-limits", storage=PersistenceStorage.in_memory()) as persistence:
@@ -707,7 +708,7 @@ async def test_subagent_attachments_extend_but_do_not_refresh_parent_pin_or_sess
         return ModelResponse(parts=[TextPart("child done")])
 
     features = workspace_features("child-attachment", workspace=Workspace.load(tmp_path))
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     features.agent("reader", model="default", allow_tools=(), allow_subagents=("child",))
     features.agent("child", model="default", allow_tools=(), allow_subagents=())
     features = model_features(_Models(_UsageFunctionModel(model)), features)
@@ -900,9 +901,7 @@ async def test_accepted_context_owns_instruction_pin_before_model_dispatch(
         return ModelResponse(parts=[TextPart("done")])
 
     features = workspace_features("instruction-owner", workspace=Workspace.load(tmp_path))
-    features.capability(ExecutionCapability(
-        retain_history=True, commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync(),
-    ), scope="runtime")
+    configure_execution(features, retain_history=True, commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync())
     features.agent("reader", model="default", allow_tools=())
     storage = PersistenceStorage.in_memory(
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if terminal else None,

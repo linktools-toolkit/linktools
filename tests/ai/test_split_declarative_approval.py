@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 
-from linktools.ai.capability import AgentContext, CapabilityContribution, StepPersistenceCapability
+from linktools.ai.capability import AgentContext, CapabilityContribution, SessionCapability
 from linktools.ai.core import ApprovalDecision, ApprovalStatus, Principal, TenantAuthorizationPolicy, ToolOperationStatus
 from linktools.ai.execution import ApprovalDecisionRequest
 from linktools.ai.persistence import Persistence, PersistencePlan, PersistenceStorage
@@ -50,7 +50,7 @@ async def test_split_declarative_approval_requires_a_trusted_resolution(tmp_path
     tool = features.tool(lookup, effect_policy="none")
     tool.requires_approval = True
     features._register(CapabilityContribution.from_opaque("tool", "lookup", tool))
-    features.capability(StepPersistenceCapability())
+    features.capability(SessionCapability(checkpoints=True))
     features.agent("default", model="default", allow_tools=("lookup",))
     features = model_features(_Models(_UsageFunctionModel(reply)), features)
     step = StorageRoute.sqlite(tmp_path / "step.db")
@@ -102,7 +102,7 @@ async def test_split_declarative_approval_requires_a_trusted_resolution(tmp_path
             ready = await state.session_turns.get_turn(key)
             assert ready is not None and ready["state"] == "ready" and requests == 1 and calls == []
 
-            assert await runtime.sessions.recover_turn("chat", turn_id, principal=principal)
+            assert await runtime.sessions.recover_turn("chat", turn_id, mode="resume", principal=principal)
             terminal = await _wait_for_committed(
                 lambda: state.session_turns.get_turn(key), lambda row: row is not None and row["state"] == "succeeded",
             )
@@ -112,5 +112,5 @@ async def test_split_declarative_approval_requires_a_trusted_resolution(tmp_path
             assert settled.status is ToolOperationStatus.COMPLETED
             detail = await runtime.history.turn_result("chat", turn_id, principal=principal)
             assert detail["conversation_committed"] and detail["output"] == {"text": "approved lookup finished"}
-            assert not await runtime.sessions.recover_turn("chat", turn_id, principal=principal)
+            assert not await runtime.sessions.recover_turn("chat", turn_id, mode="resume", principal=principal)
             assert requests == 2 and calls == ["fixture"]

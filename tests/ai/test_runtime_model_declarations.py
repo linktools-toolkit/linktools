@@ -205,7 +205,6 @@ async def test_model_loader_refreshes_each_run_and_reuses_within_tool_rounds(ses
     import asyncio
     from collections import Counter
     from pydantic_ai.models.test import TestModel
-    from linktools.ai.capability import ExecutionCapability
     from linktools.ai.core import ExecutionStatus
     from linktools.ai.runtime import Runtime
     from linktools.ai.persistence import PersistenceStorage
@@ -239,10 +238,9 @@ async def test_model_loader_refreshes_each_run_and_reuses_within_tool_rounds(ses
         value = configuration["credential"]
         loads.append(value)
         return Binding(value)
-    features = RuntimeFeatures()
+    features = RuntimeFeatures(defaults={"execution": {"retain_history": True}})
     features.model("default", load)
     features.agent("default", model="default")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     @features.tool
     def echo(ctx: AgentContext[object]) -> str:
         return "echo"

@@ -142,7 +142,6 @@ async function mutate(path, payload, {newAttemptOn=[],scope='',shortRequest=fals
 function activeTurnAction() {
   const id=state.session?.active_turn_id;
   const turn=state.turns.find(row=>row.turn_id===id);
-  if(turn?.blockedGeneration && !turn.conversation_committed && (turn.liveGeneration || 0)<=turn.blockedGeneration)return 'abandon';
   return turn?.can_recover===true?'recover':'cancel';
 }
 function setDisabled() {
@@ -208,7 +207,7 @@ function setDisabled() {
       || state.actionsPending.has(`${active.execution_id}:end-stopped`)));
   const send=$('send'), reader=$('reader-stop');
   const turnAction=stop && ordinary ? activeTurnAction() : 'cancel';
-  const recover=turnAction==='recover' || turnAction==='abandon';
+  const recover=turnAction==='recover';
   const stopping=ordinary && stop && !recover && state.turns.some(row=>row.turn_id===turn && row.status==='CANCELLING');
   const activeLabel=recover?'Recover':stopping?'Stopping…':'Stop';
   const activeAriaLabel=recover?'Recover current turn':stopping?'Stopping current turn':'Stop current turn';
@@ -795,8 +794,7 @@ function watchOrdinarySession(id) {
         : {liveGeneration:frame.generation,liveParts:[],previewGap:missingPreview?frame.generation:null};
       // An authorized history read can reveal an active turn, not prove its preview prefix was observed.
       patchOrdinaryTurn({turn_id:frame.turn_id,turn_no:frame.turn_no,status:'STARTED',can_recover:false,
-        user_input:ordinaryInput(frame.prompt,frame.attachments),items:[],conversation_committed:false,previewHasPrefix:true,
-        blockedGeneration:frame.generation>(row?.blockedGeneration || 0)?null:row.blockedGeneration,...preview});
+        user_input:ordinaryInput(frame.prompt,frame.attachments),items:[],conversation_committed:false,previewHasPrefix:true,...preview});
     } else if(frame.type==='waiting'){
       const row=state.turns.find(item=>item.turn_id===frame.turn_id);
       if(activeTurn()!==frame.turn_id || row?.conversation_committed
@@ -2630,33 +2628,34 @@ async function watchExecution(id,generation) {
 async function ordinaryAction(action) {
   const id=state.selectedSession,turn=state.session?.active_turn_id,key=`turn:${turn}`,generation=state.generation;
   if(!id || !turn || state.actionsPending.has(key))return;
-  if(action==='recover' && !confirm('Recover this turn only after its previous producer has stopped. Continue?'))return;
-  const blockedGeneration=state.turns.find(row=>row.turn_id===turn)?.blockedGeneration;
-  if(action==='abandon' && (!blockedGeneration || !confirm('End this turn without rerunning any tools? Earlier messages will be kept. Any already attempted effects may still be unconfirmed.')))return;
+  const row=state.turns.find(item=>item.turn_id===turn);
+  const mode=row?.recovery_mode || 'end', observedGeneration=row?.recovery_generation;
+  if(action==='recover' && !confirm(mode==='resume'
+    ? 'Resume this turn only after its previous producer has stopped. Continue?'
+    : 'End this turn without rerunning any tools? Earlier messages will be kept. Any already attempted effects may still be unconfirmed.'))return;
   const current=()=>state.generation===generation && state.selectedSession===id && state.session?.active_turn_id===turn;
   if(!current())return;
   state.actionsPending.add(key);setDisabled();
   try {
+    const payload={turn_id:turn};
+    if(action==='recover' && mode==='resume')payload.mode='resume';
+    if(action==='recover' && mode==='end' && Number.isSafeInteger(observedGeneration))
+      payload.expected_generation=observedGeneration;
     let result;
     try {
-      result=await mutate(sessionURL(id,action),{turn_id:turn,...(action==='abandon'?{expected_generation:blockedGeneration}:{})});
+      result=await mutate(sessionURL(id,action),payload);
     } catch(error) {
-      const details=error.details?.safe_details, failedGeneration=details?.generation;
-      const canOfferEnd=action==='recover' && details?.abandonable===true
-        && Number.isSafeInteger(failedGeneration) && failedGeneration>0;
-      const row=state.turns.find(item=>item.turn_id===turn);
-      if(!current() || row?.conversation_committed)return;
-      if(!canOfferEnd || !row)throw error;
-      if((row.liveGeneration || 0)>failedGeneration)return;
-      patchOrdinaryTurn({...row,blockedGeneration:failedGeneration});
-      notice('This turn cannot resume. Choose Recover again to confirm ending it without replaying tools.');
-      return;
+      const latest=state.turns.find(item=>item.turn_id===turn);
+      if(!current() || latest?.conversation_committed
+         || Number.isSafeInteger(observedGeneration) && (latest?.liveGeneration || 0)>observedGeneration)return;
+      throw error;
     }
     if(current() && !result.accepted)
-      notice(action==='abandon'?'The turn could not be ended yet. Wait for its lease to expire, then choose Recover again.'
-        :action==='recover'?'Turn still owned or already complete.':'Stop not confirmed. Watch the turn for its final status.');
+      notice(action==='recover'?'The turn is still owned or has already ended. Refresh its status before trying again.'
+        :'Stop not confirmed. Watch the turn for its final status.');
   } finally {state.actionsPending.delete(key);setDisabled();}
 }
+
 async function sendMessage(event) {
   event.preventDefault(); const sessionId=state.selectedSession,generation=state.generation,executionGeneration=state.executionGeneration,promptValue=$('prompt').value;
   const ordinary=Boolean(state.config?.turn_sessions), uploads=turnUploads;

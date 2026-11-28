@@ -149,7 +149,7 @@ for a runnable RPM/TPM example, streaming/cancellation behavior, quota accountin
 and provider retry boundaries.
 
 Context retention, interrupted-run recovery and detailed trace are independent
-Runtime-scoped opt-ins: `ExecutionCapability(retain_history=True)`,
+Runtime-scoped opt-ins: `defaults["execution"]["retain_history"] = True`,
 `StepPersistenceCapability()`, and `TraceCapability()`. Durable storage alone enables
 none of these optional guarantees. `Runtime.open(..., metrics=dataset)` independently enables automatic
 Agent observations and supplies the dataset to Runtime-bound Task engines for
@@ -162,7 +162,7 @@ need no capability wrappers. Session metadata and display history
 are enabled by the default `SessionCapability`; use `SessionCapability(enabled=False)`
 to disable them explicitly. Conversation adds retained model context for future turns
 and execution forks. Execution commit timing belongs to
-`ExecutionCapability(commit=CommitPolicy.sync())`, using `CommitPolicy` from
+`RuntimeFeatures(execution_commit=CommitPolicy.sync())`, using `CommitPolicy` from
 `linktools.ai.core`. See [feature guarantees and commit
 boundaries](docs/runtime-capabilities.md#optional-execution-persistence).
 
@@ -1259,13 +1259,11 @@ turn, and application ownership belongs to the host's authorization policy.
 
 Session metadata and a first turn are available through the default Session capability.
 An unretained completed turn makes its Session context unavailable for later
-resume or fork. To retain model context across resumed turns, register `ExecutionCapability(retain_history=True)` at Runtime scope before
-opening the Runtime:
+resume or fork. For definition-bound sessions and independent execution forks,
+configure retention before opening the Runtime:
 
 ```python
-from linktools.ai.capability import ExecutionCapability
-
-application.capability(ExecutionCapability(retain_history=True))
+application = RuntimeFeatures(defaults={"execution": {"retain_history": True}})
 # Open with Runtime.open(..., features=application) after registration.
 ```
 

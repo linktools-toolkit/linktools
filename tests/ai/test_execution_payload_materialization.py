@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, TextPart, UserPromptPart
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus, PersistenceDomain, PromptLimits
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionInputContext, RuntimePayloadRef
@@ -112,10 +111,7 @@ async def test_large_pending_input_is_materialized_only_at_source_boundary(tmp_p
         await release.wait()
         return ModelResponse(parts=[TextPart(answer)])
 
-    features = RuntimeFeatures("payload-placement")
-    features.capability(ExecutionCapability(
-        retain_history=True, commit=CommitPolicy.sync() if mode == "sync" else CommitPolicy.terminal(),
-    ), scope="runtime")
+    features = RuntimeFeatures("payload-placement", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.sync() if mode == "sync" else CommitPolicy.terminal())
     features.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.sqlite(
         tmp_path / "state.db", object_store=objects,
@@ -162,8 +158,7 @@ async def test_rejected_admission_does_not_publish_large_input_or_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, imported: bool,
 ) -> None:
     objects = _Objects()
-    features = RuntimeFeatures("rejected-payload")
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    features = RuntimeFeatures("rejected-payload", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     features.agent("default", model="default", allow_tools=())
     context = ExecutionInputContext.from_messages((
         ModelRequest(parts=[UserPromptPart("history" * 12000)]),
@@ -197,8 +192,7 @@ async def test_imported_context_is_archived_at_source_and_can_reopen(tmp_path: P
         ModelRequest(parts=[UserPromptPart("history" * 12000)]),
         ModelResponse(parts=[TextPart("prior answer")]),
     ), session_metadata={"large": "metadata" * 10000})
-    features = RuntimeFeatures("imported-payload")
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    features = RuntimeFeatures("imported-payload", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     features.agent("default", model="default", allow_tools=())
 
     async def model(messages, info):

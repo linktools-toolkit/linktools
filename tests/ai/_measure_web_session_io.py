@@ -29,13 +29,12 @@ from uuid import uuid4
 
 from httpx import AsyncClient
 from pydantic_ai.models.function import FunctionModel
-from pydantic_ai_harness.step_persistence import StepPersistence
 from sqlalchemy import event
 from sqlalchemy.engine import Engine, URL, make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability, SessionCapability
 from linktools.ai.core import CommitPolicy, TenantAuthorizationPolicy
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -118,8 +117,7 @@ async def _measure(
 
     @asynccontextmanager
     async def open_app():
-        features = RuntimeFeatures(namespace)
-        features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()), scope="runtime")
+        features = RuntimeFeatures(namespace, defaults={"execution": {"retain_history": True}})
         if trace:
             features.capability(TraceCapability(), scope="runtime")
         features.agent("default", model="default", allow_tools=())
@@ -127,9 +125,7 @@ async def _measure(
         async with AsyncExitStack() as stack:
             state = await stack.enter_async_context(Persistence.open(namespace, storage=storage))
             if not step_off:
-                native = await state.create_step_store()
-                stack.push_async_callback(native.close)
-                features.capability(StepPersistence(store=native, capture_frontier=True), scope="runtime")
+                features.capability(SessionCapability(checkpoints=True), scope="runtime")
             runtime = await stack.enter_async_context(Runtime.open(
                 persistence=state, features=features, authorization=WorkspacePolicy(),
             ))

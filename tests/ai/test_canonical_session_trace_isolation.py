@@ -367,3 +367,63 @@ async def test_model_messages_select_earlier_turns_after_sqlite_reopen(
         if split_trace:
             await trace.dispose()
         await primary.dispose()
+
+
+@pytest.mark.asyncio
+async def test_session_trace_does_not_change_authoritative_sql_writes(tmp_path: Path) -> None:
+    async def run(sink: str) -> list[str]:
+        primary = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / f'{sink}-session.db'}")
+        trace = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / f'{sink}-trace.db'}")
+        writes: list[str] = []
+        trace_write = asyncio.Event()
+
+        def observe_primary(_connection, _cursor, statement, _parameters, _context, _many):
+            if _writes(statement):
+                writes.append(statement)
+
+        def observe_trace(_connection, _cursor, statement, _parameters, _context, _many):
+            if _writes(statement):
+                trace_write.set()
+                if sink == "unavailable":
+                    raise OSError("synthetic Trace write failure")
+
+        async def model(_messages, _info):
+            return ModelResponse(parts=[TextPart("answer")])
+
+        features = RuntimeFeatures("session-trace-write-parity")
+        features.capability(SessionCapability(checkpoints=True), scope="runtime")
+        if sink != "off":
+            features.capability(TraceCapability(), scope="runtime")
+        features.agent("default", model="default", allow_tools=())
+        features = model_features(_Models(_UsageFunctionModel(model)), features)
+        plan = replace(PersistencePlan.from_default(StorageRoute.sql(primary)), trace=StorageRoute.sql(trace))
+        try:
+            await provision_database(primary)
+            await provision_database(trace)
+            async with (
+                Persistence.open("session-trace-write-parity", storage=PersistenceStorage.from_plan(plan)) as state,
+                Runtime.open(persistence=state, features=features, authorization=_SessionPolicy()) as runtime,
+            ):
+                session = await runtime.agents.get().create_session("chat")
+                event.listen(primary.sync_engine, "before_cursor_execute", observe_primary)
+                event.listen(trace.sync_engine, "before_cursor_execute", observe_trace)
+                turn = await runtime.sessions.start(
+                    session.session_id, "question", agent=runtime.agents.get(), principal=runtime.default_principal,
+                    idempotency_key="request",
+                )
+                terminal = await turn.wait_final(timeout_seconds=5)
+                assert terminal.status is ExecutionStatus.SUCCEEDED
+                assert terminal.view["output"] == {"text": "answer"}
+                if sink != "off":
+                    await asyncio.wait_for(trace_write.wait(), 5)
+                else:
+                    assert not trace_write.is_set()
+            return writes
+        finally:
+            await trace.dispose()
+            await primary.dispose()
+
+    baseline = await run("off")
+    assert baseline
+    assert await run("healthy") == baseline
+    assert await run("unavailable") == baseline

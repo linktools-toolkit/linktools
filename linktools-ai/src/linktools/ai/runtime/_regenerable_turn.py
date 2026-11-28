@@ -718,7 +718,7 @@ class _RegenerableTurnRunner:
         return await budget.repository.read(budget.scope_id)
 
     async def abandon_session_turn(
-        self, key: SessionTurnKey, *, expected_generation: int,
+        self, key: SessionTurnKey, *, expected_generation: int | None,
         principal: Principal, tenant_id: str, authorization: AuthorizationPolicy,
     ) -> bool:
         """Release an expired ordinary turn without certifying or repeating its effects."""
@@ -735,7 +735,8 @@ class _RegenerableTurnRunner:
             principal, AuthorizationAction.EXECUTION_CANCEL,
             ResourceRef(ResourceKind.EXECUTION, key.turn_id, tenant_id, request["principal"]["principal_id"]),
         )
-        if row["state"] != "accepted" or row["generation"] != expected_generation or self.has_local_producer(key):
+        if (row["state"] != "accepted" or self.has_local_producer(key)
+                or expected_generation is not None and row["generation"] != expected_generation):
             return False
         frozen = row["binding_json"]
         contract = None if frozen is None else AgentBindingContract.from_payload(frozen)
@@ -1075,7 +1076,7 @@ class _RegenerableTurnRunner:
             else:
                 binding = await resolver.restore(contract)
                 session_policy = _runtime_feature_policy(binding.compiled_agent.runtime_contributions).session
-                if session_policy.checkpoints != request.get("session_checkpoints", False):
+                if session_policy.checkpoints != request.get("session_checkpoints"):
                     raise AIError(
                         ErrorCode.STORAGE_RECOVERY_REQUIRED, "The admitted session checkpoint policy changed",
                         safe_details={"recovery_stage": "binding", "reason": "checkpoint_policy_changed"},
@@ -1878,8 +1879,7 @@ class _RegenerableTurnRunner:
             request["preload_skills"] = [dict(value) for value in preload_skill_inputs]
         if split is not None:
             request["split_step"] = True
-        if _runtime_feature_policy(binding.compiled_agent.runtime_contributions).session.checkpoints:
-            request["session_checkpoints"] = True
+        request["session_checkpoints"] = native_step is not None
         if run_budget is not None:
             request["budgeted"] = True
         if explicit_agent_binding:
@@ -2249,13 +2249,13 @@ class _RegenerableTurnRunner:
                         split_source=capability.store._canonical_split_source,
                     )
                     if committed:
-                        if offer_trace is not None:
-                            offer_trace("waiting", None)
                         self._publish(turn.key.session_id, {
                             "type": "waiting", "turn_id": turn.key.turn_id, "turn_no": turn.number,
                             "generation": turn.generation, "revision": turn.revision,
                         })
                         self._notice_lifecycle(turn.key, "waiting", turn.revision)
+                        if offer_trace is not None:
+                            offer_trace("waiting", None)
                     return committed
                 messages, output = outcome.messages, outcome.output
                 candidate = outcome.compacted_context
@@ -2311,9 +2311,9 @@ class _RegenerableTurnRunner:
                 turn, state="failed", result={"error_code": code},
             )
             if committed:
+                self._terminal(turn, "failed", error_code=code)
                 if offer_trace is not None:
                     offer_trace("failed", code)
-                self._terminal(turn, "failed", error_code=code)
             return committed
         committed = await self._finish_retained_turn(
             turn, state="succeeded",
@@ -2321,10 +2321,10 @@ class _RegenerableTurnRunner:
             compacted_context=compacted_context,
         )
         if committed:
-            if offer_trace is not None:
-                offer_trace("succeeded", None)
             self._terminal(
                 turn, "succeeded", output=output, messages=context_messages, output_ref=output_ref,
                 compacted_context=compacted_context or (),
             )
+            if offer_trace is not None:
+                offer_trace("succeeded", None)
         return committed

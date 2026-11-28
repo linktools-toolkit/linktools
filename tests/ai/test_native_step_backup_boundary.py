@@ -10,7 +10,6 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai_harness.step_persistence import StepPersistence
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import ExecutionStatus, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
@@ -40,8 +39,7 @@ async def test_portable_export_identifies_native_dependency_without_runtime_feat
             await asyncio.Event().wait()
         return ModelResponse(parts=[TextPart("retained")])
 
-    features = RuntimeFeatures("backup")
-    features.capability(ExecutionCapability(retain_history=True))
+    features = RuntimeFeatures("backup", defaults={"execution": {"retain_history": True}})
     if checkpointed:
         features.capability(StepPersistence(store=native, capture_frontier=True))
     features.agent("default", model="default", allow_tools=())

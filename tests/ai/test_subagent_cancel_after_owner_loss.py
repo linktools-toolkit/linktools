@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 
-from linktools.ai.capability import ExecutionCapability
 from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.core import (
@@ -50,10 +49,9 @@ async def test_explicit_parent_cancel_reaches_child_after_owner_loss(tmp_path: P
                 return None
             return await super().renew_turn(lease, lease_seconds=lease_seconds)
 
-    features = RuntimeFeatures("child-loss-business-cancel")
+    features = RuntimeFeatures("child-loss-business-cancel", defaults={"execution": {"retain_history": True}})
     features.model("parent", _Models(_UsageFunctionModel(parent)))
     features.model("child", _Models(_UsageFunctionModel(child)))
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(native_checkpoint(), scope="runtime")
     features.agent("default", model="parent", allow_tools=(), allow_subagents=("child",))
     features.agent("child", model="child", allow_tools=())
@@ -121,10 +119,9 @@ async def test_terminal_child_cleanup_preserves_prior_failed_cancel_receipt(tmp_
         await finish.wait()
         return ModelResponse(parts=[TextPart("child complete")])
 
-    features = RuntimeFeatures("child-terminal-cancel")
+    features = RuntimeFeatures("child-terminal-cancel", defaults={"execution": {"retain_history": True}})
     features.model("parent", _Models(_UsageFunctionModel(parent)))
     features.model("child", _Models(_UsageFunctionModel(child)))
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.agent("default", model="parent", allow_tools=(), allow_subagents=("child",))
     features.agent("child", model="child", allow_tools=())
     async with Persistence.open("child-terminal-cancel", storage=PersistenceStorage.sqlite(

@@ -14,7 +14,6 @@ from pydantic_ai.messages import ModelResponse, TextPart
 import linktools.ai.runtime._session as session_module
 from linktools.ai.core import ExecutionContext, ExecutionLineageKind, ExecutionStatus, HmacCursorSigner, Principal, TenantAuthorizationPolicy, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage, PersistencePlan
 from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeSessions
 from linktools.ai.storage import StorageRoute
@@ -178,8 +177,7 @@ def _native_features():
     async def answer(_messages, _info):
         return ModelResponse(parts=[TextPart("answer")])
 
-    group = RuntimeFeatures("display")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group = RuntimeFeatures("display", defaults={"execution": {"retain_history": True}})
     group.agent("default", model="default", allow_tools=())
     return model_features(_Models(_UsageFunctionModel(answer)), group)
 
@@ -870,8 +868,7 @@ async def test_runtime_factory_does_not_stale_native_or_nondurable_display(tmp_p
         storage = PersistenceStorage.in_memory(cache=cache)
     else:
         storage = PersistenceStorage.from_plan(PersistencePlan(execution=StorageRoute.transient(cache=cache)))
-    group = RuntimeFeatures[None]("display")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group = RuntimeFeatures[None]("display", defaults={"execution": {"retain_history": True}})
     group.agent("agent", model="default", allow_tools=())
     async with Persistence.open('display', storage=storage, tenant_id='tenant') as persistence_824, Runtime.open(persistence=persistence_824, features=model_features(_Models(TestModel()), group), context=ExecutionContext(None), authorization=_HostAuthorization()) as runtime:
         if retention == "durable":
@@ -970,8 +967,7 @@ async def test_runtime_close_drains_display_io_after_close_waiter_cancellation(m
 
     cache = _Cache()
     storage = PersistenceStorage.in_memory(cache=cache)
-    group = RuntimeFeatures[None]("display")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group = RuntimeFeatures[None]("display", defaults={"execution": {"retain_history": True}})
     group.agent("agent", model="default", allow_tools=())
     entered, release, exited = asyncio.Event(), asyncio.Event(), asyncio.Event()
     method = getattr(cache, phase)

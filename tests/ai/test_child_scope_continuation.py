@@ -11,7 +11,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCall
 
 from pydantic_ai.models.function import AgentInfo
 
-from linktools.ai.capability import AgentContext, ExecutionCapability
+from linktools.ai.capability import AgentContext
 from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.core import ApprovalDecision, ExecutionStatus, Principal
@@ -35,8 +35,7 @@ class _Scenario:
         self.child_requests = 0
         self.parent_requests = 0
         self.parent_returns: list[object] = []
-        self.features = RuntimeFeatures("child-continuation")
-        self.features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+        self.features = RuntimeFeatures("child-continuation", defaults={"execution": {"retain_history": True}})
         self.features.capability(native_checkpoint(), scope="runtime")
         self.features.model("parent", _Models(_UsageFunctionModel(self.parent)))
         self.features.model("child", _Models(_UsageFunctionModel(self.child)))

@@ -99,7 +99,7 @@ async def test_acp_workspace_uses_explicit_execution_coordination(
     from pydantic_ai.models.test import TestModel
 
     from linktools.ai.acp import ACPApplication
-    from linktools.ai.capability import ExecutionCapability
+    from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
     from linktools.ai.persistence import PersistenceStorage
     from linktools.ai.workspace import Workspace
@@ -129,18 +129,16 @@ async def test_acp_workspace_uses_explicit_execution_coordination(
 
     cache = _CombinedCache()
     streams = _CountingStreamBackend()
-    declaration = (
-        None if coordination == "none" else ExecutionCapability(
-            retain_history=retain_history,
-        )
+    features = model_features(
+        _Models(TestModel(call_tools=[])),
+        RuntimeFeatures(defaults={"execution": {"retain_history": coordination == "none" or retain_history}}),
     )
-    features = model_features(_Models(TestModel(call_tools=[])))
     features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     application = ACPApplication.for_workspace(
         Workspace.load(tmp_path), features=features,
         storage=PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache,
                                           coordination=None if coordination == "none" else streams if coordination == "stream" else cache),
-        execution=declaration, authorization=HostAuthorization(),
+        authorization=HostAuthorization(),
     )
     served = False
 
@@ -165,7 +163,7 @@ async def test_acp_workspace_uses_explicit_execution_coordination(
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert record is not None
-        assert record.conversation is (True if declaration is None else retain_history)
+        assert record.conversation is (coordination == "none" or retain_history)
         served = True
 
     monkeypatch.setattr("linktools.ai.acp.serve_stdio", serve)
@@ -317,6 +315,8 @@ async def test_acp_application_can_serve_again_after_transport_failure(
     )
     assert all(capture.models["default"] is binding for capture in captures)
     assert all(capture.workspace is application.workspace for capture in captures)
+    assert all(capture.defaults["execution"] == {"retain_history": True} for capture in captures)
+    assert "execution" not in features.defaults
 
 
 @pytest.mark.asyncio

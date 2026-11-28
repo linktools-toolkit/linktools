@@ -26,7 +26,7 @@ from linktools.ai.agent import AgentCompiler
 from linktools.ai.asset import AssetKey, AssetStore, AssetVersionRef, InMemoryAssetBackend
 from linktools.ai.capability import (
     AgentContext, AssetCapability, CapabilityContribution, CapabilityLoadContext,
-    ExecutionCapability, ReferencedInputsCapability,
+    ReferencedInputsCapability,
     ToolCallRetry, TraceCapability, ToolResultsCapability, FileSystemCapability,
     TOOL_MCP_SELECTOR_METADATA_KEY)
 from pydantic_ai_harness.step_persistence import StepPersistence
@@ -338,9 +338,8 @@ async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
             assert len(provider_counts) == 3 and not bodies
             yield "done"
 
-    features = RuntimeFeatures("projection")
+    features = RuntimeFeatures("projection", defaults={"execution": {"retain_history": True}})
     features.model("default", _Binding(stream))
-    features.capability(ExecutionCapability(retain_history=True))
     features.capability(native_checkpoint())
     features.capability(TraceCapability(record_http_bodies=True))
     features.capability(ReferencedInputsCapability(load), id=_SOURCE.id, scope="agent")

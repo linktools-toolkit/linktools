@@ -14,7 +14,6 @@ from pydantic_ai.models.function import AgentInfo
 from pydantic_ai_harness.step_persistence import SqliteStepStore
 from sqlalchemy import event
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus, TenantAuthorizationPolicy, canonical_json_bytes
 from linktools.ai.persistence import NativeCheckpoint, Persistence, PersistenceStorage
 from linktools.ai.persistence._archive import ContentArchive
@@ -24,6 +23,7 @@ from linktools.ai.persistence.contracts import ExecutionRecord, RecoveryHandoffP
 from linktools.ai.persistence.state import StoredRecord
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features, native_checkpoint
 from ._session_tool_test_helpers import _split_sqlite_storage
 
@@ -132,7 +132,6 @@ async def test_independent_execution_keeps_control_writes_compact(
         return ModelResponse(parts=[TextPart(_OUTPUT)])
 
     features = RuntimeFeatures("execution-payload-runtime")
-    features.capability(ExecutionCapability(retain_history=False, commit=CommitPolicy.sync()), scope="runtime")
     features.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / "runtime.db"
@@ -196,8 +195,7 @@ async def test_native_session_retains_large_messages_without_execution_control_r
         return ModelResponse(parts=[TextPart(_OUTPUT)])
 
     name = "native-large-turn"
-    features = RuntimeFeatures(name)
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures(name, defaults={"execution": {"retain_history": True}})
     features.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     storage = PersistenceStorage.from_root(tmp_path / name)
@@ -260,7 +258,7 @@ async def test_execution_payload_runtime_prepared_handoff_reuses_body_after_cold
         return ModelResponse(parts=[TextPart(_OUTPUT)])
 
     features = RuntimeFeatures("execution-payload-handoff", defaults={"execution": {"auto_recover": True}})
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     features.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / "handoff.db"
@@ -310,7 +308,7 @@ async def test_execution_payload_runtime_native_checkpoint_retains_body_after_re
 ) -> None:
     name = "execution-payload-checkpoint"
     features = RuntimeFeatures(name, defaults={"execution": {"auto_recover": True}})
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     step_database = tmp_path / "steps.db"
     features.capability(native_checkpoint(database=step_database), scope="runtime")
     features.agent("default", model="default", allow_tools=())

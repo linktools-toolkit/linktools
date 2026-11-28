@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 
-from linktools.ai.capability import AgentContext, ExecutionCapability, StepPersistenceCapability
+from linktools.ai.capability import AgentContext, SessionCapability
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy, ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -15,6 +15,7 @@ from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.runtime.turn_clients import TurnObserver
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 
 
@@ -30,8 +31,7 @@ async def test_native_terminal_unknown_keeps_slot_until_exact_late_commit(tmp_pa
         calls += 1
         return ModelResponse(parts=[TextPart("answer")])
 
-    features = RuntimeFeatures("native-unknown-terminal")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("native-unknown-terminal", defaults={"execution": {"retain_history": True}})
     features.agent("default", model="default", allow_tools=())
     model_features(_Models(_UsageFunctionModel(model)), features)
     storage = PersistenceStorage.from_root(tmp_path / "native")
@@ -87,7 +87,7 @@ async def test_native_terminal_unknown_keeps_slot_until_exact_late_commit(tmp_pa
                     await start("next", "next")
                 assert busy.value.code is ErrorCode.SESSION_BUSY
                 assert await turns.find_request("session", "next") is None
-                assert not await runtime.sessions.recover_turn("session", sent.key.turn_id, principal=principal)
+                assert not await runtime.sessions.recover_turn("session", sent.key.turn_id, mode="resume", principal=principal)
 
                 release.set()
                 [server_commit] = pending
@@ -127,8 +127,8 @@ async def test_native_tool_unknown_ack_does_not_dispatch_before_or_after_late_cl
         return ModelResponse(parts=[ToolCallPart("effect", {}, tool_call_id="effect")])
 
     features = RuntimeFeatures("native-unknown-tool")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    features.capability(StepPersistenceCapability(), scope="runtime")
+    configure_execution(features, retain_history=True)
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
     features.tool(effect, effect_policy="non_replay_safe")
     features.agent("default", model="default", allow_tools=("effect",))
     model_features(_Models(_UsageFunctionModel(model)), features)
@@ -187,7 +187,7 @@ async def test_native_tool_unknown_ack_does_not_dispatch_before_or_after_late_cl
                 assert stored.tool_operation_id == confirmed.tool_operation_id
                 assert stored.tool_call_id == "effect" and stored.status is ToolOperationStatus.CLAIMED
                 assert stored.producer_generation == 1 and effects == []
-                assert not await runtime.sessions.recover_turn("session", key.turn_id, principal=principal)
+                assert not await runtime.sessions.recover_turn("session", key.turn_id, mode="resume", principal=principal)
 
                 # Even after genuine lease expiry, a committed claim whose
                 # caller lost the ACK cannot authorize a fresh effect.
@@ -196,7 +196,7 @@ async def test_native_tool_unknown_ack_does_not_dispatch_before_or_after_late_cl
                         **turns._turn_values(key), generation=1, state="accepted",
                     ).values(lease_until=0))
                     assert expired.rowcount == 1
-                assert await runtime.sessions.recover_turn("session", key.turn_id, principal=principal)
+                assert await runtime.sessions.recover_turn("session", key.turn_id, mode="resume", principal=principal)
                 finished = await sent.wait_final(timeout_seconds=5)
                 assert finished.key == key and finished.status is ExecutionStatus.SUCCEEDED
                 assert finished.view["output"] == {"text": "could not confirm the effect"}

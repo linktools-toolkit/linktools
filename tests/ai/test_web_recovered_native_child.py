@@ -9,7 +9,7 @@ import httpx
 import pytest
 from pydantic_ai.messages import BinaryContent, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 
-from linktools.ai.capability import ExecutionCapability, FileSystemCapability, StepPersistenceCapability
+from linktools.ai.capability import FileSystemCapability, SessionCapability
 from linktools.ai.core import ExecutionStatus, IdempotencyStatus, ToolOperationStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -18,6 +18,7 @@ from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.runtime._native_subagent import NativeSubagentAdmission
 from linktools.ai.workspace import ToolPermissionPolicy, Workspace, WorkspacePolicy
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import _wait_for_committed
 from .test_canonical_turn_subagents import _HEADERS, _SESSION, _HostAuthorization, _model
 
@@ -80,13 +81,13 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
 
     name = "web-recovered-reserved-child"
-    features = RuntimeFeatures(name)
+    features = RuntimeFeatures(name, defaults={"execution": {"retain_history": True}})
     features.model("parent", _model("parent", parent))
     child_model = _model("child", child)
     child_model.contract["input_mime_types"] = ["text/plain"]
     features.model("child", child_model)
-    features.capability(ExecutionCapability(retain_history=True))
-    features.capability(StepPersistenceCapability())
+    configure_execution(features, retain_history=True)
+    features.capability(SessionCapability(checkpoints=True))
     features.capability(FileSystemCapability(workspace))
     features.agent("default", model="parent", allow_subagents=("child",), allow_tools=(), allow_skills=())
     features.agent("child", model="child", allow_subagents=(), allow_tools=(), allow_skills=())
@@ -185,7 +186,7 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
             monkeypatch.setattr(commands, "settle_native_subagent_result", lose_settlement_ack)
 
         recovered = await http.post("/api/session/recover", params=params, headers=_HEADERS,
-                                    json={"turn_id": turn_id, "request_id": "recover"})
+                                    json={"turn_id": turn_id, "request_id": "recover", "mode": "resume"})
         children = await state.execution.executions.list_children(turn_id, tenant_id=tenant_id)
         receipt = await state.execution.idempotency.get("execution.subagent", request_key, tenant_id=tenant_id)
         row = await turns.get_turn(key)
@@ -198,7 +199,7 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
             }
             assert row["state"] == "accepted" and row["generation"] == 2 and settled == original
             assert not children and receipt is None
-            ended = await http.post("/api/session/abandon", params=params, headers=_HEADERS, json={
+            ended = await http.post("/api/session/recover", params=params, headers=_HEADERS, json={
                 "turn_id": turn_id, "expected_generation": 2, "request_id": "end-after-blocked-recovery",
             })
             assert ended.status_code == 200 and ended.json() == {"accepted": True}, ended.text

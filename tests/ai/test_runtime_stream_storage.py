@@ -11,9 +11,6 @@ from linktools.ai.persistence import PersistenceStorage, PersistencePlan, Persis
 from linktools.ai.persistence import Persistence
 from linktools.ai.storage import StorageRoute
 from linktools.ai.storage import InMemoryCacheBackend, InMemoryStreamBackend
-from linktools.ai.capability import ExecutionCapability
-
-
 @pytest.mark.asyncio
 async def test_storage_constructors_preserve_borrowed_hot_cache(tmp_path) -> None:
     backend = InMemoryCacheBackend(max_bytes=1024)

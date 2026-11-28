@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 
-from linktools.ai.capability import AgentContext, ExecutionCapability
+from linktools.ai.capability import AgentContext
 from linktools.ai.core import CommitPolicy, ExecutionStatus, ToolOperationStatus
 from linktools.ai.execution import CancelExecutionRequest
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -67,8 +67,7 @@ async def test_source_cancel_reaches_owner_after_remote_terminal_settlement(
         finally:
             stopped.set()
 
-    features = RuntimeFeatures("source-cancel-signal")
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()), scope="runtime")
+    features = RuntimeFeatures("source-cancel-signal", defaults={"execution": {"retain_history": True}})
     features.agent("default", model="default", allow_tools=())
     features = model_features(_Models(_UsageFunctionModel(model)), features)
     coordination = _DelayedRenewal()
@@ -125,8 +124,7 @@ async def test_expired_scope_stops_worker_without_business_cancel(
         finally:
             stopped.set()
 
-    features = RuntimeFeatures("expired-turn-signal")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("expired-turn-signal", defaults={"execution": {"retain_history": True}})
     features.agent("default", model="default", allow_tools=())
     features = model_features(_Models(_UsageFunctionModel(model)), features)
     coordination = _DelayedRenewal()

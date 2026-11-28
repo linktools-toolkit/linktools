@@ -16,7 +16,7 @@ from linktools.ai.capability import AgentContext
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import JsonValue
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, SqliteStepStore
 from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime import Runtime
@@ -60,8 +60,7 @@ def _application(
     started: asyncio.Event | None = None,
     release: asyncio.Event | None = None,
 ) -> RuntimeFeatures[None]:
-    application: RuntimeFeatures[None] = RuntimeFeatures("application")
-    application.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    application: RuntimeFeatures[None] = RuntimeFeatures("application", defaults={"execution": {"retain_history": True}})
 
     async def lookup(_ctx: AgentContext[None]) -> str:
         calls.append("lookup")

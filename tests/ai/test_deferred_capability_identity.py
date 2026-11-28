@@ -16,7 +16,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai_harness.step_persistence import StepPersistence
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.capability import AssetCapability, CapabilityContribution, ExecutionCapability, tool_metadata
+from linktools.ai.capability import AssetCapability, CapabilityContribution, tool_metadata
 from linktools.ai.core import ApprovalDecision, ExecutionStatus, Principal
 from linktools.ai.errors import ErrorCode
 from linktools.ai.execution import ApprovalDecisionRequest, PendingDeferredCall
@@ -45,11 +45,10 @@ async def _runtime(database: Path, store, declarations, model, *, validation_sho
     await provision_database(engine)
     steps = SqlStepStore(engine, namespace="deferred-identity", tenant_id="default")
     await steps.initialize()
-    features = RuntimeFeatures("deferred-identity")
+    features = RuntimeFeatures("deferred-identity", defaults={"execution": {"retain_history": True}})
     assets = AssetCapability(store)
     assets.loader("test", Loader())
     features.capability(assets)
-    features.capability(ExecutionCapability(retain_history=True))
     features.capability(StepPersistence(store=steps, capture_frontier=True))
 
     class ReturnedMetadata(AbstractCapability):

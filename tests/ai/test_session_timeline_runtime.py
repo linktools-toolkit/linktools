@@ -12,7 +12,6 @@ import pytest
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import AuthorizationAction, ExecutionStatus, Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.history import History
 from linktools.ai.core import Page
 from linktools.ai.session import SessionTurn
@@ -24,8 +23,7 @@ from ._runtime_test_helpers import RuntimeUsageModels, model_features
 
 @pytest.mark.asyncio
 async def test_in_memory_session_run_restores_timeline() -> None:
-    application = RuntimeFeatures("application")
-    application.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    application = RuntimeFeatures("application", defaults={"execution": {"retain_history": True}})
     application.agent("default", model="default", allow_tools=())
 
     async with Persistence.open('default', storage=PersistenceStorage.in_memory()) as persistence_27, Runtime.open(persistence=persistence_27, features=model_features(RuntimeUsageModels(), application)) as runtime:
@@ -57,8 +55,7 @@ async def test_in_memory_session_run_restores_timeline() -> None:
 
 @pytest.mark.asyncio
 async def test_in_memory_session_timeline_fork_matches_history() -> None:
-    application = RuntimeFeatures("application")
-    application.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    application = RuntimeFeatures("application", defaults={"execution": {"retain_history": True}})
     application.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.in_memory()
 

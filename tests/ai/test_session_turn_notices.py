@@ -9,7 +9,7 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.capability import AgentContext, ExecutionCapability, StepPersistenceCapability, TraceCapability
+from linktools.ai.capability import AgentContext, SessionCapability, TraceCapability
 from linktools.ai.core import TenantAuthorizationPolicy
 from linktools.ai.persistence.turns import SessionTurnKey
 from linktools.ai.session import CreateSessionRequest
@@ -36,11 +36,10 @@ async def test_observe_turns_follows_owned_boundaries(tmp_path: Path, backend: s
             return ModelResponse(parts=[TextPart("answer")])
         return ModelResponse(parts=[ToolCallPart("lookup", {"value": "not-for-notices"}, tool_call_id="call")])
 
-    features = RuntimeFeatures("turn-notices")
+    features = RuntimeFeatures("turn-notices", defaults={"execution": {"retain_history": True}})
     features.model("default", _Models(_UsageFunctionModel(respond)))
-    features.capability(ExecutionCapability(retain_history=True))
     if backend != "memory":
-        features.capability(StepPersistenceCapability())
+        features.capability(SessionCapability(checkpoints=True))
     features.capability(TraceCapability())
     features.tool(lookup, effect_policy="none")
     features.agent("default", model="default", allow_tools=("lookup",))
@@ -150,7 +149,7 @@ async def test_explicit_same_id_recovery_notifies_terminal_once_without_new_admi
         rejected_notices = []
         unsubscribe = sessions.observe_turn_lifecycle(rejected_notices.append)
         try:
-            assert not await sessions.recover_turn("session", turn.key.turn_id, principal=actor)
+            assert not await sessions.recover_turn("session", turn.key.turn_id, mode="resume", principal=actor)
             await asyncio.wait_for(runtime.handoff(), 10)
             assert not rejected_notices
         finally:
@@ -166,12 +165,12 @@ async def test_explicit_same_id_recovery_notifies_terminal_once_without_new_admi
         unsubscribe = sessions.observe_turn_lifecycle(notices.append)
         unsubscribe_frames = sessions.observe_turn_session("session", frames.append)
         try:
-            assert await sessions.recover_turn("session", turn.key.turn_id, principal=actor)
+            assert await sessions.recover_turn("session", turn.key.turn_id, mode="resume", principal=actor)
             replay = await sessions.start("session", "ask", agent="default", principal=actor, idempotency_key="turn")
             assert replay.key == turn.key
             result = await replay.wait_final(timeout_seconds=10)
             assert result.view["output"] == {"text": "recovered answer"}
-            assert not await sessions.recover_turn("session", turn.key.turn_id, principal=actor)
+            assert not await sessions.recover_turn("session", turn.key.turn_id, mode="resume", principal=actor)
             current = await runtime.history.turn_session_state("session", principal=actor)
             assert current["active_turn_id"] is None and current["last_turn_no"] == 1
             saved = await runtime.history.turn_result("session", turn.key.turn_id, principal=actor)

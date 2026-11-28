@@ -10,7 +10,7 @@ import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepEvent
 
-from linktools.ai.capability import StepPersistenceCapability
+from linktools.ai.capability import SessionCapability
 from linktools.ai.core import Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistencePlan, PersistenceStorage
@@ -51,7 +51,7 @@ async def test_split_handoff_unknown_requires_source_confirmation(
         return ModelResponse(parts=[TextPart("durable answer")])
 
     features = RuntimeFeatures("application")
-    features.capability(StepPersistenceCapability(), scope="runtime")
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
     features.agent("default", model="default", allow_tools=(), allow_subagents=())
     original_publish = _CanonicalSplitStep.publish_terminal
     original_terminal = _RegenerableTurnRunner._terminal
@@ -116,7 +116,7 @@ async def test_split_handoff_unknown_requires_source_confirmation(
                 assert (await turns.get_session(key.session_id))["active_turn_id"] == key.turn_id.encode()
 
     step_only = RuntimeFeatures("application")
-    step_only.capability(StepPersistenceCapability(), scope="runtime")
+    step_only.capability(SessionCapability(checkpoints=True), scope="runtime")
     async with (
         Persistence.open("split-receipt", storage=storage) as persistence,
         Runtime.open(persistence=persistence, features=step_only, authorization=_HostAuthorization()) as runtime,
@@ -128,8 +128,8 @@ async def test_split_handoff_unknown_requires_source_confirmation(
                     **turns._turn_values(key), generation=1,
                 ).values(lease_until=0))
                 assert expired.rowcount == 1
-            assert await runtime.sessions.recover_turn(key.session_id, key.turn_id, principal=principal)
-        assert not await runtime.sessions.recover_turn(key.session_id, key.turn_id, principal=principal)
+            assert await runtime.sessions.recover_turn(key.session_id, key.turn_id, mode="resume", principal=principal)
+        assert not await runtime.sessions.recover_turn(key.session_id, key.turn_id, mode="resume", principal=principal)
         row = await turns.get_turn(key)
         assert (row["generation"], row["state"]) == (1, "succeeded")
         assert row["split_source_receipt"] == sealed.pin.receipt_id.encode()

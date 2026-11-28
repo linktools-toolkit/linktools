@@ -14,7 +14,6 @@ from pydantic_ai.models.function import AgentInfo
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.asset import AssetKey, AssetStore, SqlAssetBackend
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import ExecutionStatus, canonical_json_bytes, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionRecord, ExecutionRecoveryDetail
@@ -29,6 +28,7 @@ from linktools.ai.spec import RepositoryInstructionDocument, RepositoryInstructi
 from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, StorageOverlay, StoredPayload
 from linktools.ai.workspace import Workspace
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features, native_checkpoint, workspace_features
 from .test_archive_closure import Offline
 from .test_incremental_projection_boundaries import _storage
@@ -239,7 +239,7 @@ async def test_rule_overlay_handoff_recovers_original_sql_asset_and_workspace_by
             if seed:
                 await assets.put(key, b"---\nscope: pkg\n---\nORIGINAL_ASSET_RULE")
             features = workspace_features("rules", workspace=Workspace.load(tmp_path / "workspace"), assets=assets)
-            features.capability(ExecutionCapability(retain_history=True))
+            configure_execution(features, retain_history=True)
             features.capability(native_checkpoint())
             features.agent("reader", allow_tools=("read_file",), allow_skills=(), allow_subagents=())
             model_features(_Models(_UsageFunctionModel(model)), features)
