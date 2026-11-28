@@ -133,6 +133,8 @@ class Command(StatusCommands, BaseCommandGroup):
     @subcommand("up", order=ROOT_COMMAND_ORDER["up"], help="deploy installed containers")
     @subcommand_argument("--pull", action=BooleanOptionalAction,
                          help="always attempt to pull a newer version of the image")
+    @subcommand_argument("--prune", action="store_true", default=False,
+                         help="run docker system prune --force after deployment (daemon-wide)")
     @subcommand_argument("--dry-run", dest="dry_run", action="store_true", default=False,
                          help="show what would happen, without doing it")
     @subcommand_argument("--json", dest="as_json", action="store_true", default=False,
@@ -142,12 +144,14 @@ class Command(StatusCommands, BaseCommandGroup):
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_installed_container_names))
     def on_command_up(self, names: "list[str] | None" = None, pull: bool = False,
-                      dry_run: bool = False, report: bool = False, as_json: bool = False) -> None:
-        if maybe_dry_run(_shared.manager, self.logger, "up", names=names, pull=pull, dry_run=dry_run, as_json=as_json):
+                      dry_run: bool = False, report: bool = False, as_json: bool = False,
+                      prune: bool = False) -> None:
+        if maybe_dry_run(_shared.manager, self.logger, "up", names=names, pull=pull, dry_run=dry_run,
+                         as_json=as_json, prune=prune):
             return
         # Root `up` and `compose` (final-model rendering) share one
         # implementation (ComposeOperations) so they cannot drift from each other.
-        _shared.manager.compose_operations.up(names=names, pull=pull, report=report)
+        _shared.manager.compose_operations.up(names=names, pull=pull, report=report, prune=prune)
 
     @subcommand("restart", order=ROOT_COMMAND_ORDER["restart"], help="restart installed containers")
     @subcommand_argument("--pull", action=BooleanOptionalAction,

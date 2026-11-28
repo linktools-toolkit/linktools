@@ -53,12 +53,15 @@ def render_plan(logger: "logging.Logger", plan: "ExecutionPlan") -> None:
 
 def maybe_dry_run(manager: "ContainerManager", logger: "logging.Logger", action: str,
                   names: "list[str] | None" = None, pull: bool = False,
-                  dry_run: bool = False, as_json: bool = False) -> bool:
+                  dry_run: bool = False, as_json: bool = False, prune: bool = False) -> bool:
     if as_json and not dry_run:
         raise ContainerError("--json requires --dry-run")
     if not dry_run:
         return False
     plan = manager.planner.plan(action, names=names, pull=pull)
+    if prune:
+        plan = dataclasses.replace(plan, warnings=(*plan.warnings,
+            "After successful deployment, docker system prune --force will clean the entire Docker daemon without prompting."))
     if as_json:
         print(json.dumps(_plan_to_dict(plan), indent=2, sort_keys=True))
     else:

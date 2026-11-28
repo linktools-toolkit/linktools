@@ -8,9 +8,11 @@ import subprocess
 import sys
 import textwrap
 
+import pytest
 import yaml
 
 from _harness import configure_builtin_inputs
+from linktools.errors import ConfigError
 from linktools.cntr.ext import Authelia
 
 
@@ -111,3 +113,29 @@ def test_resolved_oidc_allowlist_order_is_stable(fresh_manager, monkeypatch):
     # The native secret expression is evaluated later by Authelia.
     rendered = "\n".join(line for line in first[1].splitlines() if "- key: {{ secret" not in line)
     assert yaml.safe_load(rendered)["identity_providers"]["oidc"]["clients"][0]["redirect_uris"] == list(first[0])
+
+
+def test_generated_authelia_uses_shared_nginx_root(fresh_manager, monkeypatch):
+    configure_builtin_inputs(fresh_manager)
+    fresh_manager.config.set("NGINX_ROOT_DOMAIN", "configured.example.test")
+    container = fresh_manager.containers["authelia"]
+    files = {}
+    monkeypatch.setattr(container, "prepare_files", lambda values: files.update(values))
+    _ = container.config_path
+    config = yaml.safe_load(files["configuration.yml"])
+    two_factor = yaml.safe_load(files["configuration.2fa.yml"])
+    acl = yaml.safe_load(files["configuration.acl.yml"])
+    assert config["session"]["cookies"][0]["domain"] == "configured.example.test"
+    assert two_factor["totp"]["issuer"] == "configured.example.test"
+    assert acl["access_control"]["rules"][-1]["domain"] == [
+        "configured.example.test", "*.configured.example.test",
+    ]
+
+
+def test_authelia_does_not_publish_configuration_with_placeholder_root(fresh_manager, monkeypatch):
+    configure_builtin_inputs(fresh_manager)
+    fresh_manager.config.set("NGINX_ROOT_DOMAIN", "localhost")
+    container = fresh_manager.containers["authelia"]
+    monkeypatch.setattr(container, "prepare_files", lambda *args: pytest.fail("configuration prepared"))
+    with pytest.raises(ConfigError, match="Configure NGINX_ROOT_DOMAIN.*HTTPS"):
+        _ = container.config_path

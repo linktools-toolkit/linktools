@@ -236,6 +236,37 @@ def test_preparation_images_check_apply_and_notification_have_fixed_order(tmp_pa
     assert manager.running_state.get_persisted() == ["app"]
 
 
+@pytest.mark.parametrize("outcome", ["enabled", "failed", "disabled"])
+def test_up_invokes_native_system_prune_only_after_success(tmp_path, outcome):
+    manager = setup_case(tmp_path, [("app", {"app": {"image": "app:latest"}})], running=("app",))
+    manager.compose_runner.verify_services_started = (
+        lambda context, services: manager.docker_inspector.get_project_state(None))
+
+    def create_process(*args, **kwargs):
+        assert not kwargs
+        def call():
+            manager.events.append(("docker", args))
+            return 0
+        return SimpleNamespace(call=call)
+
+    manager.runtime = SimpleNamespace(create_docker_process=create_process)
+    if outcome == "failed":
+        def fail(context):
+            raise ContainerError("after-start failed")
+        manager.containers["app"].on_started = fail
+        with pytest.raises(ContainerError, match="after-start failed"):
+            manager.compose_operations.up(["app"], pull=True, prune=True)
+    else:
+        manager.compose_operations.up(["app"], pull=True, prune=outcome == "enabled")
+
+    docker_calls = [event for event in manager.events if event[0] == "docker"]
+    if outcome == "enabled":
+        assert docker_calls == [("docker", ("system", "prune", "--force"))]
+        assert manager.events.index(("after-callback", "app")) < manager.events.index(docker_calls[0])
+    else:
+        assert not docker_calls
+
+
 def test_failed_check_does_not_stop_or_apply_restart_targets(tmp_path):
     manager = setup_case(tmp_path, [("app", {"app": {"image": "app:new"}})], running=("app",))
     manager.containers["app"].on_check = lambda context: (_ for _ in ()).throw(ContainerError("invalid candidate"))

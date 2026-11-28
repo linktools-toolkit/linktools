@@ -166,6 +166,7 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
     binary = os.environ.get("CNTR_TEST_NGINX") or shutil.which("nginx")
     if not binary or not shutil.which("openssl"):
         pytest.skip("Native nginx with SSL, realip, auth_request and openssl is required")
+    fresh_manager.config.set("NGINX_ROOT_DOMAIN", "app.test")
     nginx = fresh_manager.containers["nginx"]
     events = []
     auth_responses = []
@@ -239,8 +240,8 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
         auth_port = backend("auth")
         http_port, https_port, health_port = (_reserve_port(reservations) for _ in range(3))
         config = {"NGINX_HTTP_PORT": http_port, "NGINX_HTTPS_PORT": https_port,
-                  "NGINX_WAF_PORT": origin_port, "NGINX_ROOT_DOMAIN": "test",
-                  "SAFELINE_SUBNET_PREFIX": "127.0.0"}
+                  "NGINX_WAF_PORT": origin_port,
+                  "SAFELINE_ORIGIN_SUBNET_PREFIX": "127.0.0"}
         producer = SimpleNamespace(name="native-fixture", config=Config(None, ConfigSchema(), [DictSource(config)]))
         site = _native_site(app_port)
 
@@ -267,6 +268,7 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
         root = root.rsplit("}", 1)[0] + """
         server {
             listen 127.0.0.254:PORT;
+            location = /waf-unavailable { return 503; }
             location / {
                 proxy_bind 127.0.0.254;
                 proxy_http_version 1.1;
@@ -302,15 +304,17 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
         server_text += nginx._render_site_template(
             producer, nginx.get_source_path("templates", "server.conf"), plain_site,
             business=render("default.conf", plain_site))
-        server_text = server_text.replace("location @waf {", "location @waf { proxy_bind 127.0.0.253;")
+        server_text = server_text.replace("/run/nginx-waf-", str(tmp_path) + "/waf-")
+        server_text = server_text.replace("proxy_pass http://127.0.0.254:",
+                                          "proxy_bind 127.0.0.253; proxy_pass http://127.0.0.254:")
         server_text = server_text.replace("/etc/certs/live/", str(tmp_path) + "/")
         server_text = server_text.replace("listen " + str(origin_port) + " ",
                                           "listen 127.0.0.253:" + str(origin_port) + " ")
         server_text = server_text.replace("http://authelia:9091", "http://127.0.0.1:" + str(auth_port))
         (tmp_path / "sites/native.conf").write_text(server_text)
         subprocess.check_call(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-                               "-subj", "/CN=app.test", "-keyout", str(tmp_path / "test_key.pem"),
-                               "-out", str(tmp_path / "test_fullchain.pem"), "-days", "1"],
+                               "-subj", "/CN=app.test", "-keyout", str(tmp_path / "app.test_key.pem"),
+                               "-out", str(tmp_path / "app.test_fullchain.pem"), "-days", "1"],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         command = [binary, "-p", str(tmp_path) + "/", "-c", str(tmp_path / "nginx.conf")]
         validation = subprocess.run(command + ["-t"], check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -388,6 +392,13 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
             status, _ = request("/private", {"X-Test-Auth-Status": str(denied)})
             assert status == (302 if denied == 401 else denied)
             assert "app" not in [event[0] for event in events]
+        events.clear()
+        status, _ = request("/waf-unavailable")
+        assert status == 503
+        assert events == []
+        status, _ = request("/waf-public/private", {"X-Test-Auth-Status": "401"})
+        assert status == 302
+        assert [event[0] for event in events] == ["auth"]
         status, data = request("/fallback", {"X-Test-Auth-Status": "403"})
         assert status == 200 and json.loads(data)["headers"]["Authorization"] == "Bearer client"
         assert "X-Auth-User" not in json.loads(data)["headers"]
@@ -511,11 +522,12 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
 
 
 def test_native_fixture_template_contract_without_native_processes(fresh_manager):
+    fresh_manager.config.set("NGINX_ROOT_DOMAIN", "app.test")
     nginx = fresh_manager.containers["nginx"]
     producer = SimpleNamespace(name="native-fixture", config=Config(None, ConfigSchema(), [DictSource({
         "NGINX_HTTP_PORT": 8080, "NGINX_HTTPS_PORT": 8443,
-        "NGINX_WAF_PORT": 8081, "NGINX_ROOT_DOMAIN": "test",
-        "SAFELINE_SUBNET_PREFIX": "127.0.0",
+        "NGINX_WAF_PORT": 8081,
+        "SAFELINE_ORIGIN_SUBNET_PREFIX": "127.0.0",
     })]))
     site = _native_site(8082)
     business = nginx._render_site_template(producer, nginx.get_source_path("templates", "default.conf"), site)
@@ -523,7 +535,7 @@ def test_native_fixture_template_contract_without_native_processes(fresh_manager
         producer, nginx.get_source_path("templates", "server.conf"), site, business=business)
     root = nginx._render_site_template(producer, nginx.get_source_path("templates", "nginx.conf"),
         SimpleNamespace(template_vars={"generation_id": "native-test", "waf": True, "site_files": ("sites/native.conf",)}))
-    assert "app.test" in server
+    assert "ssl_certificate /etc/certs/live/app.test_fullchain.pem;" in server
     assert "sites/native.conf" in root
     assert "http://127.0.0.1:8082" in business
 
@@ -534,6 +546,7 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
     if not binary or not shutil.which("openssl"):
         pytest.skip("Native nginx and openssl are required")
 
+    fresh_manager.config.set("NGINX_ROOT_DOMAIN", "app.test")
     nginx = fresh_manager.containers["nginx"]
 
     class Backend(http.server.BaseHTTPRequestHandler):
@@ -577,7 +590,6 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
         http_port, https_port = (_reserve_port(reservations) for _ in range(2))
         config = {
             "NGINX_HTTP_PORT": http_port, "NGINX_HTTPS_PORT": https_port,
-            "NGINX_ROOT_DOMAIN": "test",
         }
         producer = SimpleNamespace(name="shared-native", config=Config(None, ConfigSchema(), [DictSource(config)]))
 
@@ -626,8 +638,8 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
         (tmp_path / "nginx.conf").write_text(root)
         subprocess.check_call([
             "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-            "-subj", "/CN=app.test", "-keyout", str(tmp_path / "test_key.pem"),
-            "-out", str(tmp_path / "test_fullchain.pem"), "-days", "1"],
+            "-subj", "/CN=app.test", "-keyout", str(tmp_path / "app.test_key.pem"),
+            "-out", str(tmp_path / "app.test_fullchain.pem"), "-days", "1"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         command = [binary, "-p", str(tmp_path) + "/", "-c", str(tmp_path / "nginx.conf")]
         check = subprocess.run(command + ["-t"], capture_output=True, text=True)
@@ -670,9 +682,9 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
         assert app.paths == app_paths
 
 
-@pytest.mark.parametrize("waf", [False, True])
+@pytest.mark.parametrize("waf,bypass", [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize("limit,maximum", [(None, 1024 * 1024), ("10m", 10 * 1024 * 1024), (0, None)])
-def test_native_body_limits_with_fixed_length_and_chunked_requests(fresh_manager, tmp_path, waf, limit, maximum):
+def test_native_body_limits_with_fixed_length_and_chunked_requests(fresh_manager, tmp_path, waf, bypass, limit, maximum):
     binary = os.environ.get("CNTR_TEST_NGINX") or shutil.which("nginx")
     if not binary:
         pytest.skip("Native nginx with realip is required")
@@ -708,19 +720,21 @@ def test_native_body_limits_with_fixed_length_and_chunked_requests(fresh_manager
         threading.Thread(target=app.serve_forever, daemon=True).start()
         public_port, origin_port = (_reserve_port(reservations) for _ in range(2))
         config = {"NGINX_HTTP_PORT": public_port, "NGINX_WAF_PORT": origin_port,
-                  "SAFELINE_SUBNET_PREFIX": "127.0.0"}
+                  "SAFELINE_ORIGIN_SUBNET_PREFIX": "127.0.0"}
         producer = SimpleNamespace(name="body-fixture", config=Config(None, ConfigSchema(), [DictSource(config)]))
         site = _native_site(app.server_port)
         site.https, site.waf, site.auth = False, waf, False
-        site.waf_bypass = (r"^/bypass",)
+        site.waf_bypass = (r"^/bypass",) if bypass else ()
         site.template_vars = {} if limit is None else {"client_max_body_size": limit}
         business = nginx._render_site_template(
             producer, nginx.get_source_path("templates", "default.conf"), site)
-        # Explicit native limits must override the server policy on both hops.
+        # A business location can lower or raise the inherited site limit.
         business += "\nlocation /small { client_max_body_size 1m; proxy_pass " + site.proxy + "; }"
+        business += "\nlocation /upload { client_max_body_size 2m; proxy_pass " + site.proxy + "; }"
         business += "\nlocation /bypass/unlimited { client_max_body_size 0; proxy_pass " + site.proxy + "; }"
         server = nginx._render_site_template(
             producer, nginx.get_source_path("templates", "server.conf"), site, business=business)
+        server = server.replace("/run/nginx-waf-", str(tmp_path) + "/waf-")
         server = server.replace("listen " + str(origin_port) + " ",
                                 "listen 127.0.0.253:" + str(origin_port) + " ")
         if waf:
@@ -786,10 +800,14 @@ server {
                 if expected == 200:
                     assert received[-1] == (size, "1" if waf else None)
             assert request(1536 * 1024, chunked, "/small") == 413
-            bypass_size = 1536 * 1024
-            expected = 413 if maximum is not None and bypass_size > maximum else 200
-            assert request(bypass_size, chunked, "/bypass/inherited") == expected
-            if expected == 200:
+            assert request(1536 * 1024, chunked, "/upload") == 200
+            assert received[-1] == (1536 * 1024, "1" if waf else None)
+            assert request(2 * 1024 * 1024 + 1, chunked, "/upload") == 413
+            if bypass:
+                bypass_size = 1536 * 1024
+                expected = 413 if maximum is not None and bypass_size > maximum else 200
+                assert request(bypass_size, chunked, "/bypass/inherited") == expected
+                if expected == 200:
+                    assert received[-1] == (bypass_size, None)
+                assert request(bypass_size, chunked, "/bypass/unlimited") == 200
                 assert received[-1] == (bypass_size, None)
-            assert request(bypass_size, chunked, "/bypass/unlimited") == 200
-            assert received[-1] == (bypass_size, None)

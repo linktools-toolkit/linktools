@@ -6,6 +6,8 @@ Docker 容器部署和管理工具，为 homelab 及服务器环境提供统一�
 
 `ct-cntr up --pull safeline sublink omniroute` 只刷新和构建这三个容器自身的服务，不自动拉取或构建 nginx、Authelia 等依赖。关联且正在运行的集成消费者会生成候选配置，仅生成挂载变化时随本次 up 重建；其已应用镜像和其他配置保持不变。未运行消费者不自动启动。已有依赖只做就绪检查；缺少必要依赖时会在镜像操作和停止容器之前提示，把需要的容器显式加到命令中即可。`restart` 和 `exec <容器> up/restart` 遵循相同边界。
 
+`ct-cntr up --pull --prune [容器名…]` 在部署成功后运行 [`docker system prune --force`](https://docs.docker.com/reference/cli/docker/system/prune/)，不再提示确认，不加 `-a` 或 `--volumes`。清理范围是整个 Docker daemon，可能清掉其他项目的已停止容器、未使用的网络、悬空镜像及构建缓存，不限于指定容器。`--dry-run` 只提示，不执行。
+
 未指定容器的 `ct-cntr up` 仍处理完整项目。依赖关系不会从 Compose 模型删除；若共享服务作者、运行中的重启依赖或 namespace 绑定必须联合操作，会明确要求共同选择，不能静默扩大范围。
 
 ## 开始使用
@@ -324,13 +326,22 @@ URL/端口参数接收字面值或 ConfigValue；配置键显式使用 ConfigRef
 
 ### Nginx 与 SafeLine 网络
 
-SafeLine 独立拥有 `safeline-ce` 网络，Tengine 和其他 SafeLine 服务只加入这个网络。
-启用 SafeLine 时，Nginx 额外加入该网络，固定为 `.253`；Tengine 固定为 `.254`。
-Nginx 保留自己的应用网络，但 Tengine 不加入它。网段沿用 `SAFELINE_SUBNET_PREFIX`，默认 `172.22.242`。
+SafeLine 管理网 `safeline-ce` 使用 `SAFELINE_SUBNET_PREFIX`，默认 `172.22.222`。
+已有 `172.22.242.0/24` 网络若不迁移，升级前请显式设置 `SAFELINE_SUBNET_PREFIX=172.22.242`。
+Nginx 不加入管理网。只有管理服务额外加入现有 `nginx` 网络，管理域名和 SSO 仍通过 Nginx 反代。
 
-回源契约为 `http://nginx:<NGINX_WAF_PORT>`，默认 `http://nginx:8000`。
-固定地址避免容器重建后双向代理仍使用旧 IP；两者不共享网络命名空间，Nginx 健康检查不等待 Tengine。
+SafeLine 另建私有桥接网 `safeline-origin`，只接入 Nginx（`.253`）和 Tengine（`.254`）。
+业务网默认 `172.22.223.0/24`；与现有网络冲突时，在部署前修改
+`SAFELINE_ORIGIN_SUBNET_PREFIX`。雷池防护站点的源站填该网的 Nginx 固定地址，
+默认 `http://172.22.223.253:8000`；已保存的 `http://nginx:8000` 需在雷池中改一次，
+不会自动迁移。部署时同时应用 Nginx 和 SafeLine 的配置，使两端接入同一业务网。
+
 回源端口只走业务/认证路由，不再次进入 WAF，也不跳转 HTTPS。入口覆盖 `X-Forwarded-For` 为真实客户端地址；SafeLine 保留 Host 并按原生 `$proxy_add_x_forwarded_for` 追加代理地址。
 该端口不发布到宿主机，仍仅允许 Tengine 的精确 TCP 来源；realip 递归仅信任 `.253`、`.254` 两个代理，不信任整个网段。无需私有回源头，也不因缺少客户端身份直接返回 400；认证与业务按自身规则处理。
 不能把回源指向 Nginx 的公开入口，否则会形成循环。
+
+SafeLine 首次渲染时生成并保存两份独立的内部凭据：Detector、Luigi 和 FVM 共用
+`SAFELINE_DETECTOR_MGMT_TOKEN`，管理服务和 Tengine 共用
+`SAFELINE_MGT_INTERNAL_TOKEN`。它们不使用网页 API Token。升级时用更新后的 Compose
+重建相关 SafeLine 容器，单纯重启不会更新容器环境。
 详见 [网络与回源契约](docs/integrations.md#nginx-and-safeline-networks)。

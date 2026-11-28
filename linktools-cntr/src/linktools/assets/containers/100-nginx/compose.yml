@@ -4,7 +4,7 @@ services:
       args:
         NGINX_TAG: '{{ NGINX_TAG }}'
 #     {% if NGINX_HTTPS_ENABLE %}
-        NGINX_ROOT_DOMAIN: {{ config.get('NGINX_ROOT_DOMAIN') | tojson }}
+        NGINX_ROOT_DOMAIN: {{ (NGINX_ROOT_DOMAIN ~ '') | tojson }}
         NGINX_CERT_DOMAINS: {{ "\n".join(container.acme_ssl_domains) | tojson }}
         ACME_SERVER: {{ config.get('ACME_SERVER') | tojson }}
         ACME_DNS_API: {{ config.get('ACME_DNS_API') | tojson }}
@@ -40,10 +40,8 @@ services:
     networks:
       nginx:
 #     {% if containers["safeline"] in manager.installed_state.get(resolve=True) %}
-      safeline-ce:
-        ipv4_address: '{{ SAFELINE_SUBNET_PREFIX }}.253'
-        aliases:
-          - nginx-origin
+      safeline-origin:
+        ipv4_address: '{{ SAFELINE_ORIGIN_SUBNET_PREFIX }}.253'
 #     {% endif %}
 
 networks:

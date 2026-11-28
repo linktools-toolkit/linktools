@@ -384,8 +384,22 @@ returns a lazy configuration provider. For example:
 APP_DOMAIN = ConfigField(provider=Nginx.domain(self))
 ```
 
-It keeps the shared nginx root-domain, wildcard and disabled-provider behavior.
-The former `BaseContainer.get_nginx_domain` method is removed.
+Use this provider for a site's routing name, not to decide whether a public
+URL exists. An empty root disables inherited sites. The default root `_` is
+an unnamed nginx routing name, not a public hostname. Wildcard routing
+requires a configured root and does not prefix an empty root, `_`, or
+`localhost`. A private DNS suffix such as `lan` works for HTTP
+routes (for example, `safeline.lan`), but not for the built-in HTTPS
+certificate.
+
+The built-in HTTPS configuration requires a DNS root such as `example.com`
+even when wildcard routing is off. Nginx validates that input before the
+certificate build. HTTP route placeholders are not certificate names.
+Read the shared `NGINX_ROOT_DOMAIN` field directly in container code and
+templates. It preserves HTTP routing values (`""`, `_`, and `localhost`);
+they are not certificate names. Use Nginx's DNS validation when a consumer
+specifically requires a DNS name, rather than making each consumer interpret
+the routing placeholders.
 
 Import the URL factories from `linktools.cntr.ext`:
 
@@ -427,7 +441,10 @@ raises ConfigError without reading paths or queries.
 the snapshot. Every Config.resolve performs the lookup; the reference does not
 cache a resolved site. For immediate site properties, use
 `config.resolve(ResolvedSite.find(producer)).get_url(default="")`.
-Missing, foreign or ambiguous references raise ConfigError at resolution time.
+Use this to get a public main-site URL rather than testing raw root values
+such as `("_", "")`. For a producer with multiple sites, pass the original
+site declaration as the second argument. Missing, foreign or ambiguous
+references raise ConfigError at resolution time.
 Declared disabled sites or absent nginx produce an empty URL. There is no
 separate synchronous alias.
 These factories never register hooks or write configuration.
@@ -451,7 +468,8 @@ templates retain only the explicit context described below.
   requires the global capability; missing providers fail closed
 - Browser authentication requires HTTPS
 - `auth_bypass` and `waf_bypass` independently match the normalized main-request
-  path without query; no application path is implicitly trusted
+  path without query. A WAF exception preserves application authentication and
+  does not change request limits on the origin.
 - `auth_headers` is literal data, injected only after actual successful
   authentication; bypass and explicit native auth-off preserve client tokens
 - Native access rules belong to `Authelia.access`, independently of request authentication
@@ -508,7 +526,7 @@ must not mutate or restore historical derived ACL/OIDC settings.
 ## Request body limits
 
 Template variable declarations are not mutated; ConfigValue values are resolved
-only when the template reads their key. The shared `nginx/params.conf` template uses an
+only when the template reads their key. The business server template uses an
 explicit `client_max_body_size` key when present, otherwise `1m`, matching
 nginx's native default. The common proxy snippet does not silently raise that
 limit. Configure an individual site's server policy using the existing endpoint
@@ -519,8 +537,9 @@ endpoint(self, domain=domain, proxy="http://app:8080",
          template_vars={"client_max_body_size": "10m"})
 ```
 
-The value applies to the public server and its WAF origin server; the WAF
-forwarding location inherits it. Sites sharing a hostname merge their explicitly
+Without WAF, the public server applies this value. With WAF, the origin applies
+it for both ordinary traffic and explicit bypass routes; the forwarding ingress
+does not enforce a second Nginx body-size limit. Sites sharing a hostname merge their explicitly
 provided template variables by key for the server template. The same key must
 have equal values; different keys coexist and omitted keys do not participate.
 For example, an omitted limit and `10m` produce a shared `10m` server limit,
@@ -536,19 +555,20 @@ not mutated. A present key is passed through, so invalid values remain subject
 to native nginx validation. Native location directives still override it, including an
 explicit `0` (no nginx body-size limit). The former proxy-snippet default was
 `10240m`; hostname groups with no explicit limit now use `1m`. Other existing explicit
-location directives remain unchanged. For a larger native location behind WAF,
-the site limit must also admit that request on the forwarding hop; retain lower
-limits explicitly on other locations when raising the site limit. SafeLine and
-the application can impose their own limits; this setting does not disable or
-bypass WAF inspection.
+location directives remain unchanged. Raising a single business location's
+limit does not require raising another Nginx limit on the forwarding ingress.
+SafeLine and the application can impose their own limits; this setting does not
+change how much of a request body SafeLine inspects.
 
 ## Shared server defaults
 
-`nginx/params.conf` defines request-body limits, request/response buffering,
-cache policy, body-buffer size, and proxy/client timeouts with ordinary
-`template_vars.get(...)` defaults. Each business server and WAF origin includes
-it once. Override a shared default through the existing template variables;
-keep path-specific native directives inside their locations.
+`nginx/params.conf` defines request/response buffering, cache policy, body-buffer
+size, and proxy/client timeouts with ordinary `template_vars.get(...)` defaults.
+A site without WAF uses it once; a site with WAF shares the same site defaults
+between the forwarding ingress and the business origin. Override a shared
+default through the existing template variables; keep path-specific native
+directives inside business locations. A location override at the origin does not
+change the forwarding ingress's timeout, buffering, or cache policy.
 
 Custom templates must remove location-level includes of `nginx/params.conf`.
 Otherwise their local defaults can override the hostname's merged settings,
@@ -635,32 +655,34 @@ upstreams to Docker runtime DNS.
 
 ### Nginx and SafeLine networks
 
-SafeLine owns the `safeline-ce` bridge and its existing `SAFELINE_SUBNET_PREFIX`
-(default `172.22.242`). All SafeLine services, including Tengine and management,
-join only this bridge. When SafeLine is enabled, Nginx also joins it at `.253`,
-while retaining its own `nginx` bridge for application backends. Tengine keeps
-its fixed `.254` address. Nginx only references SafeLine's network; it does not
-own or redefine its IPAM. Dependency-only SafeLine installations use the same
-attachment rules as direct installations.
+SafeLine owns both bridges. The management bridge `safeline-ce` uses
+`SAFELINE_SUBNET_PREFIX` (default `172.22.222`). All SafeLine services join it;
+Nginx does not join it. Only SafeLine's management service additionally joins
+the existing `nginx` network so the management UI proxy and SSO keep working.
+The internal `safeline-origin` bridge uses `SAFELINE_ORIGIN_SUBNET_PREFIX`
+(default `172.22.223`). Only Nginx (`.253`) and Tengine (`.254`) join it.
+Choose a non-overlapping origin subnet before deployment. Nginx owns its
+existing `nginx` network, not either SafeLine bridge. Dependency-only installations use the same
+attachment rules.
 
-The SafeLine origin contract remains `http://nginx:<NGINX_WAF_PORT>` (default
-`http://nginx:8000`). Compose supplies the `nginx` service DNS name on the shared
-bridge; `nginx-origin` is an optional additional alias. The fixed `.253`/`.254`
-addresses prevent either hop from retaining an obsolete peer IP after container
-recreation. A normal restart usually retains its endpoint; recreation replaces
-it. Neither service borrows the other's network namespace. Nginx's Unix-socket
-healthcheck does not wait for Tengine; only Tengine's startup dependency points
-to healthy Nginx.
-
-Public requests enter Nginx's HTTP/HTTPS listeners and WAF-protected requests
-are forwarded to Tengine at `.254:<NGINX_WAF_PORT>`. SafeLine returns them to
-Nginx's separate HTTP origin listener at `nginx:<NGINX_WAF_PORT>`. That listener
-runs the application/authentication routes without forwarding into WAF again.
+For WAF-enabled sites the public Nginx listener sends ordinary requests to
+Tengine's origin-network address at `.254:<NGINX_WAF_PORT>`. Set the SafeLine
+site upstream to the fixed Nginx address on that same network, by default
+`http://172.22.223.253:8000`. Nginx accepts TCP origin requests only from
+Tengine's exact address on the business network. Application routing and
+authentication run only at that origin. Explicit `waf_bypass` paths use a
+private, site-specific Unix socket on the same origin server, preserving the
+declared exception without exposing another TCP port or duplicating application
+routes. An unavailable Tengine does not fall back to this socket.
+Nginx applies client body limits where the business routes run. The WAF
+ingress does not impose a second limit that could mask a location override;
+SafeLine's own policies still apply.
 Nginx replaces incoming `X-Forwarded-For` with the actual client address before
 forwarding to SafeLine. SafeLine preserves Host and appends its incoming proxy
-address with `$proxy_add_x_forwarded_for`. The origin accepts only the exact
-Tengine TCP peer; recursive realip trusts only the two configured proxy addresses
-(`.253` and `.254`), not the entire subnet. Host, URI and method come from the
+address with `$proxy_add_x_forwarded_for`. The TCP origin accepts only the exact
+Tengine peer. Recursive realip trusts the two configured proxy addresses
+(`.253` and `.254`), not the entire subnet. The private socket, when present,
+accepts the forwarded address set by the local ingress. Host, URI and method come from the
 native request and are snapshotted before business rewrites. The origin scheme
 comes from the site's HTTPS setting: HTTPS sites redirect their public HTTP
 listener rather than serving application traffic there.
@@ -680,8 +702,11 @@ instead would create a forwarding loop. The WAF port is not published to the
 host. `SAFELINE_PORT=0` disables the optional management host port; its default
 remains `9200` mapped to `1443`.
 
-No new subnet setting or Nginx network recreation is required. Existing valid
-`http://nginx:<NGINX_WAF_PORT>` origins remain valid and are not rewritten.
+To keep an existing bridge on the previous default `172.22.242.0/24`, explicitly
+set `SAFELINE_SUBNET_PREFIX=172.22.242` before applying the updated configuration.
+Apply the updated Nginx and SafeLine configuration together. Manually change
+existing `http://nginx:<NGINX_WAF_PORT>` site upstreams to the fixed business
+address; stored SafeLine sites are not rewritten by LinkTools.
 Changing `SAFELINE_SUBNET_PREFIX` separately remains a network migration, not a
 partial service update. Check it against host/VPN/other Docker routes before
 changing it. Scoped SafeLine removal does not remove a bridge still used by

@@ -18,7 +18,5 @@ def test_nginx_wildcard_domain_falls_back_to_default(fresh_manager):
 
 
 def test_authelia_ldap_base_dn_uses_alias_target(fresh_manager):
-    # The alias target (LLDAP_BASE_DN) is always resolvable via its own
-    # LazyProvider, so this doesn't hit the fallback -- confirms the chain
-    # wrapper didn't break the normal (non-fallback) path either.
-    assert fresh_manager.config.get("AUTHELIA_LDAP_BASE_DN") == "dc=_"
+    fresh_manager.config.set("LLDAP_BASE_DN", "dc=team,dc=internal")
+    assert fresh_manager.config.get("AUTHELIA_LDAP_BASE_DN") == "dc=team,dc=internal"

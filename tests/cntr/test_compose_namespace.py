@@ -111,12 +111,14 @@ def test_compose_with_dependencies_expands_selection(monkeypatch, fresh_manager)
 
 
 @pytest.mark.parametrize("installed,waf", [(True, True), (True, False), (False, False)])
-@pytest.mark.parametrize("prefix", ["172.22.242", "172.29.171"])
-def test_nginx_joins_safeline_tengine_network(monkeypatch, fresh_manager, installed, waf, prefix):
+@pytest.mark.parametrize("prefix,origin,override", [("172.22.222", "172.22.223", False), ("172.29.171", "172.29.172", True)])
+def test_nginx_joins_safeline_tengine_network(monkeypatch, fresh_manager, installed, waf, prefix, origin, override):
     if not installed:
         fresh_manager.installed_state.remove("safeline")
     fresh_manager.config.set("NGINX_WAF_ENABLE", waf)
-    fresh_manager.config.set("SAFELINE_SUBNET_PREFIX", prefix)
+    if override:
+        fresh_manager.config.set("SAFELINE_SUBNET_PREFIX", prefix)
+        fresh_manager.config.set("SAFELINE_ORIGIN_SUBNET_PREFIX", origin)
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     recorded = _record(fresh_manager, monkeypatch)
 
@@ -136,23 +138,35 @@ def test_nginx_joins_safeline_tengine_network(monkeypatch, fresh_manager, instal
         owners = [name for name, model in models.items()
                   if "safeline-ce" in (model or {}).get("networks", {})]
         assert owners == ["safeline"]
-        assert attachments["safeline-ce"] == {
-            "ipv4_address": prefix + ".253", "aliases": ["nginx-origin"],
-        }
+        assert set(attachments) == {"nginx", "safeline-origin"}
+        assert attachments["safeline-origin"] == {"ipv4_address": origin + ".253"}
+        assert "safeline-origin" not in nginx["networks"]
+        assert networks["safeline-origin"]["internal"] is True
+        assert networks["safeline-origin"]["ipam"]["config"] == [{"subnet": origin + ".0/24"}]
         assert networks["safeline-ce"]["ipam"]["config"] == [
             {"gateway": prefix + ".1", "subnet": prefix + ".0/24"},
         ]
         safeline = models["safeline"]["services"]
         assert "nginx" not in safeline
-        assert all(set(spec["networks"]) == {"safeline-ce"} for spec in safeline.values())
+        assert f"SUBNET_PREFIX={prefix}" in safeline["safeline-mgt"]["environment"]
+        assert safeline["safeline-mgt"]["networks"] == {
+            "safeline-ce": {"ipv4_address": prefix + ".4"},
+            "nginx": None,
+        }
+        assert all(set(spec["networks"]) == {"safeline-ce"}
+                   for name, spec in safeline.items()
+                   if name not in {"safeline-mgt", "safeline-tengine"})
         assert "nginx" not in models["safeline"]["networks"]
-        assert safeline["safeline-tengine"]["networks"]["safeline-ce"] == {"ipv4_address": prefix + ".254"}
+        assert safeline["safeline-tengine"]["networks"] == {
+            "safeline-ce": {"ipv4_address": prefix + ".254"},
+            "safeline-origin": {"ipv4_address": origin + ".254"},
+        }
         assert "ports" not in safeline["safeline-tengine"]
         assert all("network_mode" not in spec for spec in safeline.values())
     else:
         assert "safeline" not in models
         assert set(attachments) == {"nginx"}
-        assert "safeline-ce" not in networks
+        assert not {"safeline-ce", "safeline-origin"} & networks.keys()
 
 
 def test_compose_format_json_is_forwarded(monkeypatch, fresh_manager):
@@ -180,13 +194,14 @@ def test_nginx_joins_safeline_network_when_installed_as_dependency(monkeypatch, 
     assert fresh_manager.installed_state.load_names() == ["portainer"]
     assert set(models) == {"nginx", "safeline", "portainer"}
     assert "safeline-ce" not in models["nginx"]["networks"]
-    prefix = fresh_manager.config.get("SAFELINE_SUBNET_PREFIX")
-    assert models["nginx"]["services"]["nginx"]["networks"]["safeline-ce"] == {
-        "ipv4_address": prefix + ".253",
-        "aliases": ["nginx-origin"],
+    origin = fresh_manager.config.get("SAFELINE_ORIGIN_SUBNET_PREFIX")
+    networks = models["nginx"]["services"]["nginx"]["networks"]
+    assert set(networks) == {"nginx", "safeline-origin"}
+    assert networks["safeline-origin"] == {"ipv4_address": origin + ".253"}
+    assert set(models["safeline"]["services"]["safeline-tengine"]["networks"]) == {
+        "safeline-ce", "safeline-origin",
     }
-    assert set(models["safeline"]["services"]["safeline-tengine"]["networks"]) == {"safeline-ce"}
-    assert "safeline-ce" in models["safeline"]["networks"]
+    assert {"safeline-ce", "safeline-origin"} <= models["safeline"]["networks"].keys()
 
 
 def test_compose_check_uses_quiet_flag(monkeypatch, fresh_manager):
@@ -217,3 +232,24 @@ def test_bare_config_shows_help_and_never_executes_compose():
     assert "deprecated" not in result.stderr
     assert "deprecated" not in result.stdout
     assert "services:" not in result.stdout
+
+
+def test_safeline_internal_tokens_are_shared_and_persisted(fresh_manager, tmp_path):
+    from _harness import make_manager
+
+    def tokens(manager):
+        services = manager.containers["safeline"].docker_compose["services"]
+
+        def env(service, name):
+            return dict(item.split("=", 1) for item in services["safeline-" + service]["environment"])[name]
+
+        detector = env("detector", "DETECTOR_MGMT_TOKEN")
+        assert all(env(name, "DETECTOR_MGMT_TOKEN") == detector for name in ("luigi", "fvm"))
+        management = env("mgt", "MGT_INTERNAL_TOKEN")
+        assert env("tengine", "TCD_MGT_TOKEN") == management
+        assert detector != management
+        assert all(len(bytes.fromhex(token)) == 32 for token in (detector, management))
+        return detector, management
+
+    original = tokens(fresh_manager)
+    assert tokens(make_manager(tmp_path / "data", tmp_path / "temp")) == original

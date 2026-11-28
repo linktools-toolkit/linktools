@@ -226,3 +226,41 @@ def test_url_helpers_invalid_base_skips_whole_path(factory):
     base = site if factory is load_nginx_url else 0 if factory is load_port_url else ""
     assert Config(None, ConfigSchema(), []).resolve(factory(base, path=path, queries=query)) == ""
     assert reads == []
+
+
+@pytest.mark.parametrize(("root", "wildcard", "name", "nginx_enabled", "expected"), [
+    ("", False, None, True, ""),
+    ("", True, None, True, ""),
+    ("", True, "child", True, ""),
+    ("_", True, None, True, "_"),
+    ("localhost", True, "child", True, "localhost"),
+    ("LOCALHOST", True, "child", True, "LOCALHOST"),
+    ("internal", True, "child", True, "child.internal"),
+    ("127.0.0.1", True, "child", True, "127.0.0.1"),
+    ("example.test", False, "child", True, "example.test"),
+    ("example.test", True, "", True, "example.test"),
+    ("example.test", True, None, True, "app.example.test"),
+    ("example.test", True, "child", True, "child.example.test"),
+    ("example.test", True, "child", False, ""),
+])
+def test_nginx_inherited_domain_never_qualifies_an_unset_root(root, wildcard, name, nginx_enabled, expected):
+    from linktools.core import ConfigField, DictSource
+
+    config = Config(None, ConfigSchema(), [DictSource({
+        "NGINX_ROOT_DOMAIN": root,
+        "NGINX_WILDCARD_DOMAIN": wildcard,
+        "NGINX_HTTPS_ENABLE": False,
+        "NGINX_HTTP_PORT": 8080,
+    })])
+    producer = SimpleNamespace(
+        name="app", config=config, get_config=config.get,
+        containers={"nginx": SimpleNamespace(enable=nginx_enabled)},
+        manager=SimpleNamespace(integration_snapshot={"nginx"} if nginx_enabled else set()),
+    )
+    config.schema.define(ConfigField("SITE_DOMAIN", provider=Nginx.domain(producer, name)))
+    site = ResolvedSite(producer, Nginx.site(ConfigRef("SITE_DOMAIN")), 0)
+
+    assert site.server_name == expected
+    assert site.enabled == bool(expected)
+    public_url = "" if expected in ("", "_") else "http://%s:8080" % expected
+    assert config.resolve(load_nginx_url(site)) == public_url

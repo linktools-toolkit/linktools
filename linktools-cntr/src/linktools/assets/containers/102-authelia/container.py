@@ -159,9 +159,9 @@ class Container(BaseContainer):
 
     @cached_property
     def acl_config(self) -> str:
+        root = self.get_config("NGINX_ROOT_DOMAIN")
         policy = "two_factor" if self.get_config("AUTHELIA_MIN_AUTH_LEVEL") > 1 else "one_factor"
         rules = list(self.acl_rules)
-        root = self.get_config("NGINX_ROOT_DOMAIN")
         rules.append({
             "domain": [root, "*." + root],
             "subject": ["group:admin", "group:admins", "group:super-admin"],

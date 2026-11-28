@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """LLDAP container definition."""
 import os
+import re
 from typing import TYPE_CHECKING
 
 from linktools import utils
@@ -24,7 +25,10 @@ class Container(BaseContainer):
     def fields(self) -> "dict[str, Any]":
         def get_base_dn(cfg: "ConfigResolver") -> str:
             domain = cfg.get("NGINX_ROOT_DOMAIN")
-            parts = domain.split(".")
+            parts = domain.split(".") if isinstance(domain, str) else ()
+            if (len(parts) < 2 or len(domain) > 253 or parts[-1].isdigit() or
+                    not all(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", part) for part in parts)):
+                return "dc=example,dc=org"
             return ",".join(f"dc={part}" for part in parts)
 
         return dict(
@@ -47,9 +51,8 @@ class Container(BaseContainer):
         ]
 
     def on_check(self, context: "OperationContext") -> None:
-        domain = self.get_config("NGINX_ROOT_DOMAIN")
-        if not domain or "." not in domain:
-            raise ContainerError("Invalid LDAP domain; configure NGINX_ROOT_DOMAIN")
+        if not self.get_config("LLDAP_BASE_DN"):
+            raise ContainerError("LLDAP base DN must not be empty")
         if not self.get_config("LLDAP_ADMIN_PASSWORD"):
             raise ContainerError("LLDAP administrator password must not be empty")
 

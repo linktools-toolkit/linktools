@@ -24,7 +24,7 @@ from linktools.types import MISSING
 
 if TYPE_CHECKING:
     from types import SimpleNamespace
-    from linktools.cntr.ext import ResolvedSite, Nginx
+    from linktools.cntr.ext import Nginx, ResolvedSite
     from collections.abc import Sequence
     from typing import Any, Callable, Iterator
     from linktools.core import Config
@@ -134,7 +134,7 @@ class Container(BaseContainer):
             NGINX_TAG="stable-alpine",
             NGINX_WILDCARD_DOMAIN=ConfigField.chain(AliasProvider("WILDCARD_DOMAIN"), default=False),
             NGINX_ROOT_DOMAIN=ConfigField.chain(
-                AliasProvider("ROOT_DOMAIN"), PromptProvider(cached=True), default="_",
+                AliasProvider("ROOT_DOMAIN"), PromptProvider(cached=True), cast=self._resolve_root_domain, default="_",
             ),
             NGINX_HTTP_PORT=ConfigField.chain(
                 AliasProvider("HTTP_PORT"), PromptProvider(cached=True), cast=int, default=80,
@@ -212,30 +212,44 @@ class Container(BaseContainer):
             values.append("export {}={}\n".format(key, shlex.quote(value)))
         return "".join(values)
 
+    @staticmethod
+    def _dns_name(value: str) -> bool:
+        labels = value.split(".")
+        return (len(value) <= 253 and not labels[-1].isdigit() and
+                all(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) for label in labels))
+
+    def _resolve_root_domain(self, domain: str) -> str:
+        if (not isinstance(domain, str) or "." not in domain or not self._dns_name(domain)) and (
+                self.enable and self.get_config("NGINX_HTTPS_ENABLE", type=bool)):
+            raise ValueError("Configure NGINX_ROOT_DOMAIN with a DNS domain for HTTPS.")
+        return domain
+
     @cached_property
     def acme_ssl_domains(self) -> "list[str]":
-        result = []
+        if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
+            return []
         domain = self.get_config("NGINX_ROOT_DOMAIN")
-        if domain:
-            result.extend([domain, f"*.{domain}"])
-        if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
-            for site in self.sites.values():
-                if not site.enabled or not site.https:
+        result = [domain, f"*.{domain}"]
+        for site in self.sites.values():
+            if not site.enabled or not site.https:
+                continue
+            for value in site.cert_domains:
+                if not value or value in result:
                     continue
-                for value in site.cert_domains:
-                    if value and value not in result:
-                        result.append(value)
+                name = value[2:] if value.startswith("*.") else value
+                if "." not in name or not self._dns_name(name):
+                    raise ContainerError("Invalid nginx certificate domain: {!r}".format(value))
+                result.append(value)
         return result
 
     def shell_quote(self, value: object) -> str:
         return shlex.quote(str(value))
 
     def _get_default_index_url(self):
+        root = self.get_config("NGINX_ROOT_DOMAIN")
         return utils.make_url(
             self.get_config("NGINX_DEFAULT_SCHEME"),
-            "www.google.com" \
-                if self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost") \
-                else self.get_config("NGINX_ROOT_DOMAIN"),
+            "www.google.com" if root in ("", "_", "localhost") else root,
             self.get_config("NGINX_DEFAULT_PORT")
         )
 
@@ -244,8 +258,12 @@ class Container(BaseContainer):
         import tempfile
         if context.target_services is not None and "nginx" not in context.target_services:
             return
-        if self.get_config("NGINX_WILDCARD_DOMAIN") and self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost"):
-            raise ContainerError("Wildcard domain is enabled but root domain is not set.")
+        https = self.get_config("NGINX_HTTPS_ENABLE", type=bool)
+        root = self.get_config("NGINX_ROOT_DOMAIN")
+        domain = root if https else None
+        if not https and self.get_config("NGINX_WILDCARD_DOMAIN", type=bool):
+            if not isinstance(root, str) or root.lower() == "localhost" or not self._dns_name(root):
+                raise ContainerError("Wildcard domain is enabled; configure NGINX_ROOT_DOMAIN with a DNS domain.")
         if self.get_config("NGINX_WAF_ENABLE") and not self.containers["safeline"].enable:
             raise ContainerError("NGINX_WAF_ENABLE is true but safeline container is not enabled.")
         if self.get_config("NGINX_AUTH_ENABLE") and not self.containers["authelia"].enable:
@@ -271,7 +289,7 @@ class Container(BaseContainer):
         runner = self.manager.compose_runner
         command = ("nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/managed/nginx.conf", "-t")
         mounts = {"/etc/nginx/managed": str(self.config_path)}
-        if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
+        if domain is not None:
             with tempfile.TemporaryDirectory(prefix="cntr-nginx-check-") as directory:
                 mounts["/etc/certs"] = directory
                 root = self.get_app_path("certs")
@@ -282,7 +300,6 @@ class Container(BaseContainer):
                 if versions.is_dir():
                     candidates.extend((source, Path(directory) / "versions" / source.name)
                                       for source in versions.iterdir() if source.is_dir())
-                domain = self.get_config("NGINX_ROOT_DOMAIN")
                 names = [domain + "_" + suffix + ".pem" for suffix in ("cert", "key", "fullchain")]
                 names.extend(("primary", "domains", "settings"))
                 for source, destination in candidates:
@@ -319,6 +336,11 @@ class Container(BaseContainer):
         if not isinstance(value, str) or any(ch in value for ch in ("\r", "\n", "\x00")):
             raise ContainerError("Invalid nginx complex value")
         return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+    def ingress_header_items(self) -> "tuple[tuple[str, str], ...]":
+        """Select transport headers shared by the WAF and private bypass ingress."""
+        return tuple((name, value) for name, value in self.request_headers
+                     if name in ("Host", "Upgrade", "Connection", "X-Forwarded-For"))
 
     def header_items(self, site: "ResolvedSite | SimpleNamespace", overrides: "Mapping[str, str | None] | None" = None,
                      authentication: bool = False) -> "tuple[tuple[str, str], ...]":
@@ -394,7 +416,7 @@ class Container(BaseContainer):
                 nginx=nginx,
                 config=container.config,
                 waf_addresses=lazy_load(lambda: {
-                    name: str(container.config.get("SAFELINE_SUBNET_PREFIX")) + "." + suffix
+                    name: str(container.config.get("SAFELINE_ORIGIN_SUBNET_PREFIX")) + "." + suffix
                     for name, suffix in (("nginx", "253"), ("tengine", "254"))
                 }),
                 template_vars=variables,
@@ -498,7 +520,11 @@ class Container(BaseContainer):
                 leader.producer, self.get_source_path("templates", "server.conf"),
                 leader, business="\n".join(routes), sites=sites, route_auth=route_auth,
                 template_vars=template_vars))
-        return {"sites/generated.conf": "\n".join(rendered)}, any(site.waf for site in active)
+        waf_ports = {site.producer.get_config("NGINX_WAF_PORT") for site in active if site.waf}
+        for port in sorted(waf_ports - defaults.keys()):
+            rendered.append(
+                'server { listen %s default_server; server_name ""; return 404; }' % port)
+        return {"sites/generated.conf": "\n".join(rendered)}, bool(waf_ports)
 
     def on_starting(self, context: "OperationContext") -> None:
         import tarfile

@@ -54,6 +54,8 @@ def _placeholder(prompt, type=str, default=MISSING, choices=None, **kwargs):
     # via get_uid/get_gid, which fail on synthetic names.
     if prompt == "DOCKER_USER":
         return os.environ.get("SUDO_USER") or getpass.getuser() or "root"
+    if prompt == "NGINX_ROOT_DOMAIN":
+        return "example.test"
     # Fields whose ``default`` is a fresh utils.random_string()/random_secret()
     # each process (e.g. cached=True password generation) would otherwise make
     # snapshots flake between runs -- pin them to a fixed placeholder instead
@@ -188,6 +190,8 @@ def configure_builtin_snapshot(manager: "ContainerManager") -> None:
     manager.config.set("NGINX_WILDCARD_DOMAIN", True)
     manager.config.set("NGINX_HTTPS_ENABLE", True)
     manager.config.set("AUTHELIA_OIDC_CLIENT_SECRET", "snapshot-oidc-secret")
+    manager.config.set("SAFELINE_DETECTOR_MGMT_TOKEN", "TEST-detector-token")
+    manager.config.set("SAFELINE_MGT_INTERNAL_TOKEN", "TEST-management-token")
 
 
 def configure_builtin_inputs(manager: "ContainerManager") -> None:

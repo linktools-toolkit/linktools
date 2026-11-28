@@ -216,9 +216,17 @@ class ComposeOperations:
         )
 
     def up(self, names: "Sequence[str] | None" = None, pull: bool = False,
-           report: bool = False) -> None:
+           report: bool = False, *, prune: bool = False) -> None:
         with self.manager.environ.locks.process_lock("cntr:project:" + self.manager.project_name):
             self._start(names, pull, report, restart=False)
+            if prune:
+                try:
+                    status = self.manager.runtime.create_docker_process("system", "prune", "--force").call()
+                except (OSError, ContainerError) as error:
+                    self.manager.logger.warning("Deployment succeeded; Docker system prune could not run: %s", error)
+                else:
+                    if status:
+                        self.manager.logger.warning("Deployment succeeded; Docker system prune exited with %s", status)
 
     def restart(self, names: "Sequence[str] | None" = None, pull: bool = False,
                 report: bool = False) -> None:
