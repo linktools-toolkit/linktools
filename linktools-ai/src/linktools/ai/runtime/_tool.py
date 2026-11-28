@@ -1231,16 +1231,25 @@ class RuntimeToolOperationBridge:
             if value.status not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}:
                 if (value.binding_digest != self._binding_digest
                         or value.status not in {ToolOperationStatus.CLAIMED, ToolOperationStatus.EFFECT_UNKNOWN}):
-                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    raise AIError(
+                        ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                        safe_details={"recovery_stage": "tool_receipts", "reason": "tool_receipt_status_or_binding_mismatch"},
+                    )
                 if value.tool_name == "delegate_task":
                     if (recover_delegate is None or value.replay_safe
                             or pending_calls.get(value.tool_call_id) != value.tool_name):
-                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                        raise AIError(
+                            ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                            safe_details={"recovery_stage": "tool_receipts", "reason": "delegate_recovery_unavailable"},
+                        )
                     pending_recovery.append(value)
                 else:
                     if (interrupted_generation is None or self._producer_generation != interrupted_generation + 1
                             or value.tool_operation_id != self._operation_id(self._agent_run_id, value.tool_call_id)):
-                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                        raise AIError(
+                            ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                            safe_details={"recovery_stage": "tool_receipts", "reason": "tool_recovery_identity_mismatch"},
+                        )
                     part = retained.get(value.tool_call_id)
                     if (part is not None and part.tool_name == value.tool_name
                             and part.metadata[_INTERRUPTED_TOOL_RECEIPT] == self._interruption_marker(value)
@@ -1251,12 +1260,18 @@ class RuntimeToolOperationBridge:
                         self._reported_interruptions[value.tool_operation_id] = value
                     elif (value.producer_generation != interrupted_generation
                           or pending_calls.get(value.tool_call_id) != value.tool_name):
-                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                        raise AIError(
+                            ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                            safe_details={"recovery_stage": "tool_receipts", "reason": "tool_receipt_generation_or_frontier_mismatch"},
+                        )
             receipts[value.tool_call_id] = value
         results = DeferredToolResults()
         if any(call_id not in receipts or receipts[call_id].tool_name != tool_name
                for call_id, tool_name in pending_calls.items()):
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"recovery_stage": "tool_receipts", "reason": "pending_tool_receipt_missing_or_mismatched"},
+            )
         for value in pending_recovery:
             assert recover_delegate is not None
             if value.arguments_payload is None:

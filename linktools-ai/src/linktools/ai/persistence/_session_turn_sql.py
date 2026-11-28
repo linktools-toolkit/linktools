@@ -2309,7 +2309,10 @@ class SqlSessionTurns(SqlSessionTurnReader):
             )
             if checkpoint is None:
                 # Refuse inside the transaction so the regrant rolls back.
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"recovery_stage": "takeover", "reason": "checkpoint_missing_before_takeover_commit"},
+                )
             instructions = await self._capture_instruction_frontier(session, key)
             return True, checkpoint, instructions
 

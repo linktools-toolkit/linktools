@@ -1225,7 +1225,14 @@ def _debug_error(request: Request, error: AIError) -> None:
 
 async def _error(request: Request, error: Exception) -> Response:
     if isinstance(error, AIError):
-        _debug_error(request, error)
+        if request.url.path == "/api/session/recover" and error.code is ErrorCode.STORAGE_RECOVERY_REQUIRED:
+            _logger.warning(
+                "Session recover blocked: operation_id=%r code=%s recovery_stage=%r reason=%r",
+                _operation_id(request, error), error.code.value,
+                error.safe_details.get("recovery_stage"), error.safe_details.get("reason"),
+            )
+        else:
+            _debug_error(request, error)
         code = error.code.value
         status = 404 if code in {"AUTHORIZATION_DENIED", "SESSION_NOT_FOUND", "EXECUTION_NOT_FOUND"} else (
             409 if code == "SESSION_TURN_PENDING" or any(part in code for part in ("CONFLICT", "BUSY", "CLOSED", "MISMATCH")) else (

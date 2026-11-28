@@ -278,6 +278,55 @@ async def test_two_session_streams_follow_same_turn_and_release(monkeypatch: pyt
 
 
 @pytest.mark.asyncio
+async def test_session_recover_logs_safe_blocking_reason_without_debug(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from linktools.ai.core import Principal
+    from linktools.ai.errors import AIError, ErrorCode
+    from linktools.ai.web import _app
+
+    logged: list[str] = []
+    monkeypatch.setattr(_app, "environ", SimpleNamespace(debug=False))
+    monkeypatch.setattr(_app._logger, "warning", lambda message, *args: logged.append(message % args))
+    details = {"recovery_stage": "tool_receipts", "reason": "pending_tool_receipt_missing_or_mismatched"}
+
+    async def recover_turn(session_id, turn_id, *, principal):
+        assert (session_id, turn_id) == ("private-session-id", "private-turn-id")
+        raise AIError(
+            ErrorCode.STORAGE_RECOVERY_REQUIRED,
+            "private-exception-detail",
+            safe_details=details,
+            diagnostics=ErrorDiagnostics.from_exception(ValueError("private-cause")),
+        )
+
+    runtime = SimpleNamespace(
+        history=None, default_principal=Principal("runtime", "default"),
+        sessions=SimpleNamespace(
+            _uses_turn_sessions=True, cancel_turn=None, recover_turn=recover_turn, turn_attachment_limits=None,
+        ),
+    )
+    async with client(create_app(runtime=runtime)) as http:
+        response = await http.post(
+            "/api/session/recover?session_id=private-session-id",
+            headers=_HEADERS, json={"request_id": "recover-request", "turn_id": "private-turn-id"},
+        )
+
+    assert response.status_code == 503
+    payload = response.json()
+    assert payload["code"] == ErrorCode.STORAGE_RECOVERY_REQUIRED.value
+    assert payload["operation_id"] == "recover-request"
+    assert payload["retryable"] is False
+    assert payload["safe_details"] == details
+    assert len(logged) == 1
+    for value in ("recover-request", "STORAGE_RECOVERY_REQUIRED", *details.values()):
+        assert value in logged[0]
+    assert "private-" not in logged[0]
+    assert "private-" not in response.text
+
+
+@pytest.mark.asyncio
 async def test_failed_history_debug_reports_stage_without_payload_or_query(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
