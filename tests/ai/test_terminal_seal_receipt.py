@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistencePlan, PersistenceStorage
 from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
@@ -35,9 +35,8 @@ async def test_terminal_cleanup_requires_confirmed_matching_seal(
         conversation=(StorageRoute.sqlite(tmp_path / "conversation.db")
                       if proof == "separate_conversation" else route),
     ))
-    features = RuntimeFeatures("terminal-seal-receipt")
+    features = RuntimeFeatures("terminal-seal-receipt", defaults={"execution": {"retain_history": True}})
     features.agent("default", model="default", allow_tools=())
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(TraceCapability(), scope="runtime")
     publications, checks, provider_calls = [], [], []
     original_revoke = StateStepArchive.require_revoked_execution_producer

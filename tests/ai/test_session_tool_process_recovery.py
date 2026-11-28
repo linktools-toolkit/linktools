@@ -13,15 +13,16 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturn, ToolReturnPart, UserPromptPart
 
-from linktools.ai.capability import AgentContext, ExecutionCapability, SessionCapability, StepPersistenceCapability, TraceCapability
+from linktools.ai.capability import AgentContext, SessionCapability, TraceCapability
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy, ToolOperationStatus
-from linktools.ai.errors import AIError
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.turns import SessionTurnKey
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.runtime._step_store import RuntimeStepStore
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 
 
@@ -44,7 +45,7 @@ def _append(path: Path, value: str) -> None:
 
 def _features(
     root: Path, *, interrupted: bool = False, crash: bool = False, traced: bool = False,
-    session_checkpoints: bool = False, wrapped_return: bool = False,
+    wrapped_return: bool = False, missing_receipt: bool = False,
 ) -> RuntimeFeatures:
     async def effect(context: AgentContext[None]) -> str | ToolReturn:
         _append(root / "effects.log", context.execution_id)
@@ -62,9 +63,11 @@ def _features(
                 assert result.outcome == "failed" and "Task interrupted; tool outcome unknown." in str(result.content)
                 if result.tool_call_id == "stable-call":
                     _append(root / "provider.log", "interruption")
-                    # Even a new call ID must not authorize repetition of this action.
-                    return ModelResponse(parts=[ToolCallPart("effect", {}, tool_call_id="duplicate-attempt")])
-                assert result.tool_call_id == "duplicate-attempt"
+                    if not missing_receipt:
+                        # Even a new call ID must not repeat a known interrupted effect.
+                        return ModelResponse(parts=[ToolCallPart("effect", {}, tool_call_id="duplicate-attempt")])
+                else:
+                    assert result.tool_call_id == "duplicate-attempt"
             else:
                 assert [(part.tool_call_id, part.content) for part in results] == [("stable-call", "confirmed effect")]
                 if wrapped_return:
@@ -78,9 +81,8 @@ def _features(
         return ModelResponse(parts=[ToolCallPart("effect", {}, tool_call_id="stable-call")])
 
     features = RuntimeFeatures(_NAME)
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    step_policy = SessionCapability(checkpoints=True) if session_checkpoints else StepPersistenceCapability()
-    features.capability(step_policy, scope="runtime")
+    configure_execution(features, retain_history=True)
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
     features.tool(effect, effect_policy="non_replay_safe")
     if traced:
         features.capability(TraceCapability(), scope="runtime")
@@ -91,7 +93,7 @@ def _features(
 
 
 async def _send(runtime: Runtime):
-    return await runtime.sessions.start(
+    return await runtime.sessions.start_turn(
         _SESSION, "inspect", agent=runtime.agents.get(), principal=runtime.default_principal, idempotency_key=_REQUEST,
     )
 
@@ -100,6 +102,14 @@ def _crash_native_process(root_path: str, phase: str) -> None:
     root = Path(root_path)
     original_complete = RuntimeToolOperationBridge.complete
     original_step = RuntimeStepStore.commit_step
+    original_begin = RuntimeToolOperationBridge.begin
+
+    async def begin(bridge, *args, **kwargs):
+        if phase == "before_tool_receipt":
+            _append(root / "before-tool.log", bridge._execution_id)
+            os._exit(91)
+        return await original_begin(bridge, *args, **kwargs)
+
     async def complete(bridge, decision, result):
         completed = await original_complete(bridge, decision, result)
         if phase == "tool_completed":
@@ -116,6 +126,7 @@ def _crash_native_process(root_path: str, phase: str) -> None:
             # deliberately does not wait for optional Trace publication.
             os._exit(91)
 
+    RuntimeToolOperationBridge.begin = begin
     RuntimeToolOperationBridge.complete = complete
     RuntimeStepStore.commit_step = commit_step
 
@@ -124,7 +135,7 @@ def _crash_native_process(root_path: str, phase: str) -> None:
             Persistence.open(_NAME, storage=PersistenceStorage.from_root(root / "runtime")) as state,
             Runtime.open(persistence=state, features=_features(
                 root, crash=phase.startswith("tool_interrupted"), traced=phase.endswith("_trace"),
-                session_checkpoints=phase.endswith("_session_capability"), wrapped_return=phase == "wrapped_tool_checkpoint_trace",
+                wrapped_return=phase == "wrapped_tool_checkpoint_trace",
             ),
                          authorization=_HostAuthorization()) as runtime,
         ):
@@ -160,7 +171,7 @@ def _recovery_diagnostic(phase: str):
         raise AssertionError(f"{phase}: {' -> '.join(details)}") from None
 
 
-def _crash_interruption_recovery(root_path: str, turn_id: str, traced: bool) -> None:
+def _crash_interruption_recovery(root_path: str, turn_id: str, traced: bool, missing_receipt: bool = False) -> None:
     root = Path(root_path)
     commit = RuntimeStepStore.commit_step
 
@@ -187,12 +198,12 @@ def _crash_interruption_recovery(root_path: str, turn_id: str, traced: bool) -> 
     async def run():
         async with (
             Persistence.open(_NAME, storage=PersistenceStorage.from_root(root / "runtime")) as state,
-            Runtime.open(persistence=state, features=_features(root, interrupted=True, traced=traced),
+            Runtime.open(persistence=state, features=_features(root, interrupted=True, traced=traced, missing_receipt=missing_receipt),
                          authorization=_HostAuthorization()) as runtime,
         ):
             key = SessionTurnKey(_SESSION, turn_id)
             await _expire(state.session_turns, key, generation=1)
-            recovered = await runtime.sessions.recover_turn(_SESSION, turn_id, principal=runtime.default_principal)
+            recovered = await runtime.sessions.recover_turn(_SESSION, turn_id, mode="resume", principal=runtime.default_principal)
             assert recovered, "interrupted turn was not recovered"
         raise AssertionError("recovery feedback checkpoint was not reached")
 
@@ -231,7 +242,7 @@ async def _run_until_crash(target, *args):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", (
     "tool_completed", "tool_checkpoint", "tool_interrupted", "tool_interrupted_twice", "tool_interrupted_twice_trace",
-    "tool_interrupted_session_capability", "wrapped_tool_checkpoint_trace",
+    "wrapped_tool_checkpoint_trace",
 ))
 async def test_native_sqlite_tool_turn_recovers_after_process_exit_without_replaying_effect(tmp_path: Path, phase: str):
     await _run_until_crash(_crash_native_process, str(tmp_path), phase)
@@ -250,7 +261,6 @@ async def test_native_sqlite_tool_turn_recovers_after_process_exit_without_repla
         Persistence.open(_NAME, storage=PersistenceStorage.from_root(tmp_path / "runtime")) as state,
         Runtime.open(persistence=state, features=_features(
             tmp_path, interrupted=interrupted, traced=traced,
-            session_checkpoints=phase.endswith("_session_capability"),
             wrapped_return=phase == "wrapped_tool_checkpoint_trace",
         ),
                      authorization=_HostAuthorization()) as runtime,
@@ -282,12 +292,12 @@ async def test_native_sqlite_tool_turn_recovers_after_process_exit_without_repla
         assert await turns.get_turn(key) == before
         assert provider_log.read_text().splitlines() == ["initial"]
         with _recovery_diagnostic("recovery before lease expiry"):
-            assert not await runtime.sessions.recover_turn(_SESSION, turn_id, principal=principal)
+            assert not await runtime.sessions.recover_turn(_SESSION, turn_id, mode="resume", principal=principal)
         # Simulate the DB lease reaching its expiry without sleeping the worker
         # lease duration. Recovery must acquire a new generation itself.
         await _expire(turns, key, generation=predecessor)
         with _recovery_diagnostic("recovery after lease expiry"):
-            assert await runtime.sessions.recover_turn(_SESSION, turn_id, principal=principal)
+            assert await runtime.sessions.recover_turn(_SESSION, turn_id, mode="resume", principal=principal)
         with _recovery_diagnostic("recovered terminal wait"):
             result = await repeated.wait_final(timeout_seconds=10)
         assert result.key == key and result.status is ExecutionStatus.SUCCEEDED
@@ -310,3 +320,87 @@ async def test_native_sqlite_tool_turn_recovers_after_process_exit_without_repla
     assert provider_log.read_text().splitlines() == (
         ["initial", "interruption", "continuation"] if interrupted else ["initial", "continuation"]
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_crash", (False, True))
+async def test_native_sqlite_recover_missing_tool_receipt_without_dispatch(
+    tmp_path: Path, second_crash: bool,
+) -> None:
+    await _run_until_crash(_crash_native_process, str(tmp_path), "before_tool_receipt")
+    turn_id = (tmp_path / "before-tool.log").read_text().strip()
+    key = SessionTurnKey(_SESSION, turn_id)
+    if second_crash:
+        await _run_until_crash(_crash_interruption_recovery, str(tmp_path), turn_id, False, True)
+    async with (
+        Persistence.open(_NAME, storage=PersistenceStorage.from_root(tmp_path / "runtime")) as state,
+        Runtime.open(
+            persistence=state, features=_features(tmp_path, interrupted=True, missing_receipt=True),
+            authorization=_HostAuthorization(),
+        ) as runtime,
+    ):
+        assert not await state.checkpoint.tools.list_by_execution(turn_id, tenant_id=runtime.tenant_id)
+        await _expire(state.session_turns, key, generation=2 if second_crash else 1)
+        assert await runtime.sessions.recover_turn(_SESSION, turn_id, mode="resume", principal=runtime.default_principal)
+        result = await (await _send(runtime)).wait_final(timeout_seconds=10)
+        assert result.status is ExecutionStatus.SUCCEEDED
+        assert result.view["output"] == {"text": "done"}
+        assert not await state.checkpoint.tools.list_by_execution(turn_id, tenant_id=runtime.tenant_id)
+    assert not (tmp_path / "effects.log").exists()
+    assert (tmp_path / "provider.log").read_text().splitlines() == ["initial", "interruption", "continuation"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_checkpoint", (False, True))
+async def test_native_sqlite_unresumable_turn_only_offers_fenced_abandon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing_checkpoint: bool,
+) -> None:
+    from dataclasses import replace
+
+    await _run_until_crash(_crash_native_process, str(tmp_path), "tool_completed")
+    turn_id = (tmp_path / "effects.log").read_text().strip()
+    key = SessionTurnKey(_SESSION, turn_id)
+    async with (
+        Persistence.open(_NAME, storage=PersistenceStorage.from_root(tmp_path / "runtime")) as state,
+        Runtime.open(persistence=state, features=_features(tmp_path),
+                     authorization=_HostAuthorization()) as runtime,
+    ):
+        repository = state.checkpoint.tools
+        original = type(repository).list_by_agent_run
+
+        async def mismatched(repo, *args, **kwargs):
+            values = await original(repo, *args, **kwargs)
+            return tuple(replace(value, tool_name="other_tool") for value in values)
+
+        if missing_checkpoint:
+            steps = await state.create_step_store()
+            try:
+                async def no_checkpoint(*args, **kwargs):
+                    return None
+
+                monkeypatch.setattr(type(steps), "capture_turn_checkpoint", no_checkpoint)
+            finally:
+                await steps.close()
+            stage, reason, generation = "takeover", "checkpoint_missing_before_takeover_commit", 1
+        else:
+            monkeypatch.setattr(type(repository), "list_by_agent_run", mismatched)
+            stage, reason, generation = "tool_receipts", "pending_tool_receipt_name_mismatch", 2
+        await _expire(state.session_turns, key, generation=1)
+        with pytest.raises(AIError) as failure:
+            await runtime.sessions.recover_turn(_SESSION, turn_id, mode="resume", principal=runtime.default_principal)
+        assert failure.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+        assert failure.value.safe_details == {
+            "recovery_stage": stage, "reason": reason, "abandonable": True, "generation": generation,
+        }
+        row = await state.session_turns.get_turn(key)
+        assert (row["state"], row["generation"]) == ("accepted", generation)
+        assert not await runtime.sessions.recover_turn(
+            _SESSION, turn_id, expected_generation=3 - generation, principal=runtime.default_principal,
+        )
+        assert await runtime.sessions.recover_turn(
+            _SESSION, turn_id, expected_generation=generation, principal=runtime.default_principal,
+        )
+        assert (await state.session_turns.get_turn(key))["state"] == "failed"
+        assert (await state.session_turns.get_session(_SESSION))["active_turn_id"] is None
+    assert (tmp_path / "effects.log").read_text().splitlines() == [turn_id]
+    assert (tmp_path / "provider.log").read_text().splitlines() == ["initial"]

@@ -24,7 +24,6 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from pydantic_ai.toolsets import FunctionToolset
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import ExecutionStatus, canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -311,9 +310,8 @@ async def _runtime_deferred_session(
         def materialize(self) -> FunctionModel:
             return FunctionModel(stream_function=stream)
 
-    features = RuntimeFeatures("deferred-instructions")
+    features = RuntimeFeatures("deferred-instructions", defaults={"execution": {"retain_history": True}})
     features.model("default", Binding())
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(SessionCapability(checkpoints=True), scope="runtime")
     tool = features.tool(activated, name="activated", revision=1, effect_policy="none")
     if requires_approval:
@@ -350,14 +348,14 @@ async def _runtime_deferred_session(
             await sessions.create_turn_session("session", principal=principal)
         if unmanaged:
             with pytest.raises(AIError) as rejected:
-                await sessions.start("session", "Load capability.", agent="default", principal=principal,
+                await sessions.start_turn("session", "Load capability.", agent="default", principal=principal,
                                      idempotency_key="unmanaged")
             assert rejected.value.code is ErrorCode.REQUEST_FIELD_INVALID
             assert rejected.value.safe_details["reason"] == "turn_agent_features_unsupported"
             assert not requests and not calls
             assert (await runtime.history.turn_session_state("session", principal=principal))["active_turn_id"] is None
             return
-        turn = await sessions.start("session", "Continue." if resumed else "Load capability.",
+        turn = await sessions.start_turn("session", "Continue." if resumed else "Load capability.",
                                     agent="default", principal=principal, idempotency_key="resume" if resumed else "load")
         if requires_approval and (resumed or eager):
             waiting = await asyncio.wait_for(turn.wait(), 10)
@@ -387,7 +385,7 @@ async def _runtime_deferred_session(
             [completed] = [entry for entry in settled if entry.tool_name == "activated"]
             assert completed.tool_operation_id == operation_id and completed.status is ToolOperationStatus.COMPLETED
             assert completed.capability_ref == operation.capability_ref
-            repeated = await sessions.start("session", "Continue." if resumed else "Load capability.",
+            repeated = await sessions.start_turn("session", "Continue." if resumed else "Load capability.",
                                             agent="default", principal=principal,
                                             idempotency_key="resume" if resumed else "load")
             assert repeated.key == turn.key and (await repeated.result()).view == result.view

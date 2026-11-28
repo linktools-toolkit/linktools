@@ -57,7 +57,7 @@ async def test_constructor_failure_waits_for_cleanup_and_preserves_original(
         persistence = Persistence(PersistenceStorage.in_memory())
         await persistence.initialize(namespace="constructor-failure", tenant_id="default")
         holders.append(persistence)
-        runtime = Runtime.open(features=RuntimeFeatures(), persistence=persistence, auto_recover=False)
+        runtime = Runtime.open(features=RuntimeFeatures(), persistence=persistence)
         runtimes.append(runtime)
         async with runtime:
             pytest.fail("constructor unexpectedly succeeded")

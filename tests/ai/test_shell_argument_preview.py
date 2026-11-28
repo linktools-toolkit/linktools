@@ -7,12 +7,13 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 from linktools.ai.core import agent_run_id
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
 from linktools.ai.runtime import Runtime
 from linktools.ai.workspace import Workspace
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features, workspace_features
 from .test_trace_response_dedup import _archived_block, _message_ids, _transcript_content_ids
 
@@ -35,7 +36,7 @@ async def test_native_shell_preview_keeps_short_arguments_and_bounds_long_comman
         ])
 
     features = workspace_features("shell-preview", workspace=Workspace.load(tmp_path))
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     if trace_enabled:
         features.capability(TraceCapability(), scope="runtime")
     features.agent("default", allow_tools=("run_command",))

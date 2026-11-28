@@ -13,7 +13,7 @@ from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime import Runtime
@@ -65,8 +65,7 @@ async def test_remote_cancel_releases_revoked_producer_staging(
         monkeypatch.setattr(LocalExecutionBackend, "_commit_success", pause_success)
 
     owner_storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
-    group = RuntimeFeatures("remote-cancel-release")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group = RuntimeFeatures("remote-cancel-release", defaults={"execution": {"retain_history": True}})
     group.capability(TraceCapability(commit=CommitPolicy.batch(buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=3.0)), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     remote_storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")

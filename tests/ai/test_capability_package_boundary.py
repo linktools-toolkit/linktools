@@ -23,7 +23,7 @@ def test_capability_import_does_not_initialize_runtime_package() -> None:
         [
             sys.executable,
             "-c",
-            "import sys; from linktools.ai.capability import ExecutionCapability, TraceCapability; "
+            "import sys; from linktools.ai.capability import TraceCapability; "
             "from pydantic_ai_harness.step_persistence import StepPersistence; "
             "assert 'linktools.ai.runtime' not in sys.modules",
         ],

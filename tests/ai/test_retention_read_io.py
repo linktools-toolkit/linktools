@@ -266,8 +266,8 @@ async def test_runtime_releases_only_producer_staging_after_durable_handoff(
     from linktools.ai.runtime import Runtime, RuntimeFeatures
 
     async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.in_memory(), tenant_id="tenant") as state:
-        async with Runtime.open(features=RuntimeFeatures(), persistence=state, auto_recover=False) as runtime, Runtime.open(features=RuntimeFeatures(),
-            persistence=state, auto_recover=False,
+        async with Runtime.open(features=RuntimeFeatures(), persistence=state) as runtime, Runtime.open(features=RuntimeFeatures(),
+            persistence=state,
         ) as peer:
             repository = state.execution.executions
             if condition != "missing":

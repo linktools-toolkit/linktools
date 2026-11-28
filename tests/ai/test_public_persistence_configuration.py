@@ -3,6 +3,7 @@
 
 from linktools.ai.persistence import Persistence
 """Public capability configuration owns module routes, caches and read-only use."""
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import model_features
 
 import asyncio
@@ -17,7 +18,7 @@ from pydantic_ai.models.function import FunctionModel
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.history import History
@@ -62,9 +63,9 @@ async def test_module_sqlite_routes_reopen_history_without_models_or_hooks(
         for domain in (PersistenceDomain.CONVERSATION, PersistenceDomain.CHECKPOINT, PersistenceDomain.TRACE)
     }
     declarations = _features(
-        ExecutionCapability(retain_history=True),
         *((native_checkpoint(),) if checkpointed else ()),
         TraceCapability(),
+        retain_history=True,
     )
     declarations.model("default", _FeatureModels())
     features = declarations.borrow()
@@ -147,7 +148,7 @@ async def test_module_resource_cache_inherits_or_explicitly_overrides_root(
     if trace_cache_mode != "inherit":
         state = PersistenceStorage(replace(state.plan, trace=state.plan.route(PersistenceDomain.TRACE).with_cache(trace_cache)))
     trace = TraceCapability()
-    features = _features(ExecutionCapability(retain_history=True), trace)
+    features = _features(trace, retain_history=True)
     async with Persistence.open('module-cache', storage=state) as persistence_135, Runtime.open(persistence=persistence_135, features=model_features(_FeatureModels(), features)) as runtime:
         content = b"module cache body"
 
@@ -205,7 +206,7 @@ async def test_split_conversation_route_uses_durable_admission_with_shared_cache
     route = StorageRoute.sqlite(tmp_path / "conversation.db")
     state = PersistenceStorage(replace(state.plan, conversation=route), coordination=cache)
     features = _features()
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    configure_execution(features, retain_history=True, commit=CommitPolicy.terminal())
     class HostAuthorization(TenantAuthorizationPolicy):
         pass
 
@@ -215,7 +216,7 @@ async def test_split_conversation_route_uses_durable_admission_with_shared_cache
                      features=model_features(_FeatureModels(FunctionModel(stream_function=model)), features)) as runtime,
     ):
         session = await runtime.agents.get().create_session("session")
-        turn = await runtime.sessions.start(session.session_id, "question", agent="default", principal=runtime.default_principal, idempotency_key="turn")
+        turn = await runtime.sessions.start_turn(session.session_id, "question", agent="default", principal=runtime.default_principal, idempotency_key="turn")
         try:
             await asyncio.wait_for(entered.wait(), 5)
             view = await runtime.history.turn_result(session.session_id, turn.key.turn_id, principal=runtime.default_principal)
@@ -226,5 +227,5 @@ async def test_split_conversation_route_uses_durable_admission_with_shared_cache
         terminal = await turn.wait_final(timeout_seconds=5)
         assert terminal.status is ExecutionStatus.SUCCEEDED
         assert terminal.view["output"] == {"text": "done"}
-        replay = await runtime.sessions.start(session.session_id, "question", agent="default", principal=runtime.default_principal, idempotency_key="turn")
+        replay = await runtime.sessions.start_turn(session.session_id, "question", agent="default", principal=runtime.default_principal, idempotency_key="turn")
         assert replay.key.turn_id == turn.key.turn_id

@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
@@ -53,8 +52,7 @@ async def _runtimes(tmp_path, *, cache, shared=True, native=False, source_author
         return ModelResponse(parts=[TextPart("answer")])
 
     def group():
-        value = RuntimeFeatures("pending-session-display")
-        value.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+        value = RuntimeFeatures("pending-session-display", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
         value.agent("default", model="default", allow_tools=())
         return value
 
@@ -104,9 +102,9 @@ async def test_pending_session_projection_paging_and_completion(
         await owner.sessions.create_turn_session("session", principal=principal)
 
         async def start(prompt, key):
-            return await owner.sessions.start_turn(
+            return (await owner.sessions.start_turn(
                 "session", prompt, agent="default", principal=principal, idempotency_key=key,
-            )
+            )).key.turn_id
 
         async def committed(turn_id):
             return await _wait_for_committed(

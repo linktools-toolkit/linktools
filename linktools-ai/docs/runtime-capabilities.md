@@ -70,7 +70,7 @@ as completed. A recovered ordinary tool keeps its admitted effect policy even if
 the host's default has since changed; unrelated same-revision configuration
 continues to use the current declaration.
 
-Keep `CommitPolicy.sync()` with `StepPersistenceCapability` when a replacement worker
+Keep `CommitPolicy.sync()` with Execution checkpoints when a replacement worker
 must recover the existing execution. `CommitPolicy.terminal()` without ongoing
 checkpoints is a different durability choice, not an equivalent recovery mode.
 Idempotent tools alone do not make an uncommitted execution recoverable.
@@ -78,9 +78,9 @@ Idempotent tools alone do not make an uncommitted execution recoverable.
 ## Capability and service ownership
 
 Runtime capability declarations are imported from `linktools.ai.capability`,
-including `ExecutionCapability`, `SessionCapability`, `StepPersistenceCapability`,
-and `TraceCapability`. The project step declaration binds native Harness hooks;
-explicit native `StepPersistence` declarations remain supported.
+including `SessionCapability` and `TraceCapability`. Runtime binds its checkpoint
+hooks internally; explicit native Harness `StepPersistence` declarations remain
+supported for an independently managed store.
 `linktools.ai.runtime` owns Runtime entry points, services, and the
 `RuntimeFeatures`, `RuntimeFeaturesSource` and `RuntimeFeaturesResolution` contracts; it does not
 provide duplicate capability exports.
@@ -133,21 +133,19 @@ result retains its original identity and effect receipt.
 
 ```python
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.capability import ExecutionCapability, StepPersistenceCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 
-chat = RuntimeFeatures("chat")
+chat = RuntimeFeatures("chat", defaults={"execution": {"retain_history": True}})
 chat.agent("default", model="default")
-chat.capability(ExecutionCapability(retain_history=True))
-# Runtime.open(..., features=chat) retains model context and supports execution forks.
+# Runtime.open(..., features=chat) retains standalone context and supports execution forks.
 
-persistent_work = RuntimeFeatures("persistent-work")
+persistent_work = RuntimeFeatures("persistent-work", defaults={"execution": {"checkpoints": True}})
 persistent_work.agent("default", model="default")
-persistent_work.capability(StepPersistenceCapability())
 persistent_work.capability(TraceCapability())
 # Runtime.open(..., features=persistent_work) supports recovery and audit.
 ```
 
-`ExecutionCapability(retain_history=True)` retains committed model context for future turns and
+`defaults["execution"]["retain_history"] = True` retains committed model context for future turns and
 execution forks. Session creation, listing, resume, metadata, and display history
 are enabled by the default `SessionCapability`, independently of Conversation.
 Register `SessionCapability(enabled=False)` at Runtime scope to disable Session
@@ -158,11 +156,12 @@ history unavailable, and later resume or Session fork fails with
 History retention enabled later cannot reconstruct that missing history. Execution forks
 require an admitted conversation guarantee; checkpoint or trace data alone does
 not grant it.
-`StepPersistenceCapability` retains the official committed snapshots. Its default
-`capture_frontier=True` also saves accepted input and model tool-call frontiers
+`defaults["execution"]["checkpoints"] = True` retains committed native snapshots.
+It also saves accepted input and model tool-call frontiers
 before tool dispatch. Runtime creates and closes the default native adapter over
 Persistence's Execution SQL resource, whether Runtime owns or borrows Persistence.
 It never creates a separate database or invents durable storage for a memory route.
+Native SQL Session checkpoints have their own `SessionCapability(checkpoints=True)` opt-in.
 An explicit `store=...` is borrowed; custom native `StepPersistence` declarations
 retain their existing hook behavior and caller-owned store lifetime. Hosts can use
 `await persistence.create_step_store()` for a separately managed same-group adapter,
@@ -218,16 +217,15 @@ Checkpoint recovery keeps its structured context independently of this option.
 A route bundles its backend with an optional borrowed hot-read cache, for example
 `StorageRoute.sqlite("state.db", cache=cache)`. Cache identity is not part of
 persistence identity. Session and Conversation use the root `PersistenceStorage`
-resource; `ExecutionCapability(retain_history=True)` only selects context retention. Set
+resource; `defaults["execution"]["retain_history"] = True` only selects context retention. Set
 `PersistencePlan(conversation=route, ...)` to customize that domain.
 For plan-based construction, caches live on the routes rather than a second
 `PersistenceStorage` cache argument. Convenience factories such as
 `PersistenceStorage.sqlite(path, cache=cache)` apply the cache to their generated routes.
 
 `PersistencePlan(checkpoint=route, trace=route, ...)` configures Runtime control
-and Trace storage. `StepPersistenceCapability()` uses that same Execution SQL group;
-explicit `StepPersistenceCapability(store=...)` and native `StepPersistence(store=...)`
-borrow their store from the caller. Native snapshots are not also written to a
+and Trace storage. Runtime-owned Execution checkpoints use the Execution SQL
+group; native `StepPersistence(store=...)` borrows its store from the caller. Native snapshots are not also written to a
 Runtime checkpoint archive. The Checkpoint
 control route retains approvals, external results and the single tool-effect/result
 ledger, and shares the execution transaction group. The native snapshot store may
@@ -251,13 +249,16 @@ application = ACPApplication.for_workspace(
     features=features,
     storage=PersistenceStorage.sqlite(database_path),
     authorization=host_session_authorization,
-    execution=ExecutionCapability(retain_history=True),
 )
 ```
 
+With `SessionCapability(checkpoints=True)`, the Session owner selects its Step
+adapter from Persistence. The pre-existing split SQL profile remains limited to
+plain text or a single fixed approval tool; other tool profiles use one SQL storage
+group for Conversation, Step and tool receipts.
+
 Text-only sessions and supported read-only tool configurations do not require
-checkpoints. The optional Execution declaration controls independent Execution
-retention and commit behavior; by default ACP retains Execution history. To
+checkpoints. The Execution defaults and commit policy apply independently from native ACP sessions. To
 supply coordination, use `PersistenceStorage(..., coordination=cache)` or its
 convenience factories. A cache attached only to storage does not enable turn or
 stream coordination.
@@ -302,9 +303,16 @@ omitted fields in declaration payloads. `RuntimeFeatures` supplies defaults of
 ```python
 features = RuntimeFeatures("application", defaults={
     "agent": {"tool_retries": 5, "output_retries": 2},
+    "execution": {"auto_recover": False},
+    "stream": {"output_preview_field": "message"},
     "custom.search": {"timeout": 10},
 })
 ```
+
+The `execution` namespace configures Execution, not Session or its history.
+An optional `stream.output_preview_field` selects a top-level string from structured
+output for live display; it does not change output validation or the stored
+Agent binding. Omit it to disable structured previews.
 
 Custom namespaces are retained for their owning consumers. Agent retry defaults
 are validated when the compiler consumes the `agent` namespace. Omitted keys
@@ -329,8 +337,9 @@ These boundaries do not enable arbitrary restart after a process crash.
 `recover()` continues interrupted execution only when its admitted guarantee
 includes restart checkpoints. Otherwise it raises `CAPABILITY_REQUIRED_MISSING`;
 unresolved tool effects retain their stronger recovery diagnostic. It does not
-silently convert recovery into cancellation. `auto_recover=True` opts into
-startup reconciliation; it does not grant a missing execution guarantee.
+silently convert recovery into cancellation. `RuntimeFeatures(..., defaults={"execution": {"auto_recover": True}})`
+opts into startup Execution reconciliation; it does not grant a missing execution
+guarantee or change explicit Session and Task Graph recovery.
 
 `Runtime.handoff()` requires durable Execution and Checkpoint routes. Every active
 producer must have been durably admitted with native restart checkpoints; current
@@ -381,10 +390,9 @@ Trace and explicit capability writes freeze actual business payload bytes; a
 successful append is admission, not source durability. They keep separate scopes
 even if they share a backend. See [payload and failure contracts](storage-caching.md#runtime-observation-publication).
 
-`ExecutionCapability(commit=CommitPolicy.sync())` is the default: new turns use
+`RuntimeFeatures(execution_commit=CommitPolicy.sync())` is the default: new turns use
 durable admission even when coordination is configured. Execution timing is
-independent of Conversation retention and Session activation. Register one
-explicit Runtime-scoped `ExecutionCapability` to replace that default;
+independent of Conversation retention and Session activation. Set `RuntimeFeatures.execution_commit` at construction to replace that default.
 `Runtime.open` has no separate execution commit parameter or buffering mode.
 Shared admission ownership and idempotency coordination remain active for all
 policies, including a sync caller joining an already-admitted terminal-policy turn.
@@ -401,16 +409,16 @@ Execution selects terminal. Without Trace, the existing eligible
 Execution-terminal path without a payload buffer remains available.
 
 ```python
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 from linktools.ai.core import CommitPolicy
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime import RuntimeFeatures
 
-features = RuntimeFeatures("traced-chat")
+features = RuntimeFeatures(
+    "traced-chat", defaults={"execution": {"retain_history": True}},
+    execution_commit=CommitPolicy.terminal(buffer=write_buffer),
+)
 features.agent("default", model="default")
-features.capability(ExecutionCapability(
-    retain_history=True, commit=CommitPolicy.terminal(buffer=write_buffer),
-))
 features.capability(TraceCapability(commit=CommitPolicy.terminal(buffer=write_buffer)))
 # write_buffer and coordination are explicitly supplied, host-owned resources.
 # Register the model binding, then open Persistence and pass it to Runtime.open().
@@ -476,8 +484,9 @@ lost lease never permits two canonical terminal results.
 - Runtime policies are current host configuration, outside durable Agent binding
   identity. Reopening uses the newly supplied host policies while restoring
   historical Agent behavior. Put model-visible, versioned behavior in Agent scope.
-- For per-run history retention, Checkpoint and Trace, use `ExecutionCapability`,
-  native `StepPersistence` and `TraceCapability` types in native `requires`, `wraps` and `wrapped_by` ordering declarations.
+- For native Checkpoint and Trace ordering, use the `StepPersistence`
+  and `TraceCapability` types in `requires`, `wraps` and `wrapped_by` declarations.
+  Execution retention is managed internally, not a public SDK ordering target.
   References to an original instance do not survive per-run copies, as described
   by the native SDK ordering contract.
 - Native hook ordering, `for_agent` and `for_run` remain in effect. Instances are

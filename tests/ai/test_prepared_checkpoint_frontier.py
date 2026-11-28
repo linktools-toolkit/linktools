@@ -73,13 +73,13 @@ _SCRIPT = r"""
 import asyncio, os, sys
 from pathlib import Path
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart, ToolReturn, ImageUrl, UserPromptPart
-from linktools.ai.capability import AgentContext, ExecutionCapability, ToolCallFailed
+from linktools.ai.capability import AgentContext, ToolCallFailed
 from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
-from tests.ai._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
+from tests.ai._runtime_test_helpers import configure_execution, _Models, _UsageFunctionModel, model_features
 root_path, mode, policy, capture_frontier = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4] == '1'
 payloads = ('scalar', 'media', 'failure')
 ready = set()
@@ -125,12 +125,12 @@ async def run_payload(payload):
         checkpoint = native_checkpoint(database=root/'native.db')
         checkpoint.capture_frontier = capture_frontier
         features.capability(checkpoint,scope='runtime')
-        features.capability(ExecutionCapability(retain_history=True),scope='runtime')
+        configure_execution(features, retain_history=True)
         features.tool(work,effect_policy=policy)
         features.agent('default',allow_tools=('work',))
         binding=_Models(_UsageFunctionModel(model))
         binding.contract={**binding.contract,'input_mime_types': ['image/png']}
-        async with Persistence.open('coalesce-crash', storage=PersistenceStorage.sqlite(root/'state.db')) as persistence, Runtime.open(persistence=persistence,features=model_features(binding,features),auto_recover=False) as runtime:
+        async with Persistence.open('coalesce-crash', storage=PersistenceStorage.sqlite(root/'state.db')) as persistence, Runtime.open(persistence=persistence,features=model_features(binding,features)) as runtime:
             if mode == 'create':
                 execution = await runtime.agents.get().start('inspect',idempotency_key='one')
                 (root/'execution').write_text(execution.execution_id)

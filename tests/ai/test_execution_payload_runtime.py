@@ -14,7 +14,6 @@ from pydantic_ai.models.function import AgentInfo
 from pydantic_ai_harness.step_persistence import SqliteStepStore
 from sqlalchemy import event
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus, TenantAuthorizationPolicy, canonical_json_bytes
 from linktools.ai.persistence import NativeCheckpoint, Persistence, PersistenceStorage
 from linktools.ai.persistence._archive import ContentArchive
@@ -24,6 +23,7 @@ from linktools.ai.persistence.contracts import ExecutionRecord, RecoveryHandoffP
 from linktools.ai.persistence.state import StoredRecord
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features, native_checkpoint
 from ._session_tool_test_helpers import _split_sqlite_storage
 
@@ -132,7 +132,6 @@ async def test_independent_execution_keeps_control_writes_compact(
         return ModelResponse(parts=[TextPart(_OUTPUT)])
 
     features = RuntimeFeatures("execution-payload-runtime")
-    features.capability(ExecutionCapability(retain_history=False, commit=CommitPolicy.sync()), scope="runtime")
     features.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / "runtime.db"
@@ -196,8 +195,7 @@ async def test_native_session_retains_large_messages_without_execution_control_r
         return ModelResponse(parts=[TextPart(_OUTPUT)])
 
     name = "native-large-turn"
-    features = RuntimeFeatures(name)
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures(name, defaults={"execution": {"retain_history": True}})
     features.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     storage = PersistenceStorage.from_root(tmp_path / name)
@@ -209,9 +207,9 @@ async def test_native_session_retains_large_messages_without_execution_control_r
             agent = runtime.agents.get()
             await agent.create_session("session")
             with _execution_sql_bindings(state) as bindings:
-                first = await agent.start(prompts[0], session_id="session", idempotency_key="first")
+                first = await agent.session("session").start(prompts[0], idempotency_key="first")
                 assert (await first.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
-                large = await agent.start(prompts[1], session_id="session", idempotency_key="large")
+                large = await agent.session("session").start(prompts[1], idempotency_key="large")
                 try:
                     await asyncio.wait_for(entered.wait(), 5)
                     await runtime.sessions.inspect("session", principal=runtime.default_principal)
@@ -241,7 +239,7 @@ async def test_native_session_retains_large_messages_without_execution_control_r
         timeline = await agent.session("session").timeline()
         assert [item["user_input"]["prompt"] for item in timeline["items"]] == prompts
         assert [item["output"] for item in timeline["items"]] == [{"text": _OUTPUT}] * len(prompts)
-        replay = await agent.start(prompts[1], session_id="session", idempotency_key="large")
+        replay = await agent.session("session").start(prompts[1], idempotency_key="large")
         assert replay.key == large.key
         assert (await replay.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
         assert seen == prompts
@@ -259,8 +257,8 @@ async def test_execution_payload_runtime_prepared_handoff_reuses_body_after_cold
         calls += 1
         return ModelResponse(parts=[TextPart(_OUTPUT)])
 
-    features = RuntimeFeatures("execution-payload-handoff")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("execution-payload-handoff", defaults={"execution": {"auto_recover": True}})
+    configure_execution(features, retain_history=True)
     features.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / "handoff.db"
@@ -289,7 +287,7 @@ async def test_execution_payload_runtime_prepared_handoff_reuses_body_after_cold
                     assert stored.recovery.terminal_handoff.outcome.output.decode() == {"text": _OUTPUT}
                     async with Persistence.open("execution-payload-handoff", storage=storage) as reader_state:
                         async with Runtime.open(persistence=reader_state,
-                            features=model_features(models, features), metrics=None, auto_recover=True) as reader:
+                            features=model_features(models, features), metrics=None) as reader:
                             result = await reader.executions.result(execution.execution_id, principal=reader.default_principal)
                             assert result.status is ExecutionStatus.SUCCEEDED
                             assert result.output == {"text": _OUTPUT}
@@ -309,8 +307,8 @@ async def test_execution_payload_runtime_native_checkpoint_retains_body_after_re
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     name = "execution-payload-checkpoint"
-    features = RuntimeFeatures(name)
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures(name, defaults={"execution": {"auto_recover": True}})
+    configure_execution(features, retain_history=True)
     step_database = tmp_path / "steps.db"
     features.capability(native_checkpoint(database=step_database), scope="runtime")
     features.agent("default", model="default", allow_tools=())
@@ -342,8 +340,7 @@ async def test_execution_payload_runtime_native_checkpoint_retains_body_after_re
     assert [part.content for message in transcript for part in message.parts
             if isinstance(part, (UserPromptPart, TextPart))] == [_INPUT, _OUTPUT]
 
-    async with Runtime.open(name, storage=storage, features=model_features(models, features), metrics=None,
-                            auto_recover=True) as reopened:
+    async with Runtime.open(name, storage=storage, features=model_features(models, features), metrics=None) as reopened:
         await _inspect_without_payload_reads(reopened, execution.execution_id, monkeypatch)
         replay = await reopened.agents.get().start(_INPUT, idempotency_key="checkpoint")
         assert replay.execution_id == execution.execution_id

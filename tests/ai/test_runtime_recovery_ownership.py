@@ -128,7 +128,7 @@ async def test_sql_runtime_session_admission_remains_independent(
     features = model_features(_Models(FunctionModel(stream_function=model)), features)
 
     async def start(runtime, session_id, prompt, key):
-        return await runtime.sessions.start(
+        return await runtime.sessions.start_turn(
             session_id, prompt, agent=runtime.agents.get("default"),
             principal=runtime.default_principal, idempotency_key=key,
         )
@@ -424,7 +424,7 @@ async def test_concurrent_sql_startup_converges_on_one_deferred_resume(
     workspace = Workspace.load(
         tmp_path, policy=WorkspacePolicy(tool_permissions=ToolPermissionPolicy(default="ask")),
     )
-    application = workspace_features("application", workspace=workspace)
+    application = workspace_features("application", workspace=workspace, defaults={"execution": {"auto_recover": True}})
     application.agent("default", model="default", allow_tools=("read_file",))
     original_state = PersistenceStorage.sqlite(tmp_path / "runtime.db")
     async with Persistence.open(_NAMESPACE, storage=original_state) as persistence_428, Runtime.open(persistence=persistence_428, features=model_features(_ToolModels(), application)) as original:
@@ -464,7 +464,7 @@ async def test_concurrent_sql_startup_converges_on_one_deferred_resume(
         async def open_runtime(storage):
             persistence = await stack.enter_async_context(Persistence.open(_NAMESPACE, storage=storage))
             return await stack.enter_async_context(Runtime.open(
-                persistence=persistence, features=model_features(_ToolModels(), application), auto_recover=True,
+                persistence=persistence, features=model_features(_ToolModels(), application),
             ))
 
         opened = await asyncio.gather(*(open_runtime(state) for state in states), return_exceptions=True)

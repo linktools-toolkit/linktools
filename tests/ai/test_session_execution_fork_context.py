@@ -11,7 +11,7 @@ from pydantic_ai.messages import ModelResponse, TextPart
 
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.storage import InMemoryCacheBackend
@@ -30,9 +30,8 @@ async def test_session_execution_fork_preserves_committed_cursor_and_rejects_cha
         calls.append(deepcopy(messages))
         return ModelResponse(parts=[TextPart("answer")])
 
-    group = RuntimeFeatures("session-execution-fork")
+    group = RuntimeFeatures("session-execution-fork", defaults={"execution": {"retain_history": True}})
     group.agent("default", model="default", allow_tools=())
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     if mode == "trace":
         group.capability(TraceCapability(), scope="runtime")
     async with Persistence.open('session-execution-fork', storage=PersistenceStorage.in_memory(cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if mode == 'pending' else None)) as persistence_35, Runtime.open(persistence=persistence_35, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:

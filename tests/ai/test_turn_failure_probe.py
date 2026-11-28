@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, UserPromptPart
 
-from linktools.ai.capability import AgentContext, ExecutionCapability, TraceCapability
+from linktools.ai.capability import AgentContext, TraceCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus
 from linktools.ai.errors import ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -59,8 +59,7 @@ def _features(effect: Path, calls: list[str], phase: str = '',
             await release.wait()
         return ModelResponse(parts=[TextPart('work completed')])
 
-    features = RuntimeFeatures('volatile-probe')
-    features.capability(ExecutionCapability(commit=CommitPolicy.terminal(buffer=buffer), retain_history=True))
+    features = RuntimeFeatures('volatile-probe', defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal(buffer=buffer))
     if trace:
         features.capability(TraceCapability(commit=CommitPolicy.terminal()))
     features.tool(action, effect_policy='replay_safe')

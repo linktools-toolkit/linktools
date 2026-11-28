@@ -41,6 +41,7 @@ from ..core import (
     BudgetUsage,
     AuthorizationAction,
     AuthorizationPolicy,
+    CommitPolicy,
     ExecutionEventType,
     ExecutionLineageKind,
     ExecutionMode,
@@ -474,8 +475,10 @@ class DefaultExecutionService(TaskExecutionService):
         retained_turn_confirmed: Callable[[ExecutionRecord], bool] | None = None,
         retained_publication: Callable[..., ExecutionTerminalPublication | None] | None = None,
         execution_trace_atomic: bool = True,
+        commit: CommitPolicy = CommitPolicy.sync(),
     ) -> None:
         self._execution_trace_atomic = execution_trace_atomic
+        self._commit = commit
         self._state = state
         self._canonical_graph_session: Callable[[str, Principal], Awaitable[Mapping[str, object] | None]] | None = None
         self._start_attached_graph: Callable[[
@@ -1024,7 +1027,7 @@ class DefaultExecutionService(TaskExecutionService):
         existing = await self._state.idempotency.get("execution.subagent", key, tenant_id=principal.tenant_id)
         if existing is None:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                          safe_details={"reason": "native_child_reservation_missing"})
+                          safe_details={"recovery_stage": "subagent", "reason": "native_child_reservation_missing"})
         return await self.load_authorized(existing.resource_id, principal, AuthorizationAction.EXECUTION_READ)
 
     async def _wait_native_child_result(
@@ -1045,25 +1048,37 @@ class DefaultExecutionService(TaskExecutionService):
             except Exception as error:
                 # An unconfirmed start or wait never authorizes retry or failure settlement.
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                              safe_details={"reason": "native_child_recovery_unconfirmed"}) from error
+                              safe_details={"recovery_stage": "subagent", "reason": "native_child_recovery_unconfirmed"}) from error
             if child.status not in terminal:
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"recovery_stage": "subagent", "reason": "native_child_recovery_not_terminal"},
+                )
         if child.status not in terminal:
             if (timeout_seconds <= 0 or child.status not in {
                     ExecutionStatus.PENDING_START, ExecutionStatus.STARTED,
                     ExecutionStatus.CANCELLING, ExecutionStatus.FINALIZING}
                     or backend is None
                     or not backend.owns_native_child(child.execution_id, key=key, principal=principal, original=original)):
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"recovery_stage": "subagent", "reason": "native_child_producer_unavailable"},
+                )
             try:
                 await asyncio.wait_for(
                     backend.wait_terminal(child.execution_id, tenant_id=principal.tenant_id), timeout_seconds,
                 )
             except asyncio.TimeoutError as error:
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"recovery_stage": "subagent", "reason": "native_child_recovery_timeout"},
+                ) from error
             child = await self.load_authorized(child.execution_id, principal, AuthorizationAction.EXECUTION_READ)
             if child.status not in terminal:
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"recovery_stage": "subagent", "reason": "native_child_wait_not_terminal"},
+                )
         # The parent still needs the exact terminal child record to settle its
         # retained tool operation. Closing retention here invalidates that proof.
         result = await self._result_from_execution(child, tenant_id=principal.tenant_id)
@@ -1721,7 +1736,7 @@ class DefaultExecutionService(TaskExecutionService):
             restart_checkpoints=(policy.restart_checkpoints
                                  or parent is not None and parent.restart_checkpoints),
             durable_trace=durable_trace,
-            conversation=policy.execution.retain_history,
+            conversation=binding.compiled_agent.retain_history,
         )
         proposed_reservation = ExecutionStartReservation(
                 execution,
@@ -1802,12 +1817,10 @@ class DefaultExecutionService(TaskExecutionService):
         # Source-first and deferred writers must observe the same admission owner.
         coordinator = self._runtime_bridge.pending_turns.coordination
         execution = proposed_reservation.execution
-        policy = _runtime_feature_policy(binding.compiled_agent.runtime_contributions)
-
         grouped = None
         can_group = self._runtime_bridge.can_group_start
         run_turn = self._runtime_bridge.run_turn
-        if (policy.execution.commit.mode == "sync" and session is not None and can_group is not None
+        if (self._commit.mode == "sync" and session is not None and can_group is not None
                 and run_turn is not None and await can_group(request, proposed_reservation, session)):
             grouped = _GroupedTurnStart(session)
 
@@ -1824,7 +1837,7 @@ class DefaultExecutionService(TaskExecutionService):
                     requires_task_invocation_capture=requires_task_invocation_capture,
                     budget_scope_id=budget_scope_id,
                 )
-            if (_native_parent is None and policy.execution.commit.mode == "terminal" and execution.conversation
+            if (_native_parent is None and self._commit.mode == "terminal" and execution.conversation
                     and dependency_hold_id is None
                     and self._runtime_bridge.pending_start is not None):
                 pending_id = await ConversationService.prepare_turn(

@@ -16,7 +16,7 @@ pytestmark = pytest.mark.asyncio
 
 
 async def _start(runtime, session_id, key, prompt):
-    return await runtime.sessions.start(
+    return await runtime.sessions.start_turn(
         session_id, prompt, agent="default", principal=runtime.default_principal, idempotency_key=key,
     )
 

@@ -187,15 +187,14 @@ async def test_upstream_checkpoint_cold_continue_uses_saved_tool_result(tmp_path
 
 @pytest.mark.asyncio
 async def test_upstream_capability_runs_through_existing_runtime(tmp_path: Path) -> None:
-    from linktools.ai.capability import AgentContext, ExecutionCapability
+    from linktools.ai.capability import AgentContext
     from linktools.ai.persistence import Persistence, PersistenceStorage
     from linktools.ai.runtime import Runtime, RuntimeFeatures
 
     from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 
     store = SqliteStepStore(database=tmp_path / 'native.db')
-    features = RuntimeFeatures('upstream_passthrough')
-    features.capability(ExecutionCapability(retain_history=True), scope='runtime')
+    features = RuntimeFeatures('upstream_passthrough', defaults={"execution": {"retain_history": True}})
     features.capability(StepPersistence(store=store, capture_frontier=True), scope='runtime')
     effects = []
 

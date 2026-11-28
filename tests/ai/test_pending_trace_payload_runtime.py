@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus, PersistenceDomain, agent_run_id
 
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -69,9 +69,7 @@ async def test_pending_execution_and_trace_payloads_share_the_terminal_source_bo
             raise asyncio.CancelledError
         return ModelResponse(parts=[TextPart("retained answer")])
 
-    features = RuntimeFeatures("pending-trace-payload")
-    features.capability(ExecutionCapability(retain_history=True,
-        commit=CommitPolicy.terminal(buffer=execution_buffer if execution_buffered else None)), scope="runtime")
+    features = RuntimeFeatures("pending-trace-payload", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal(buffer=execution_buffer if execution_buffered else None))
     features.capability(TraceCapability(commit=CommitPolicy.terminal(buffer=trace_buffer if trace_buffered else None)), scope="runtime")
     features.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.sqlite(tmp_path / "state.db",
@@ -153,8 +151,7 @@ async def test_unbuffered_terminal_trace_keeps_its_source_admission(
         await release.wait()
         return ModelResponse(parts=[TextPart("answer")])
 
-    features = RuntimeFeatures("unbuffered-terminal-trace")
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    features = RuntimeFeatures("unbuffered-terminal-trace", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     features.capability(TraceCapability(commit=CommitPolicy.terminal()), scope="runtime")
     features.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.sqlite(tmp_path / "state.db",

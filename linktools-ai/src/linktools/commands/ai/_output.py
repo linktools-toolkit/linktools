@@ -37,9 +37,10 @@ async def emit_result(
     native = uses_turn_sessions(runtime)
     if native and not planning:
         return await _emit_session_result(runtime, prompt, session_id, as_json, thinking)
-    execution = await runtime.agents.get().start(
+    agent = runtime.agents.get()
+    target = agent if native else agent.session(session_id)
+    execution = await target.start(
         prompt,
-        session_id=None if native else session_id,
         planning=planning,
         thinking=thinking,
     )
@@ -75,10 +76,11 @@ async def _emit_session_result(
     turn_id = None
     try:
         with TurnObserver(runtime, session_id, principal, local_workspace=True, preview=not as_json) as observer:
-            turn_id = await runtime.sessions.start_turn(
+            turn = await runtime.sessions.start_turn(
                 session_id, prompt, agent="default", principal=principal,
                 idempotency_key=token_urlsafe(9), thinking=thinking,
             )
+            turn_id = turn.key.turn_id
             async for frame in observer.events(turn_id):
                 kind = frame["type"]
                 if kind == "terminal":

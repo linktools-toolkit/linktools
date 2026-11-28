@@ -3,6 +3,7 @@
 
 from linktools.ai.persistence import Persistence
 """Explicit optional features and core durability regression tests."""
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import model_features
 
 from ._runtime_test_helpers import workspace_features
@@ -18,7 +19,7 @@ from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.settings import ModelSettings
 
-from linktools.ai.capability import ExecutionCapability, AgentContext
+from linktools.ai.capability import AgentContext
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
@@ -61,8 +62,8 @@ def _definitions() -> RuntimeFeatures:
     return features
 
 
-def _features(*capabilities) -> RuntimeFeatures:
-    features = _definitions()
+def _features(*capabilities, retain_history=False, execution_commit=CommitPolicy.sync()) -> RuntimeFeatures:
+    features = configure_execution(_definitions(), retain_history=retain_history, commit=execution_commit)
     for capability in capabilities:
         features.capability(capability, scope="runtime")
     return features
@@ -94,7 +95,7 @@ async def test_minimal_runtime_supports_sessions_without_retained_model_context(
                 agent = runtime.agents.get()
                 principal = runtime.default_principal
                 await agent.create_session("session", principal=principal)
-                turn = await runtime.sessions.start(
+                turn = await runtime.sessions.start_turn(
                     "session", "question", principal=principal, agent=agent, idempotency_key="question",
                 )
                 result = await turn.wait_final(timeout_seconds=5)
@@ -136,7 +137,7 @@ async def test_execution_pending_requires_complete_coordination(tmp_path, monkey
         return ModelResponse(parts=[TextPart("done")])
     cache = InMemoryCacheBackend(max_bytes=2**20) if cache_kind == "full" else InMemoryStreamBackend(max_bytes=2**20) if cache_kind == "unsupported" else None
     features = _features()
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    configure_execution(features, retain_history=True, commit=CommitPolicy.terminal())
     if evidence != "none":
         features.capability(native_checkpoint() if evidence == "checkpoint" else TraceCapability(), scope="runtime")
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache if cache_kind == "full" else None, coordination=cache)
@@ -197,7 +198,7 @@ async def test_no_optional_features_preserves_required_deferred_frontier(tmp_pat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("feature_type", (ExecutionCapability, StepPersistence, TraceCapability))
+@pytest.mark.parametrize("feature_type", (StepPersistence, TraceCapability))
 async def test_native_type_requirement_survives_binding(feature_type):
     from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
     observed = []
@@ -233,8 +234,7 @@ async def test_actual_effect_promotes_before_invocation_but_read_only_tool_stays
             assert await runtime._state.execution.executions.get(owner['execution'], tenant_id=owner['tenant']) is None
             return ModelResponse(parts=[ToolCallPart('lookup', {}, tool_call_id='lookup-call')])
         return ModelResponse(parts=[TextPart('answer')])
-    group = RuntimeFeatures('tool-pending')
-    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    group = RuntimeFeatures('tool-pending', defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     group.tool(lookup, effect_policy=effect_policy)
     group.agent('default', model='default', allow_tools=('lookup',))
     async with Persistence.open('pending-tool', storage=state) as persistence_203, Runtime.open(persistence=persistence_203, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), group)) as runtime:
@@ -273,8 +273,7 @@ async def test_pending_execution_cancel_promotes_and_quiesces_before_cancelled(t
         finally:
             stopped.set()
     cache = InMemoryCacheBackend(max_bytes=2**20)
-    group = RuntimeFeatures('cancel-pending')
-    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    group = RuntimeFeatures('cancel-pending', defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     group.agent('default', model='default', allow_tools=())
     state = PersistenceStorage.sqlite(tmp_path / 'state.db', cache=cache, coordination=cache)
     async with Persistence.open('pending-cancel', storage=state) as persistence_239, Runtime.open(persistence=persistence_239, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), group)) as runtime:
@@ -298,7 +297,7 @@ async def test_cached_lost_ack_reconciles_without_replay(tmp_path, monkeypatch):
     async def model(messages, info):
         calls.append(messages)
         return ModelResponse(parts=[TextPart("done")])
-    async with Persistence.open('lost-ack', storage=storage) as persistence_260, Runtime.open(persistence=persistence_260, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), _features(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal())))) as runtime:
+    async with Persistence.open('lost-ack', storage=storage) as persistence_260, Runtime.open(persistence=persistence_260, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), _features(retain_history=True, execution_commit=CommitPolicy.terminal()))) as runtime:
         agent = runtime.agents.get()
         original = SqlStorageContext.run_mutation
         writes = []
@@ -324,12 +323,12 @@ async def test_fork_uses_stored_conversation_promise_and_actual_history(tmp_path
     async def model(messages, info):
         messages_seen.append(messages)
         return ModelResponse(parts=[TextPart("done")])
-    features = _features(ExecutionCapability(retain_history=True) if source_conversation else TraceCapability())
+    features = (_features(retain_history=True) if source_conversation else _features(TraceCapability()))
     async with Persistence.open('fork-promise', storage=PersistenceStorage.sqlite(database)) as persistence_287, Runtime.open(persistence=persistence_287, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), features)) as runtime:
         source = await runtime.agents.get().start("original input")
         await source.wait(timeout_seconds=5)
         execution_id = source.execution_id
-    async with Persistence.open('fork-promise', storage=PersistenceStorage.sqlite(database)) as persistence_291, Runtime.open(persistence=persistence_291, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), _features(ExecutionCapability(retain_history=True)))) as runtime:
+    async with Persistence.open('fork-promise', storage=PersistenceStorage.sqlite(database)) as persistence_291, Runtime.open(persistence=persistence_291, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), _features(retain_history=True))) as runtime:
         source = await runtime.executions.get(execution_id)
         if not source_conversation:
             with pytest.raises(AIError) as missing:
@@ -352,7 +351,7 @@ async def test_handoff_uses_stored_guarantee(monkeypatch, current_conversation, 
         observed.append(terminal_commit)
         return True
     monkeypatch.setattr(RuntimeRetentionController, "release_execution_handoff", release)
-    features = _features(ExecutionCapability(retain_history=True)) if current_conversation else _definitions()
+    features = _features(retain_history=True) if current_conversation else _definitions()
     async with Persistence.open('handoff', storage=PersistenceStorage.in_memory()) as persistence_315, Runtime.open(persistence=persistence_315, features=model_features(_FeatureModels(), features)) as runtime:
         assert await runtime._execution_service._release_terminal("terminal", tenant_id=runtime.tenant_id, terminal_commit=stored_guarantee)
         assert observed == [stored_guarantee]
@@ -360,7 +359,7 @@ async def test_handoff_uses_stored_guarantee(monkeypatch, current_conversation, 
 
 @pytest.mark.asyncio
 async def test_borrowed_source_resolves_later_feature_registration():
-    features = _features(ExecutionCapability(retain_history=True))
+    features = _features(retain_history=True)
     features.model("default", _FeatureModels())
     captured = features.borrow()
     features.capability(TraceCapability(), scope="runtime")

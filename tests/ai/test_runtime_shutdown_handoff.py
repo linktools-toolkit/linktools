@@ -3,6 +3,7 @@
 
 from linktools.ai.persistence import Persistence
 """Graceful shutdown preserves checkpointed conversation execution identity."""
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import model_features
 
 import asyncio
@@ -24,12 +25,11 @@ from .test_terminal_commit_shared_runtime import _HostAuthorization, _group
 
 
 def _checkpointed_execution_group():
-    from linktools.ai.capability import ExecutionCapability, StepPersistenceCapability
     from linktools.ai.core import CommitPolicy
 
     features = _group(True)
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
-    features.capability(StepPersistenceCapability())
+    configure_execution(features, retain_history=True)
+    features = features.with_defaults({"execution": {"retain_history": True, "checkpoints": True}})
     return features
 
 
@@ -92,7 +92,7 @@ async def test_handoff_recovers_same_execution_and_next_session_turn(handoff_sto
     ):
         principal = owner.default_principal
         await owner.sessions.create_turn_session("session", principal=principal)
-        turn = await owner.sessions.start(
+        turn = await owner.sessions.start_turn(
             "session", "Remember blue", agent="default", principal=principal, idempotency_key="first",
         )
         await asyncio.wait_for(entered.wait(), 10)
@@ -110,7 +110,7 @@ async def test_handoff_recovers_same_execution_and_next_session_turn(handoff_sto
         Persistence.open("shutdown-handoff", storage=storage()) as state,
         Runtime.open(
             persistence=state, features=model_features(_Models(FunctionModel(stream_function=answer)), _group(False)),
-            auto_recover=False, authorization=_HostAuthorization(),
+            authorization=_HostAuthorization(),
         ) as successor,
     ):
         retained = await state.session_turns.get_turn(turn.key)
@@ -123,14 +123,14 @@ async def test_handoff_recovers_same_execution_and_next_session_turn(handoff_sto
                 turns._turns.update().filter_by(**turns._turn_values(turn.key), generation=1).values(lease_until=0),
             )
             assert changed.rowcount == 1
-        assert await successor.sessions.recover_turn("session", turn.key.turn_id, principal=principal)
+        assert await successor.sessions.recover_turn("session", turn.key.turn_id, mode="resume", principal=principal)
         after = await successor.history.turn_result("session", turn.key.turn_id, principal=principal)
         assert after["status"] == "SUCCEEDED" and after["output"] == {"text": "blue"}
-        replay = await successor.sessions.start(
+        replay = await successor.sessions.start_turn(
             "session", "Remember blue", agent="default", principal=principal, idempotency_key="first",
         )
         assert replay.key == turn.key and len(observed) == 1
-        following = await successor.sessions.start(
+        following = await successor.sessions.start_turn(
             "session", "What colour?", agent="default", principal=principal, idempotency_key="next",
         )
         assert (await following.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
@@ -148,7 +148,7 @@ async def test_handoff_recovers_same_execution_and_next_session_turn(handoff_sto
 @pytest.mark.parametrize("pending", [False, True])
 async def test_handoff_rejects_nonrecoverable_execution_without_closing_runtime(tmp_path: Path, pending: bool) -> None:
     from pydantic_ai.capabilities import CombinedCapability
-    from linktools.ai.capability import ExecutionCapability, StepPersistenceCapability
+    from linktools.ai.runtime._step_capability import _StepPersistenceCapability
     from linktools.ai.core import CommitPolicy
     from linktools.ai.storage import InMemoryCacheBackend
 
@@ -160,18 +160,18 @@ async def test_handoff_rejects_nonrecoverable_execution_without_closing_runtime(
         yield "ready"
 
     features = _group(True)
-    features.capability(StepPersistenceCapability(), id="runtime.steps")
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
+    features.capability(_StepPersistenceCapability(), id="runtime.steps")
+    configure_execution(
+        features, retain_history=True, commit=CommitPolicy.terminal() if pending else CommitPolicy.sync(),
+    )
     model_features(_Models(FunctionModel(stream_function=answer)), features)
     cache = InMemoryCacheBackend(max_bytes=2**20) if pending else None
     async with Runtime.open('handoff-required', storage=PersistenceStorage.sqlite(tmp_path / 'state.db',
                             cache=cache, coordination=cache), features=features) as runtime:
         features.capability(CombinedCapability([]), id="runtime.steps")
-        features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()))
         active = await runtime.agents.get().start("Nonrecoverable", idempotency_key="first")
         await asyncio.wait_for(entered.wait(), 5)
-        features.capability(StepPersistenceCapability(), id="runtime.steps")
-        features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
+        features.capability(_StepPersistenceCapability(), id="runtime.steps")
         with pytest.raises(AIError) as error:
             await runtime.handoff()
         assert error.value.code is ErrorCode.CAPABILITY_REQUIRED_MISSING
@@ -190,7 +190,7 @@ async def test_handoff_keeps_admitted_checkpoint_guarantee_across_policy_updates
     tmp_path: Path, late_checkpoint: bool,
 ) -> None:
     from pydantic_ai.capabilities import CombinedCapability
-    from linktools.ai.capability import ExecutionCapability, StepPersistenceCapability
+    from linktools.ai.runtime._step_capability import _StepPersistenceCapability
     from linktools.ai.core import CommitPolicy
 
     entered = asyncio.Event()
@@ -201,27 +201,25 @@ async def test_handoff_keeps_admitted_checkpoint_guarantee_across_policy_updates
         yield "unreachable"
 
     features = _group(True)
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
+    configure_execution(features, retain_history=True)
     if not late_checkpoint:
-        features.capability(StepPersistenceCapability(), id="runtime.steps")
+        features.capability(_StepPersistenceCapability(), id="runtime.steps")
     model_features(_Models(FunctionModel(stream_function=blocked)), features)
     storage = PersistenceStorage.from_root(tmp_path)
     async with Runtime.open("live-handoff", storage=storage, features=features) as runtime:
         if late_checkpoint:
-            features.capability(StepPersistenceCapability(), id="runtime.steps")
+            features.capability(_StepPersistenceCapability(), id="runtime.steps")
         execution = await runtime.agents.get().start("Resume me", idempotency_key="first")
         await asyncio.wait_for(entered.wait(), 5)
         features.capability(CombinedCapability([]), id="runtime.steps")
-        features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()))
         await asyncio.wait_for(runtime.handoff(), 5)
 
     async def answer(messages, info):
         yield "recovered"
 
-    features.capability(StepPersistenceCapability(), id="runtime.steps")
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
+    features.capability(_StepPersistenceCapability(), id="runtime.steps")
     model_features(_Models(FunctionModel(stream_function=answer)), features)
-    async with Runtime.open("live-handoff", storage=storage, features=features, auto_recover=False) as successor:
+    async with Runtime.open("live-handoff", storage=storage, features=features) as successor:
         recovered = await successor.executions.recover(execution.execution_id,
             principal=successor.default_principal, idempotency_key="recover")
         assert recovered.execution_id == execution.execution_id
@@ -263,7 +261,7 @@ async def test_handoff_rejects_recovery_admission_without_stopping_runtime(
 
     monkeypatch.setattr(LocalExecutionBackend, "launch", blocked_launch)
     model_features(_Models(FunctionModel(stream_function=answer)), features)
-    async with Runtime.open("handoff-recovery", storage=storage, features=features, auto_recover=False) as runtime:
+    async with Runtime.open("handoff-recovery", storage=storage, features=features) as runtime:
         recovery = asyncio.create_task(runtime.executions.recover(execution.execution_id,
             principal=runtime.default_principal, idempotency_key="recover"))
         await asyncio.wait_for(entered.wait(), 5)
@@ -309,7 +307,7 @@ async def test_handoff_rejects_worker_without_admission_identity(tmp_path: Path)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("unknown", [False, True])
 async def test_handoff_settles_tool_effect_once_before_recovery(handoff_storage, unknown: bool) -> None:
-    from linktools.ai.capability import AgentContext, ExecutionCapability
+    from linktools.ai.capability import AgentContext
     from pydantic_ai_harness.step_persistence import StepPersistence
     from tests.ai._runtime_test_helpers import native_checkpoint
     from linktools.ai.core import CommitPolicy
@@ -328,8 +326,7 @@ async def test_handoff_settles_tool_effect_once_before_recovery(handoff_storage,
         return "stored once"
 
     def features():
-        group = RuntimeFeatures("handoff-tool")
-        group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
+        group = RuntimeFeatures("handoff-tool", defaults={"execution": {"retain_history": True}})
         group.capability(native_checkpoint())
         group.tool(write, effect_policy="non_replay_safe")
         group.agent("default", allow_tools=("write",))
@@ -345,7 +342,7 @@ async def test_handoff_settles_tool_effect_once_before_recovery(handoff_storage,
         release.set()
         await asyncio.wait_for(handoff, 10)
         assert effects == ["written"]
-    async with Persistence.open('handoff-tool', storage=handoff_storage()) as persistence_165, Runtime.open(persistence=persistence_165, features=model_features(_TaskTestModels(), features()), auto_recover=False) as successor:
+    async with Persistence.open('handoff-tool', storage=handoff_storage()) as persistence_165, Runtime.open(persistence=persistence_165, features=model_features(_TaskTestModels(), features())) as successor:
         if unknown:
             view = await successor.executions.inspect(execution.execution_id,
                 principal=successor.default_principal)
@@ -442,7 +439,7 @@ async def test_handoff_does_not_claim_success_after_default_close(handoff_storag
         with pytest.raises(AIError) as error:
             await runtime.handoff()
         assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
-    async with Persistence.open('handoff-close', storage=handoff_storage()) as persistence_265, Runtime.open(persistence=persistence_265, features=model_features(models, _group(False)), auto_recover=False) as reader:
+    async with Persistence.open('handoff-close', storage=handoff_storage()) as persistence_265, Runtime.open(persistence=persistence_265, features=model_features(models, _group(False))) as reader:
         view = await reader.executions.inspect(execution.execution_id, principal=reader.default_principal)
         assert view.status is ExecutionStatus.CANCELLED
 
@@ -477,7 +474,7 @@ async def test_handoff_before_tool_leaf_defers_without_unknown_effect() -> None:
 
 @pytest.mark.asyncio
 async def test_pending_user_cancel_interrupts_tool_during_handoff(tmp_path: Path, monkeypatch) -> None:
-    from linktools.ai.capability import AgentContext, ExecutionCapability
+    from linktools.ai.capability import AgentContext
     from pydantic_ai_harness.step_persistence import StepPersistence
     from tests.ai._runtime_test_helpers import native_checkpoint
     from linktools.ai.core import CommitPolicy
@@ -504,8 +501,7 @@ async def test_pending_user_cancel_interrupts_tool_during_handoff(tmp_path: Path
             raise
         return "unreachable"
 
-    group = RuntimeFeatures("cancel-handoff")
-    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
+    group = RuntimeFeatures("cancel-handoff", defaults={"execution": {"retain_history": True}})
     group.capability(native_checkpoint())
     group.tool(write, effect_policy="non_replay_safe")
     group.agent("default", allow_tools=("write",))
@@ -520,7 +516,7 @@ async def test_pending_user_cancel_interrupts_tool_during_handoff(tmp_path: Path
         await asyncio.wait_for(tool_cancelled.wait(), 5)
         await asyncio.wait_for(cancellation, 10)
         await asyncio.wait_for(handoff, 10)
-    async with Persistence.open('cancel-handoff', storage=PersistenceStorage.sqlite(tmp_path / 'cancel.db')) as persistence_343, Runtime.open(persistence=persistence_343, features=model_features(_TaskTestModels(), group), auto_recover=False) as successor:
+    async with Persistence.open('cancel-handoff', storage=PersistenceStorage.sqlite(tmp_path / 'cancel.db')) as persistence_343, Runtime.open(persistence=persistence_343, features=model_features(_TaskTestModels(), group)) as successor:
         view = await successor.executions.inspect(execution.execution_id,
             principal=successor.default_principal)
         assert view.status in {ExecutionStatus.CANCELLED, ExecutionStatus.RECOVERY_REQUIRED}
@@ -562,7 +558,7 @@ async def test_handoff_retry_retains_admitted_execution_identity(tmp_path: Path,
         await asyncio.wait_for(owner.handoff(), 10)
     async def answer(messages, info):
         yield "recovered"
-    async with Persistence.open('handoff-admission', storage=PersistenceStorage.sqlite(database)) as persistence_383, Runtime.open(persistence=persistence_383, features=model_features(_Models(FunctionModel(stream_function=answer)), _checkpointed_execution_group()), auto_recover=False) as successor:
+    async with Persistence.open('handoff-admission', storage=PersistenceStorage.sqlite(database)) as persistence_383, Runtime.open(persistence=persistence_383, features=model_features(_Models(FunctionModel(stream_function=answer)), _checkpointed_execution_group())) as successor:
         await successor.executions.recover(execution.execution_id,
             principal=successor.default_principal, idempotency_key="recover-admitted")
         await successor.executions.wait(execution.execution_id,

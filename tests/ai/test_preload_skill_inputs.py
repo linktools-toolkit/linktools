@@ -11,7 +11,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolRetu
 
 from linktools.ai.asset import AssetKey, AssetStore, DirectoryAssetBackend, InMemoryAssetBackend, PrefixAssetPathAdapter
 from linktools.ai.capability import (
-    AssetCapability, ExecutionCapability, SkillDefinition,
+    AssetCapability, SkillDefinition,
     SkillInput, SkillReadReceipt, SkillResource, SkillSourceRef, TraceCapability,
 )
 from linktools.ai.core import AuthorizationAction, ExecutionStatus
@@ -23,6 +23,7 @@ from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.spec import AgentSpec, AgentSpecAdapter, AgentSpecCodec, CapabilityRef, SkillSpec
 from linktools.ai.storage import FilesystemObjectStore, StorageLayer, StorageOverlay
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, native_checkpoint
 
 
@@ -41,7 +42,7 @@ def _features(store, model, *, preload=("guide",), allowed=("*",), filtered=Fals
     assets = features.capability(AssetCapability(store))
     assets.loader("inline", _InlineLoader())
     if retained:
-        features.capability(ExecutionCapability(retain_history=True))
+        configure_execution(features, retain_history=True)
         features.capability(TraceCapability())
         features.capability(native_checkpoint())
     features.model("default", _Models(_UsageFunctionModel(model)))
@@ -254,7 +255,7 @@ async def test_preload_rules_recover_from_sql_history_after_source_changes(tmp_p
             await store.put(key, _declaration("guide", "ORIGINAL_RULE"))
         features = _features(store, model, allowed=())
         async with Persistence.open("preload-recovery", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db")) as persistence:
-            async with Runtime.open(persistence=persistence, features=features.borrow(), auto_recover=False) as runtime:
+            async with Runtime.open(persistence=persistence, features=features.borrow()) as runtime:
                 yield runtime, store
         await store.close()
 

@@ -30,11 +30,9 @@ from ._runtime_test_helpers import RuntimeUsageModels
 async def test_launch_preserves_confirmed_limits_and_inherited_usage(
     monkeypatch: pytest.MonkeyPatch, prepared_start: bool,
 ) -> None:
-    from linktools.ai.capability import ExecutionCapability
     from linktools.ai.runtime import RuntimeFeatures
 
-    features = RuntimeFeatures("budget-launch")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("budget-launch", defaults={"execution": {"retain_history": True}})
     features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     async with Persistence.open("budget-launch", storage=PersistenceStorage.in_memory()) as persistence, Runtime.open(
         persistence=persistence, features=model_features(RuntimeUsageModels(), features),

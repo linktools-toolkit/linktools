@@ -7,20 +7,18 @@ import secrets
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
-from copy import copy
 from pathlib import Path
 from typing import TypeVar
 
 from linktools.core import environ
 from pydantic_ai_harness.step_persistence import StepPersistence
-from pydantic_ai.capabilities import AbstractCapability, WrapperCapability
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.workspaces import WorkspaceBackend
 
 from ..asset import AssetStoreReader
 from ..agent import AgentBinding, AgentBindingContract, AgentCatalog, AgentCompiler, CompiledAgent
 from ..steps import NativeStepSource
 from ..capability import (
-    StepPersistenceCapability,
     AgentContext,
     AssetCapability,
     AssetSkillSource,
@@ -28,6 +26,7 @@ from ..capability import (
     SkillSourceRegistry,
     tool_class_from_metadata,
 )
+from ._step_capability import _StepPersistenceCapability
 from ._lifecycle import _RuntimeCloseCoordinator
 from ._native_session import _NativeTurnRead
 from ._feature_policy import _RuntimeFeaturePolicy, _runtime_feature_policy
@@ -209,7 +208,6 @@ async def compose_runtime_components(
     app: "AppT | None" = None,
     metrics: MetricRecorderProvider | None = None,
     features: "RuntimeFeatures[AppT] | RuntimeFeaturesSource[AppT] | None" = None,
-    auto_recover: bool = False,
     authorization: AuthorizationPolicy | None = None,
     lifecycle: "_AgentLifecycle | None" = None,
     wake_graph: Callable[[str, str], Awaitable[None]] | None = None,
@@ -225,6 +223,32 @@ async def compose_runtime_components(
         raise TypeError("features must be RuntimeFeatures or RuntimeFeaturesSource")
     source = features.borrow() if isinstance(features, RuntimeFeatures) else features
     captured = None if source is None else await source.resolve()
+    execution_defaults = {} if captured is None else captured.defaults.get("execution", {})
+    assert isinstance(execution_defaults, dict)  # Resolution validates defaults namespaces.
+    auto_recover = execution_defaults.get("auto_recover", False)
+    if not isinstance(auto_recover, bool):
+        raise TypeError("execution.auto_recover must be bool")
+    execution_checkpoints = execution_defaults.get("checkpoints", False)
+    if not isinstance(execution_checkpoints, bool):
+        raise TypeError("execution.checkpoints must be bool")
+    step_contribution = None
+    if execution_checkpoints:
+        declaration = _StepPersistenceCapability()
+        step_contribution = CapabilityContribution.from_opaque(
+            "capability", declaration.id, declaration, scope="runtime",
+        )
+
+    def runtime_candidates(
+        resolution: RuntimeFeaturesResolution[AppT] | None,
+    ) -> tuple[CapabilityContribution[AppT], ...]:
+        candidates = () if resolution is None else resolution.contributions
+        return candidates if step_contribution is None else (*candidates, step_contribution)
+
+    stream_defaults = {} if captured is None else captured.defaults.get("stream", {})
+    assert isinstance(stream_defaults, dict)  # Resolution validates defaults namespaces.
+    output_preview_field = stream_defaults.get("output_preview_field")
+    if output_preview_field is not None and (not isinstance(output_preview_field, str) or not output_preview_field):
+        raise ValueError("stream.output_preview_field must be a non-empty field name")
     selected_limits = PromptLimits() if captured is None else captured.limits
     workspace = None if captured is None else captured.workspace
     workspace_factory = LocalWorkspaceBackend if captured is None else captured.workspace_factory
@@ -238,15 +262,15 @@ async def compose_runtime_components(
     owns_lifecycle = lifecycle is None
     lifecycle = _AgentLifecycle() if lifecycle is None else lifecycle
     try:
-        candidates: list[CapabilityContribution[object]] = []
+        candidates = runtime_candidates(captured)
         asset_sources: dict[str, AssetStoreReader] = {}
         if captured is not None:
-            candidates.extend(captured.contributions)
             asset_sources.update(_resolution_asset_readers(captured))
         _validate_candidate_uniqueness(candidates)
         policy = _runtime_feature_policy(candidates)
         runtime_capabilities = policy.capabilities
-        execution_capability, session_capability = policy.execution, policy.session
+        execution_commit = CommitPolicy.sync() if captured is None else captured.execution_commit
+        session_capability = policy.session
         memory_scope, tool_responses = policy.memory_scope, policy.tool_responses
         capability_revisions, capability_ids = policy.capability_revisions, policy.capability_ids
         skill_sources = SkillSourceRegistry(tuple(
@@ -255,7 +279,7 @@ async def compose_runtime_components(
         rules = RepositoryInstructions(() if captured is None else captured.instructions.documents)
 
         def build_compiler(resolution) -> AgentCompiler:
-            current = () if resolution is None else resolution.contributions
+            current = runtime_candidates(resolution)
             _validate_candidate_uniqueness(current)
             agents = {item.id: item.value for item in current if item.kind == "agent"}
             models = {} if resolution is None else resolution.models
@@ -281,19 +305,20 @@ async def compose_runtime_components(
                         or selected_workspace.root != workspace.root or selected_workspace.policy != workspace.policy)
                         or current.workspace_factory is not workspace_factory
                         or any(asset_sources.get(key) is not reader for key, reader in _resolution_asset_readers(current).items())
-                        or _runtime_feature_policy(current.contributions).execution.commit.buffer is not policy.execution.commit.buffer):
+                        or current.execution_commit.buffer is not execution_commit.buffer
+                        or current.execution_commit.mode != execution_commit.mode):
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
                                   safe_details={"reason": "runtime_resource_replacement"})
             return current
 
         async def current_compiler() -> AgentCompiler:
             current = await current_resolution()
-            await prepare_runtime_policy(_runtime_feature_policy(() if current is None else current.contributions))
+            await prepare_runtime_policy(_runtime_feature_policy(runtime_candidates(current)))
             return build_compiler(current)
 
         async def current_policy():
             current = await current_resolution()
-            selected_policy = _runtime_feature_policy(() if current is None else current.contributions)
+            selected_policy = _runtime_feature_policy(runtime_candidates(current))
             await prepare_runtime_policy(selected_policy)
             return selected_policy
 
@@ -314,7 +339,7 @@ async def compose_runtime_components(
 
         async def prepare_session_step():
             async with resource_lock:
-                return StepPersistenceCapability().bind(await open_default_steps())
+                return _StepPersistenceCapability().bind(await open_default_steps())
 
         async def prepare_runtime_policy(selected_policy: _RuntimeFeaturePolicy):
             values = selected_policy.capabilities
@@ -325,24 +350,12 @@ async def compose_runtime_components(
                         run_store.capability_writes.register_store(
                             identity, store, durable=identity in persistence.durable_capability_ids,
                         )
-                declaration = next((leaf for feature in values for leaf in runtime_feature_leaves(feature)
-                                    if isinstance(leaf, StepPersistenceCapability)), None)
-                if declaration is not None:
-                    store = declaration.store
-                    if store is None:
-                        store = await open_default_steps()
-                    native = declaration.bind(store)
-
-                    def bind_steps(value):
-                        if value is declaration:
-                            return native
-                        if isinstance(value, WrapperCapability):
-                            bound = copy(value)
-                            bound.wrapped = value.wrapped.visit_and_replace(bind_steps)
-                            return bound
-                        return value
-
-                    values = tuple(value.visit_and_replace(bind_steps) for value in values)
+                if any(isinstance(value, _StepPersistenceCapability) for value in values):
+                    store = await open_default_steps()
+                    values = tuple(
+                        value.bind(store) if isinstance(value, _StepPersistenceCapability) else value
+                        for value in values
+                    )
                 if run_store is not None:
                     for feature in values:
                         for leaf in runtime_feature_leaves(feature):
@@ -429,7 +442,7 @@ async def compose_runtime_components(
             lifecycle=lifecycle,
             run_store=run_store,
             metrics=metrics,
-            commit=execution_capability.commit,
+            commit=execution_commit,
             catalog=catalog,
             compiler=compiler,
             authorization=selected_authorization,
@@ -459,6 +472,7 @@ async def compose_runtime_components(
             memory_scope=memory_scope,
             session_execution_ready=session_capability.enabled,
             auto_recover=auto_recover,
+            output_preview_field=output_preview_field,
             tool_responses=tool_responses,
             wake_graph=wake_graph,
         )
@@ -626,6 +640,7 @@ async def _build_local_components(
     memory_scope: str | None,
     session_execution_ready: bool,
     auto_recover: bool,
+    output_preview_field: str | None,
     tool_responses: ToolResponseFixture | None,
     wake_graph: Callable[[str, str], Awaitable[None]] | None,
 ) -> _RuntimeComponents:
@@ -726,6 +741,7 @@ async def _build_local_components(
             state.object_store(PersistenceDomain.EXECUTION),
             authorization,
             execution_trace_atomic=execution_trace_atomic,
+            commit=commit,
             sessions=state.conversation.sessions,
             resolve_task_admissions=lambda: state.task.admissions,
             catalog=catalog,
@@ -782,6 +798,7 @@ async def _build_local_components(
             workspace_factory=workspace_factory,
             tool_responses=tool_responses,
             canonical_memory_store=canonical_memory_store,
+            output_preview_field=output_preview_field,
         )
     except BaseException:
         raise
@@ -907,22 +924,17 @@ async def _build_local_components(
             from ._tool import RuntimeToolOperationBridge
 
             policy = _runtime_feature_policy(binding.compiled_agent.runtime_contributions)
-            if policy.session.checkpoints:
-                if settled_split or any(member.storage_group is not conversation_group for member in (
-                    state.execution.executions.state_store, state.checkpoint.tools.state_store,
-                )):
-                    raise AIError(
-                        ErrorCode.STORAGE_CAPABILITY_MISSING,
-                        "Session checkpoints require Session, Step and tool receipts in one SQL transaction",
-                    )
-                native = await prepare_session_step()
-            else:
-                if not policy.restart_checkpoints:
-                    return None
-                values = await prepare_runtime_capabilities(binding.compiled_agent)
-                steps = tuple(leaf for value in values for leaf in runtime_feature_leaves(value)
-                              if isinstance(leaf, StepPersistence))
-                native = AtomicStepPersistence.adapt(steps[0]) if len(steps) == 1 else None
+            if not policy.session.checkpoints:
+                return None
+            coowned = all(member.storage_group is conversation_group for member in (
+                state.execution.executions.state_store, state.checkpoint.tools.state_store,
+            ))
+            if not coowned and split_sql_source is None:
+                raise AIError(
+                    ErrorCode.STORAGE_CAPABILITY_MISSING,
+                    "Session checkpoints require coowned SQL storage or a supported split SQL topology",
+                )
+            native = await prepare_session_step()
             if (type(native) is not AtomicStepPersistence or type(native.store) is not SqlStepStore
                     or native.store.store_key != SqlStepStore.scope_key(namespace=namespace, tenant_id=tenant_id)):
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY, "Canonical Step requires native SQL persistence")
@@ -935,7 +947,6 @@ async def _build_local_components(
                     raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING,
                                   "Cross-store Step requires provisioned separate Conversation and Execution/Checkpoint databases")
 
-                from ..capability import ExecutionCapability
                 from ._canonical_split_step import _CanonicalSplitStep
 
                 compiled = binding.compiled_agent
@@ -962,7 +973,7 @@ async def _build_local_components(
                         or compiled.selected_subagents or compiled.selected_capabilities
                         or binding.output_binding.mode != "text"
                         or policy.durable_trace or policy.memory_scope is not None
-                        or any(type(leaf) not in (StepPersistence, StepPersistenceCapability, ExecutionCapability)
+                        or any(type(leaf) not in (StepPersistence, _StepPersistenceCapability)
                                for item in policy.capabilities for leaf in runtime_feature_leaves(item))):
                     raise AIError(
                         ErrorCode.STORAGE_CAPABILITY_MISSING,
@@ -1083,7 +1094,10 @@ async def _build_local_components(
                 from ._tool import ToolOperationDecision
 
                 if original.owner is None:
-                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    raise AIError(
+                        ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                        safe_details={"recovery_stage": "subagent", "reason": "native_child_original_claim_unowned"},
+                    )
                 reserved = NativeSubagentAdmission(
                     state.session_turns, key, generation, state.checkpoint.tools,
                     ToolOperationDecision(original.tool_operation_id, original.owner, original.fence, False),
@@ -1094,10 +1108,18 @@ async def _build_local_components(
                 binding=binding.binding_contract, mode=mode, timeout_seconds=0.0, reserved=reserved,
             )
             result_payload, error_code, error_payload = await tools.native_delegate_payload(original, child, result)
-            receipt = await backend._runtime_commands.settle_native_subagent_result(
-                state.session_turns, key, generation=generation, principal=principal, original=original,
-                child=child, result_payload=result_payload, error_code=error_code, error_payload=error_payload,
-            )
+            try:
+                receipt = await backend._runtime_commands.settle_native_subagent_result(
+                    state.session_turns, key, generation=generation, principal=principal, original=original,
+                    child=child, result_payload=result_payload, error_code=error_code, error_payload=error_payload,
+                )
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                    raise
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"recovery_stage": "subagent", "reason": "native_child_result_commit_unconfirmed"},
+                ) from error
             await execution.request_terminal_handoff(
                 child.execution_id, tenant_id=principal.tenant_id, terminal_commit=child.conversation,
             )

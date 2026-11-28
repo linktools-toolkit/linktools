@@ -89,12 +89,10 @@ from ..capability import (
     tool_context_dedupe_from_metadata,
     tool_plan_safe_from_metadata,
     validate_tool_metadata,
-    ExecutionCapability,
     FileSystemCapability,
     TraceCapability,
     MemoryCapability,
     ShellCapability,
-    StepPersistenceCapability,
     tool_effect_policy_from_metadata,
 )
 from ..core import (
@@ -121,6 +119,7 @@ from ..workspace import (
     Workspace,
 )
 
+from ._step_capability import _StepPersistenceCapability
 from ._budget import RunBudgetContext, RunBudgetCapability
 from ._current_toolsets import create_business_toolset, create_current_toolset
 from ._tool_metrics import ToolMetricContext
@@ -301,6 +300,7 @@ class AgentExecutor:
         workspace_factory: Callable[..., WorkspaceBackend] | None = None,
         tool_responses: ToolResponseFixture | None = None,
         canonical_memory_store: Callable[[str, str, str], MemoryStore] | None = None,
+        output_preview_field: str | None = None,
     ) -> None:
         if not isinstance(skill_sources, SkillSourceRegistry):
             raise TypeError("skill_sources must be SkillSourceRegistry")
@@ -313,6 +313,7 @@ class AgentExecutor:
         self._workspace_factory = workspace_factory
         self._tool_responses = tool_responses
         self._canonical_memory_store = canonical_memory_store
+        self._output_preview_field = output_preview_field
 
     async def capture_preload_skills(self, binding: AgentBinding) -> tuple[Mapping[str, JsonValue], ...]:
         """Capture preload roots inside the admitted Agent's configured scope.
@@ -432,7 +433,7 @@ class AgentExecutor:
             ("subagents", compiled.selected_subagents and (
                 not native_subagents or not canonical_step or split_step
             )),
-            ("checkpoints", (policy.session.checkpoints or policy.restart_checkpoints) != canonical_step),
+            ("checkpoints", policy.session.checkpoints != canonical_step),
             ("tool_response_fixture", policy.tool_responses is not None),
         ) if selected]
         if unsupported:
@@ -929,7 +930,7 @@ class AgentExecutor:
                         def select_session_capability(
                             capability: AbstractCapability[AgentContext[object]],
                         ) -> AbstractCapability[AgentContext[object]] | None:
-                            if isinstance(capability, (StepPersistence, StepPersistenceCapability, CapabilityPersistence)):
+                            if isinstance(capability, (StepPersistence, _StepPersistenceCapability, CapabilityPersistence)):
                                 # A native Session uses its own checkpoint and cannot lend an
                                 # independent Execution's durable capability-write authority.
                                 return None
@@ -972,6 +973,7 @@ class AgentExecutor:
                         runtime_capabilities=runtime_capabilities,
                         callbacks=callbacks,
                         model_journal=model_journal,
+                        output_preview_field=self._output_preview_field,
                     )
                     if scope.thinking is not None:
                         capabilities = (*capabilities, _thinking_capability(scope.thinking))
@@ -1265,6 +1267,7 @@ async def _materialize_agent(
     current_agent: Callable[[CompiledAgent], Awaitable[CompiledAgent]] | None = None,
     asset_sources: Mapping[str, AssetStoreReader] | None = None,
     collect_compaction: Callable[[AgentRunRecorder], None] | None = None,
+    output_preview_field: str | None = None,
 ) -> tuple[
     PydanticAgent[AgentContext[object], object],
     tuple[AbstractCapability[AgentContext[object]], ...],
@@ -1564,6 +1567,7 @@ async def _materialize_agent(
     runtime_policy = _runtime_feature_policy(compiled_agent.runtime_contributions)
     platform = await compose_platform_capabilities(
         runtime_capabilities=bound_runtime_capabilities,
+        retain_history=compiled_agent.retain_history,
         capability_revisions=runtime_policy.capability_revisions,
         initial_output_retries_used=scope.output_retries_used,
         transcript_start=(scope.run_store.checkpoint_transcript_start(
@@ -1637,7 +1641,7 @@ async def _materialize_agent(
             streamed_output_bytes=scope.streamed_output_bytes,
             output_preview=None if scope.parent_agent_run_id is not None or scope.context.parent_execution_id is not None else OutputPreview.from_binding(
                 scope.binding.output_binding,
-                runtime_policy.execution,
+                output_preview_field,
             ),
         )
     )

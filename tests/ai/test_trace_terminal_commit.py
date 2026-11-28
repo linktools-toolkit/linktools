@@ -17,7 +17,7 @@ from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.capability import ExecutionCapability, TraceCapability, AgentContext
+from linktools.ai.capability import TraceCapability, AgentContext
 from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime import RuntimeFeatures
@@ -59,11 +59,12 @@ async def _run_observed(path: Path, backend: str, policy: CommitPolicy, monkeypa
         await release.wait()
         return ModelResponse(parts=[TextPart("trace tail")])
 
-    features = RuntimeFeatures("trace-terminal")
+    features = RuntimeFeatures("trace-terminal",
+                               defaults={"execution": {"retain_history": True}},
+                               execution_commit=CommitPolicy.terminal())
     features.tool(lookup, effect_policy="none")
     features.agent("default", model="default", allow_tools=("lookup",))
     for capability in (
-        ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()),
         TraceCapability(commit=policy),
         *((native_checkpoint(),) if checkpoint else ()),
     ):

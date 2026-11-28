@@ -15,7 +15,7 @@ from pydantic_ai.models.function import AgentInfo
 from sqlalchemy import event
 from sqlalchemy.engine import Connection
 
-from linktools.ai.capability import AgentContext, ExecutionCapability
+from linktools.ai.capability import AgentContext
 from linktools.ai.core import CommitPolicy, ExecutionStatus, TaskStatus, ToolOperationStatus, agent_run_id, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import Execution, ExecutionRecord
@@ -127,10 +127,7 @@ async def _tool_runtime(
         await gate.finish.wait()
         return ModelResponse(parts=[TextPart("done")])
 
-    features = RuntimeFeatures("pending-tool-staging")
-    features.capability(ExecutionCapability(
-        retain_history=True, commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync(),
-    ), scope="runtime")
+    features = RuntimeFeatures("pending-tool-staging", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync())
     features.tool(work, effect_policy=effect_policy)
     features.agent("default", model="default", allow_tools=("work",))
     storage = PersistenceStorage.sqlite(tmp_path / "state.db",

@@ -10,7 +10,6 @@ from pydantic_ai.models import Model
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 
-from linktools.ai.capability import StepPersistenceCapability
 from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus, service_principal
 from linktools.ai.execution import RetryExecutionRequest
 from linktools.ai.session import CreateSessionRequest, ForkSessionRequest
@@ -88,9 +87,8 @@ async def recovery_and_cancellation(root: Path) -> None:
     async def answer(messages, info):
         yield "recovered"
 
-    features = RuntimeFeatures()
+    features = RuntimeFeatures(defaults={"execution": {"checkpoints": True}})
     features.model("default", OfflineModel(FunctionModel(stream_function=blocked)))
-    features.capability(StepPersistenceCapability())
     storage = PersistenceStorage.from_root(root)
     original_actor = service_principal("default", "demo")
     async with Runtime.open("recovery", storage=storage, features=features) as owner:
@@ -101,7 +99,7 @@ async def recovery_and_cancellation(root: Path) -> None:
     # Handoff closes this producer without cancelling the admitted execution.
     # The local SQLite backend provisions its own schema explicitly on open.
     features.model("default", OfflineModel(FunctionModel(stream_function=answer)))
-    async with Runtime.open("recovery", storage=storage, features=features, auto_recover=False) as successor:
+    async with Runtime.open("recovery", storage=storage, features=features) as successor:
         recovered = await successor.executions.recover(
             execution_id, principal=successor.default_principal, idempotency_key="take-over",
         )

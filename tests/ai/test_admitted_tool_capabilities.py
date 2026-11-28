@@ -6,7 +6,7 @@ import pytest
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturn, ToolReturnPart
 
-from linktools.ai.capability import AgentContext, ReferencedInputsCapability, SessionCapability, StepPersistenceCapability
+from linktools.ai.capability import AgentContext, ReferencedInputsCapability, SessionCapability
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistencePlan, PersistenceStorage
@@ -25,7 +25,7 @@ class _HostAuthorization(TenantAuthorizationPolicy):
     """Authorize the SQL fixtures' session operations."""
 
 
-def _features(seen, *, step=None):
+def _features(seen, *, checkpoints=False):
     class BoundCapability(AbstractCapability):
         pass
 
@@ -39,8 +39,8 @@ def _features(seen, *, step=None):
         return ModelResponse(parts=[ToolCallPart("inspect", {}, tool_call_id="inspect-1")])
 
     features = RuntimeFeatures("admitted-tool-capabilities")
-    if step is not None:
-        features.capability(step, scope="runtime")
+    if checkpoints:
+        features.capability(SessionCapability(checkpoints=True), scope="runtime")
     features.capability(BoundCapability(), id=_SELECTED.id, revision=_SELECTED.revision, scope="agent")
     features.tool(inspect, effect_policy="none")
     for name, allowed in (("enabled", (_SELECTED.id,)), ("disabled", ())):
@@ -68,23 +68,22 @@ async def test_standalone_tool_context_has_selected_identity_and_revision():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("step", (StepPersistenceCapability(), SessionCapability(checkpoints=True)))
-async def test_native_tool_context_omits_registered_but_unselected_capability(tmp_path, step):
+async def test_native_tool_context_omits_registered_but_unselected_capability(tmp_path):
     seen = []
     async with Runtime.open(
         "admitted-tool-capabilities", storage=PersistenceStorage.sqlite(tmp_path / "context.db"),
-        features=_features(seen, step=step), authorization=_HostAuthorization(),
+        features=_features(seen, checkpoints=True), authorization=_HostAuthorization(),
     ) as runtime:
         actor = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=actor)
-        handle = await runtime.sessions.start("session", "inspect", agent="disabled", principal=actor,
+        handle = await runtime.sessions.start_turn("session", "inspect", agent="disabled", principal=actor,
                                               idempotency_key="allowed")
         assert (await handle.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
         [context] = seen
         assert context.selected_capabilities == ()
 
         with pytest.raises(AIError) as unsupported:
-            await runtime.sessions.start("session", "inspect", agent="enabled", principal=actor,
+            await runtime.sessions.start_turn("session", "inspect", agent="enabled", principal=actor,
                                          idempotency_key="unsupported")
         assert unsupported.value.code is ErrorCode.REQUEST_FIELD_INVALID
         assert unsupported.value.safe_details["features"] == ["agent_capabilities"]
@@ -145,7 +144,7 @@ async def test_native_step_only_loads_exact_selected_reference_and_replay_is_ine
     async with Runtime.open(namespace, storage=storage, features=features, authorization=_HostAuthorization()) as runtime:
         actor = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=actor)
-        first = await runtime.sessions.start("session", "Read evidence", principal=actor, agent="default",
+        first = await runtime.sessions.start_turn("session", "Read evidence", principal=actor, agent="default",
                                              idempotency_key="first")
         final = await first.wait_final(timeout_seconds=10)
         if mode == "wrong_revision":
@@ -154,7 +153,7 @@ async def test_native_step_only_loads_exact_selected_reference_and_replay_is_ine
         else:
             assert final.status is ExecutionStatus.SUCCEEDED and final.view["output"] == {"text": "done"}
     async with Runtime.open(namespace, storage=storage, features=features, authorization=_HostAuthorization()) as runtime:
-        replay = await runtime.sessions.start("session", "Read evidence", principal=actor, agent="default",
+        replay = await runtime.sessions.start_turn("session", "Read evidence", principal=actor, agent="default",
                                               idempotency_key="first")
         assert replay.key == first.key
         assert (await replay.wait_final(timeout_seconds=5)).view == final.view
@@ -176,7 +175,7 @@ async def test_referenced_input_capability_remains_unavailable_without_same_stor
     features.agent("default", allow_tools=(), allow_capabilities=(_SOURCE.id,), allow_skills=(), allow_subagents=())
     model_features(_Models(_UsageFunctionModel(forbidden)), features)
     if split:
-        features.capability(StepPersistenceCapability(), scope="runtime")
+        features.capability(SessionCapability(checkpoints=True), scope="runtime")
         execution = StorageRoute.sqlite(tmp_path / "execution.db")
         storage = PersistenceStorage(PersistencePlan(
             conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
@@ -189,7 +188,7 @@ async def test_referenced_input_capability_remains_unavailable_without_same_stor
         await runtime.sessions.create_turn_session("session", principal=actor)
         before = await runtime.history.turn_session("session", principal=actor)
         with pytest.raises(AIError) as rejected:
-            await runtime.sessions.start("session", "Do not dispatch", agent="default", principal=actor,
+            await runtime.sessions.start_turn("session", "Do not dispatch", agent="default", principal=actor,
                                          idempotency_key="forbidden")
         assert rejected.value.code is (ErrorCode.STORAGE_CAPABILITY_MISSING if split else ErrorCode.REQUEST_FIELD_INVALID)
         assert await runtime.history.turn_session("session", principal=actor) == before

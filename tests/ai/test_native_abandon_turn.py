@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, UserPromptPart
 
-from linktools.ai.capability import StepPersistenceCapability
+from linktools.ai.capability import SessionCapability
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.core import (
     ExecutionLineageKind, ExecutionStatus, StopReason, TenantAuthorizationPolicy, ToolOperationStatus, UsageMetrics,
@@ -51,7 +51,7 @@ async def test_expired_ordinary_turn_can_be_released_without_replay(tmp_path, mo
         return ModelResponse(parts=[TextPart("retained answer")])
 
     features = model_features(_Models(_UsageFunctionModel(model)), RuntimeFeatures("abandon"))
-    features.capability(StepPersistenceCapability())
+    features.capability(SessionCapability(checkpoints=True))
     features.agent("default", model="default", allow_subagents=("child",), allow_tools=(), allow_skills=())
     features.agent("child", model="default", allow_subagents=(), allow_tools=(), allow_skills=())
     monkeypatch.setattr(_RegenerableTurnRunner, "_settle_with_lease", crash_before_dispatch)
@@ -61,18 +61,18 @@ async def test_expired_ordinary_turn_can_be_released_without_replay(tmp_path, mo
     ):
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=principal)
-        turn_id = await runtime.sessions.start_turn(
+        turn_id = (await runtime.sessions.start_turn(
             "session", "discard this prompt", agent="default", principal=principal, idempotency_key="old",
-        )
+        )).key.turn_id
         await asyncio.wait_for(stopped.wait(), timeout=5)
         key = SessionTurnKey("session", turn_id)
         turns = state.session_turns
 
         with pytest.raises(AIError) as denied:
-            await runtime.sessions.abandon_turn("session", turn_id, expected_generation=1, principal=replace(principal, principal_id="other"))
+            await runtime.sessions.recover_turn("session", turn_id, expected_generation=1, principal=replace(principal, principal_id="other"))
         assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
         before = await turns.get_session("session")
-        assert not await runtime.sessions.abandon_turn("session", turn_id, expected_generation=1, principal=principal)
+        assert not await runtime.sessions.recover_turn("session", turn_id, expected_generation=1, principal=principal)
         assert (await turns.get_turn(key))["state"] == "accepted"
         assert await turns.get_session("session") == before
 
@@ -90,7 +90,7 @@ async def test_expired_ordinary_turn_can_be_released_without_replay(tmp_path, mo
                 return await original_finish(*args, **kwargs)
 
             monkeypatch.setattr(turns, "finish", cancel_before_abandon)
-            assert not await runtime.sessions.abandon_turn("session", turn_id, expected_generation=1, principal=principal)
+            assert not await runtime.sessions.recover_turn("session", turn_id, expected_generation=1, principal=principal)
             assert (await turns.get_turn(key))["state"] == "cancelling"
             assert await turns.get_session("session") == before
             assert prompts == []
@@ -140,7 +140,7 @@ async def test_expired_ordinary_turn_can_be_released_without_replay(tmp_path, mo
         if any(status not in terminal_reasons for status in child_statuses):
             previous = await turns.get_turn(key)
             with pytest.raises(AIError) as blocked:
-                await runtime.sessions.abandon_turn("session", turn_id, expected_generation=1, principal=principal)
+                await runtime.sessions.recover_turn("session", turn_id, expected_generation=1, principal=principal)
             assert blocked.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
             assert blocked.value.safe_details["reason"] == "abandon_child_disposition_required"
             assert await turns.get_turn(key) == previous
@@ -151,15 +151,15 @@ async def test_expired_ordinary_turn_can_be_released_without_replay(tmp_path, mo
             ) == unknown
             assert prompts == []
             return
-        assert not await runtime.sessions.abandon_turn("session", turn_id, expected_generation=2, principal=principal)
+        assert not await runtime.sessions.recover_turn("session", turn_id, expected_generation=2, principal=principal)
         assert (await turns.get_turn(key))["generation"] == 1
         pytest.importorskip("starlette")
         from linktools.ai.web import create_app
         from .test_web_console import _HEADERS, client
 
         async with client(create_app(runtime=runtime)) as http:
-            released = await http.post("/api/session/abandon?session_id=session", headers=_HEADERS, json={
-                "turn_id": turn_id, "expected_generation": 1, "request_id": "explicit-abandon",
+            released = await http.post("/api/session/recover?session_id=session", headers=_HEADERS, json={
+                "mode": "end", "turn_id": turn_id, "expected_generation": 1, "request_id": "explicit-abandon",
             })
             assert released.status_code == 200 and released.json() == {"accepted": True}
             shown = await http.get("/api/session", params={"session_id": "session", "turn_id": turn_id})
@@ -167,7 +167,7 @@ async def test_expired_ordinary_turn_can_be_released_without_replay(tmp_path, mo
         assert await state.checkpoint.tools.get_operation(
             unknown.tool_operation_id, tenant_id=principal.tenant_id,
         ) == unknown
-        assert not await runtime.sessions.abandon_turn("session", turn_id, expected_generation=1, principal=principal)
+        assert not await runtime.sessions.recover_turn("session", turn_id, expected_generation=1, principal=principal)
         old = await turns.get_turn(key)
         assert (old["state"], old["generation"], old["result_json"]) == (
             "failed", 1, {"error_code": ErrorCode.STORAGE_RECOVERY_REQUIRED.value, "abandoned": True},
@@ -175,9 +175,9 @@ async def test_expired_ordinary_turn_can_be_released_without_replay(tmp_path, mo
         assert await repository.list_children(turn_id, tenant_id=principal.tenant_id) == children_before
         assert (await turns.get_session("session"))["active_turn_id"] is None
 
-        next_id = await runtime.sessions.start_turn(
+        next_id = (await runtime.sessions.start_turn(
             "session", "new prompt", agent="default", principal=principal, idempotency_key="new",
-        )
+        )).key.turn_id
         new_key = SessionTurnKey("session", next_id)
         row = await _wait_for_committed(lambda: turns.get_turn(new_key), lambda value: value["state"] != "accepted")
         assert row["state"] == "succeeded", row["result_json"]
@@ -186,9 +186,9 @@ async def test_expired_ordinary_turn_can_be_released_without_replay(tmp_path, mo
         assert len(instructions) == 1 and notice in instructions[0]
         assert (await turns.get_turn(key)) == old
         if boundary == "no-child":
-            later = await runtime.sessions.start_turn(
+            later = (await runtime.sessions.start_turn(
                 "session", "one more prompt", agent="default", principal=principal, idempotency_key="later",
-            )
+            )).key.turn_id
             later_key = SessionTurnKey("session", later)
             row = await _wait_for_committed(lambda: turns.get_turn(later_key), lambda value: value["state"] != "accepted")
             assert row["state"] == "succeeded", row["result_json"]

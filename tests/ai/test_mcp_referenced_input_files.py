@@ -14,7 +14,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.toolsets import FunctionToolset
 
 from linktools.ai.asset import AssetMaterializer
-from linktools.ai.capability import ExecutionCapability, ReferencedInputResult, ReferencedInputsCapability, TraceCapability
+from linktools.ai.capability import ReferencedInputResult, ReferencedInputsCapability, TraceCapability
 from linktools.ai.core import ExecutionStatus, ToolOperationStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -140,9 +140,8 @@ async def test_mcp_reads_admitted_files_without_changing_receipts_and_cleans_aft
             return ModelResponse(parts=[ToolCallPart(info.function_tools[0].name, arguments, tool_call_id="inspect")])
         return ModelResponse(parts=[TextPart("done")])
 
-    group = RuntimeFeatures("mcp-original-inputs")
+    group = RuntimeFeatures("mcp-original-inputs", defaults={"execution": {"retain_history": True}})
     group.mcp(_server(tmp_path, mode))
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.capability(TraceCapability(), scope="runtime")
     group.capability(ReferencedInputsCapability(authorized_load_many=load, mcp_inputs={_SELECTOR: resolve_inputs}),
                      id=_SOURCE.id, revision=_SOURCE.revision, scope="agent")

@@ -17,7 +17,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RequestUsage
 
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 from linktools.ai.core import TaskStatus
 from linktools.ai.execution import ExecutionInputContext
 from linktools.ai.inputs import AgentTaskInput, AgentTaskInputContext
@@ -94,10 +94,9 @@ async def test_prepared_native_context_reopens_without_rebuilding(
             return await handler(request_context)
 
     def features() -> RuntimeFeatures:
-        value = RuntimeFeatures("prepared-native")
+        value = RuntimeFeatures("prepared-native", defaults={"execution": {"retain_history": True}})
         value.agent("default", allow_tools=(), allow_skills=(), allow_subagents=())
         value.model("default", _Binding(FunctionModel(stream_function=stream, model_name="live-model")))
-        value.capability(ExecutionCapability(retain_history=True))
         value.capability(TraceCapability())
         value.capability(ObserveDirect(), id="native-context-observer")
         return value

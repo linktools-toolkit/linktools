@@ -9,7 +9,6 @@ from pydantic_ai.capabilities import ProcessHistory
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai_harness.step_persistence import SqliteStepStore, StepPersistence
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
@@ -34,9 +33,8 @@ async def test_cold_runtime_continues_sticky_snapshot_with_source_owned_history(
         return ModelResponse(parts=[TextPart("continued")])
 
     def features(model):
-        result = RuntimeFeatures("sticky-native")
+        result = RuntimeFeatures("sticky-native", defaults={"execution": {"retain_history": retain_history}})
         result.agent("default", allow_tools=())
-        result.capability(ExecutionCapability(retain_history=retain_history), scope="runtime")
         result.capability(ProcessHistory(lambda _messages: [ModelRequest(parts=[UserPromptPart("sticky context")])]),
                           id="sticky", scope="runtime")
         result.capability(StepPersistence(store=SqliteStepStore(database=tmp_path / "steps.db"), capture_frontier=True),
@@ -44,7 +42,7 @@ async def test_cold_runtime_continues_sticky_snapshot_with_source_owned_history(
         return model_features(_Models(_UsageFunctionModel(model)), result)
 
     async with Persistence.open("sticky-native", storage=PersistenceStorage.from_root(tmp_path / "runtime", exclusive_writer=True)) as persistence:
-        async with Runtime.open(persistence=persistence, features=features(stopped), auto_recover=False) as runtime:
+        async with Runtime.open(persistence=persistence, features=features(stopped)) as runtime:
             execution = await runtime.agents.get().start("question", idempotency_key="start")
             await asyncio.wait_for(blocked.wait(), 5)
             await runtime.handoff()
@@ -62,7 +60,7 @@ async def test_cold_runtime_continues_sticky_snapshot_with_source_owned_history(
             assert [part.content for message in observed.messages for part in message.parts
                     if isinstance(part, UserPromptPart)] == ["sticky context"]
     async with Persistence.open("sticky-native", storage=PersistenceStorage.from_root(tmp_path / "runtime", exclusive_writer=True)) as persistence:
-        async with Runtime.open(persistence=persistence, features=features(resumed), auto_recover=False) as runtime:
+        async with Runtime.open(persistence=persistence, features=features(resumed)) as runtime:
             reader = runtime._run_store.read_store(PersistenceDomain.CHECKPOINT)
             assert await reader.latest_snapshot(run_id=source, include_interrupted=True) == snapshot
             await runtime.executions.recover(execution.execution_id, principal=runtime.default_principal,

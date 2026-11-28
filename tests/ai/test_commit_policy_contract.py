@@ -6,22 +6,24 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import DEFAULT_TRACE_BATCH_SIZE, DEFAULT_TRACE_FLUSH_INTERVAL
 from linktools.ai.core import CommitPolicy
 
 
-def test_commit_policy_defaults_and_immutable_shared_declarations() -> None:
-    assert ExecutionCapability().commit == CommitPolicy.sync()
+@pytest.mark.asyncio
+async def test_commit_policy_defaults_and_immutable_shared_declarations() -> None:
+    assert (await RuntimeFeatures().resolve()).execution_commit == CommitPolicy.sync()
     assert TraceCapability().commit == CommitPolicy.batch(
         batch_size=DEFAULT_TRACE_BATCH_SIZE,
         flush_interval=DEFAULT_TRACE_FLUSH_INTERVAL,
     )
     assert CommitPolicy("batch") == CommitPolicy.batch()
     policy = CommitPolicy.terminal()
-    first = ExecutionCapability(commit=policy)
-    second = ExecutionCapability(commit=policy)
-    assert first.commit is second.commit is policy
+    first = await RuntimeFeatures(execution_commit=policy).resolve()
+    second = await RuntimeFeatures(execution_commit=policy).resolve()
+    assert first.execution_commit is second.execution_commit is policy
     with pytest.raises(FrozenInstanceError):
         policy.mode = "sync"
 
@@ -41,15 +43,12 @@ def test_commit_policy_rejects_invalid_declarations(settings: dict[str, object])
 
 def test_persistence_owners_reject_unsupported_policy_modes_and_removed_arguments() -> None:
     with pytest.raises(ValueError):
-        ExecutionCapability(commit=CommitPolicy.batch(batch_size=2, flush_interval=1))
+        RuntimeFeatures(execution_commit=CommitPolicy.batch(batch_size=2, flush_interval=1))
     assert TraceCapability(commit=CommitPolicy.terminal()).commit == CommitPolicy.terminal()
-    assert ExecutionCapability(
-        retain_history=True, commit=CommitPolicy.sync(),
-    ).retain_history is True
     with pytest.raises(TypeError):
-        ExecutionCapability(cache=None)
+        RuntimeFeatures(cache=None)
     with pytest.raises(TypeError):
-        ExecutionCapability(storage=None)
+        RuntimeFeatures(storage=None)
     with pytest.raises(TypeError):
         TraceCapability(batch_size=2)
     with pytest.raises(TypeError):

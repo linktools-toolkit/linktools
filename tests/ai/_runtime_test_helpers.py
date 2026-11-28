@@ -29,7 +29,7 @@ from linktools.ai.capability import ShellCapability
 from linktools.ai.capability import AssetCapability, FileSystemCapability, tool_metadata
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.model import ModelBinding
-from linktools.ai.core import JsonValue
+from linktools.ai.core import CommitPolicy, ImmutableJsonMapping, JsonValue
 from linktools.ai.capability import TraceCapability
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepPersistence, StepStore, SqliteStepStore
 from linktools.ai.runtime._tool_boundary import ManagedToolDescriptor
@@ -43,6 +43,18 @@ _ReadT = TypeVar("_ReadT")
 def is_tool_retry(part: object) -> bool:
     """Recognize native retry feedback on the supported SDK message shapes."""
     return isinstance(part, ToolReturnPart) and part.outcome == "retried"
+
+
+def configure_execution(
+    features: RuntimeFeatures, *, retain_history: bool = False, commit: CommitPolicy = CommitPolicy.sync(),
+) -> RuntimeFeatures:
+    """Configure a feature fixture returned by another helper before Runtime opens."""
+    defaults = dict(features.defaults)
+    execution = defaults.get("execution", {})
+    assert isinstance(execution, dict)
+    features._defaults = ImmutableJsonMapping({**defaults, "execution": {**execution, "retain_history": retain_history}})
+    features._execution_commit = commit
+    return features
 
 
 def model_features(

@@ -547,8 +547,8 @@ async def test_native_sql_independent_connections_choose_one_turn_winner(tmp_pat
             with monkeypatch.context() as patch:
                 patch.setattr(type(stores[0]), "accept", meet)
                 results = await asyncio.wait_for(asyncio.gather(
-                    first.sessions.start("chat", "first", agent="default", principal=principal, idempotency_key="request"),
-                    second.sessions.start(
+                    first.sessions.start_turn("chat", "first", agent="default", principal=principal, idempotency_key="request"),
+                    second.sessions.start_turn(
                         "chat", "second" if identity == "conflicting_digest" else "first",
                         agent="default", principal=principal,
                         idempotency_key="different" if identity == "different_request" else "request",

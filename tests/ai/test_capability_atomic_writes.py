@@ -24,7 +24,7 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.tools import RunContext
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.capability import AgentContext, ExecutionCapability, TraceCapability
+from linktools.ai.capability import AgentContext, TraceCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import CommitPolicy, ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
@@ -280,11 +280,8 @@ async def _opened(
 
     templates = tuple(kind(id, probe, storage=route, commit=policy, terminal=terminal)
                       for kind, id, route, policy in zip((_Audit, _Index), ("audit", "index"), routes, policies))
-    features = RuntimeFeatures("atomic-capabilities")
+    features = RuntimeFeatures("atomic-capabilities", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync())
     features.agent("default", model="default", allow_tools=())
-    features.capability(ExecutionCapability(retain_history=True,
-        commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync(),
-    ), scope="runtime")
     if trace:
         features.capability(TraceCapability(commit=CommitPolicy.terminal()), scope="runtime")
     for id, capability in zip(("audit", "index"), templates):

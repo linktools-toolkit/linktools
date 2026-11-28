@@ -9,7 +9,7 @@ import httpx
 import pytest
 from pydantic_ai.messages import BinaryContent, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 
-from linktools.ai.capability import ExecutionCapability, FileSystemCapability, StepPersistenceCapability
+from linktools.ai.capability import FileSystemCapability, SessionCapability
 from linktools.ai.core import ExecutionStatus, IdempotencyStatus, ToolOperationStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -18,6 +18,7 @@ from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.runtime._native_subagent import NativeSubagentAdmission
 from linktools.ai.workspace import ToolPermissionPolicy, Workspace, WorkspacePolicy
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import _wait_for_committed
 from .test_canonical_turn_subagents import _HEADERS, _SESSION, _HostAuthorization, _model
 
@@ -80,13 +81,13 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
 
     name = "web-recovered-reserved-child"
-    features = RuntimeFeatures(name)
+    features = RuntimeFeatures(name, defaults={"execution": {"retain_history": True}})
     features.model("parent", _model("parent", parent))
     child_model = _model("child", child)
     child_model.contract["input_mime_types"] = ["text/plain"]
     features.model("child", child_model)
-    features.capability(ExecutionCapability(retain_history=True))
-    features.capability(StepPersistenceCapability())
+    configure_execution(features, retain_history=True)
+    features.capability(SessionCapability(checkpoints=True))
     features.capability(FileSystemCapability(workspace))
     features.agent("default", model="parent", allow_subagents=("child",), allow_tools=(), allow_skills=())
     features.agent("child", model="child", allow_subagents=(), allow_tools=(), allow_skills=())
@@ -97,7 +98,7 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
         async with (
             Persistence.open(name, storage=storage) as state,
             Runtime.open(persistence=state, features=features,
-                         authorization=_HostAuthorization(), auto_recover=False) as runtime,
+                         authorization=_HostAuthorization()) as runtime,
         ):
             app = create_app(runtime=runtime, local_workspace=True)
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8765") as http:
@@ -185,18 +186,21 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
             monkeypatch.setattr(commands, "settle_native_subagent_result", lose_settlement_ack)
 
         recovered = await http.post("/api/session/recover", params=params, headers=_HEADERS,
-                                    json={"turn_id": turn_id, "request_id": "recover"})
+                                    json={"turn_id": turn_id, "request_id": "recover", "mode": "resume"})
         children = await state.execution.executions.list_children(turn_id, tenant_id=tenant_id)
         receipt = await state.execution.idempotency.get("execution.subagent", request_key, tenant_id=tenant_id)
         row = await turns.get_turn(key)
         settled = await state.checkpoint.tools.get_operation(original.tool_operation_id, tenant_id=tenant_id)
         if missing:
             assert recovered.status_code == 503 and recovered.json()["code"] == "STORAGE_RECOVERY_REQUIRED", recovered.text
-            assert recovered.json()["safe_details"] == {"reason": "native_child_reservation_missing", "generation": 2}
+            assert recovered.json()["safe_details"] == {
+                "recovery_stage": "subagent", "reason": "native_child_reservation_missing",
+                "abandonable": True, "generation": 2,
+            }
             assert row["state"] == "accepted" and row["generation"] == 2 and settled == original
             assert not children and receipt is None
-            ended = await http.post("/api/session/abandon", params=params, headers=_HEADERS, json={
-                "turn_id": turn_id, "expected_generation": 2, "request_id": "end-after-blocked-recovery",
+            ended = await http.post("/api/session/recover", params=params, headers=_HEADERS, json={
+                "mode": "end", "turn_id": turn_id, "expected_generation": 2, "request_id": "end-after-blocked-recovery",
             })
             assert ended.status_code == 200 and ended.json() == {"accepted": True}, ended.text
             assert (await turns.get_turn(key))["state"] == "failed"
@@ -212,13 +216,18 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
 
         if unknown_start:
             assert recovered.status_code == 503 and recovered.json()["code"] == "STORAGE_RECOVERY_REQUIRED", recovered.text
-            assert recovered.json()["safe_details"] == {"reason": "native_child_recovery_unconfirmed"}
+            assert recovered.json()["safe_details"] == {
+                "recovery_stage": "subagent", "reason": "native_child_recovery_unconfirmed",
+            }
             assert row["state"] == "accepted" and settled == original
             assert same_child.status is ExecutionStatus.STARTED and same_child.agent_run_seq == 0
             assert receipt.status is IdempotencyStatus.STARTED
             assert calls == ["parent dispatch"] and returned_children == []
         elif unknown_settlement:
             assert recovered.status_code == 503 and recovered.json()["code"] == "STORAGE_RECOVERY_REQUIRED", recovered.text
+            assert recovered.json()["safe_details"] == {
+                "recovery_stage": "subagent", "reason": "native_child_result_commit_unconfirmed",
+            }
             assert row["state"] == "accepted" and settled.status is ToolOperationStatus.COMPLETED
             assert same_child.status is ExecutionStatus.SUCCEEDED and not same_child.retention_closed
             assert calls == ["parent dispatch", "child dispatch"] and returned_children == []

@@ -3,6 +3,7 @@
 
 from linktools.ai.persistence import Persistence
 """Contract tests for model interaction projection primitives."""
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import _wait_for_committed, model_features
 
 from linktools.ai.persistence import Persistence
@@ -51,7 +52,7 @@ from linktools.ai.persistence._step_archive import StagingAgentRunStore
 from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
 
 
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 
 
 class _TextModelBinding:
@@ -88,7 +89,7 @@ async def test_session_projections_do_not_copy_previous_response_bodies(
     database = tmp_path / "state.db"
     sizes = []
     features = _agent_group()
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     class HostAuthorization(TenantAuthorizationPolicy):
         """Authorize the synthetic host's native session."""
 
@@ -99,7 +100,7 @@ async def test_session_projections_do_not_copy_previous_response_bodies(
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=principal)
         for index in range(8):
-            turn = await runtime.sessions.start(
+            turn = await runtime.sessions.start_turn(
                 "session", f"turn-{index}:" + "user-" * 400, agent="default",
                 principal=principal, idempotency_key=f"turn-{index}",
             )

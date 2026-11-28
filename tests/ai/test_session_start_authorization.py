@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import AuthorizationAction, CommitPolicy, ExecutionStatus, HmacCursorSigner, Principal, ResourceKind, ResourceRef
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -54,10 +53,8 @@ async def test_shared_session_start_authorizes_the_execution_identity(tmp_path: 
         await finish.wait()
         return ModelResponse(parts=[TextPart("answer")])
 
-    features = RuntimeFeatures("session-start-authorization")
+    features = RuntimeFeatures("session-start-authorization", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync())
     features.agent("default", model="default", allow_tools=())
-    features.capability(ExecutionCapability(retain_history=True,
-        commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync()), scope="runtime")
     cache = InMemoryCacheBackend(max_bytes=2**24)
     policy = ExecutionResourcePolicy()
     owner, peer = Principal("owner", "default"), Principal("peer", "default")
@@ -71,7 +68,7 @@ async def test_shared_session_start_authorizes_the_execution_identity(tmp_path: 
         session = await agent.create_session("shared", principal=owner)
 
         async def start(prompt: str, key: str):
-            return await runtime.sessions.start(session.session_id, prompt, principal=peer, agent=agent,
+            return await runtime.sessions.start_turn(session.session_id, prompt, principal=peer, agent=agent,
                                                 idempotency_key=key)
         pristine = await runtime.history.turn_session(session.session_id, principal=owner)
         assert pristine["session"]["active_turn_id"] is None

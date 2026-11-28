@@ -20,7 +20,7 @@ except ModuleNotFoundError:
     _acp = None
     _acp_schema = None
 
-from .capability import ExecutionCapability, FileSystemCapability
+from .capability import FileSystemCapability
 from .runtime import RuntimeFeatures
 from .persistence import PersistenceStorage
 from .core import (
@@ -35,7 +35,7 @@ from .errors import AIError, ErrorCode
 from .execution import ExecutionTreeEvent
 from .session import ListSessionRequest
 from .runtime import Runtime
-from .runtime.turn_clients import TurnObserver, uses_turn_sessions
+from .runtime.turn_clients import TurnObserver, start_bound_execution, uses_turn_sessions
 from .session import ToolProcessItem, project_tool_process_event
 from .workspace import Workspace
 
@@ -364,10 +364,11 @@ class ACPAgent:
                 with TurnObserver(
                     self._runtime, session_id, self._principal, local_workspace=self._local_workspace,
                 ) as observer:
-                    execution_id = await self._runtime.sessions.start_turn(
+                    turn = await self._runtime.sessions.start_turn(
                         session_id, "".join(parts), agent="default",
                         principal=self._principal, idempotency_key=request_id,
                     )
+                    execution_id = turn.key.turn_id
                     admitted.set_result(execution_id)
                     sent_text = False
                     async for frame in observer.events(execution_id):
@@ -396,8 +397,8 @@ class ACPAgent:
                         # complete answer would duplicate a partial one.
                         raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
             else:
-                execution = await self._runtime.sessions.start(
-                    session_id, "".join(parts), principal=self._principal, idempotency_key=request_id,
+                execution = await start_bound_execution(
+                    self._runtime, session_id, "".join(parts), principal=self._principal, idempotency_key=request_id,
                 )
                 execution_id = execution.execution_id
                 admitted.set_result(execution)
@@ -466,7 +467,6 @@ class ACPApplication:
     workspace: Workspace
     features: RuntimeFeatures
     storage: PersistenceStorage
-    execution: ExecutionCapability | None = None
     authorization: AuthorizationPolicy | None = None
     list_session_ids: Callable[[Principal], Awaitable[Sequence[str]]] | None = None
 
@@ -477,21 +477,23 @@ class ACPApplication:
         *,
         features: RuntimeFeatures,
         storage: PersistenceStorage,
-        execution: ExecutionCapability | None = None,
         authorization: AuthorizationPolicy | None = None,
         list_session_ids: Callable[[Principal], Awaitable[Sequence[str]]] | None = None,
     ) -> "ACPApplication":
-        """Assemble workspace and execution capabilities into the given features."""
-        return cls(workspace, features, storage, execution, authorization, list_session_ids)
+        """Assemble workspace capabilities into the given features."""
+        return cls(workspace, features, storage, authorization, list_session_ids)
 
     def __post_init__(self) -> None:
         """Complete this application's feature declarations once, before serving."""
+        defaults = dict(self.features.defaults)
+        execution = defaults.get("execution", {})
+        assert isinstance(execution, dict)
+        if "retain_history" not in execution:
+            defaults["execution"] = {**execution, "retain_history": True}
+            object.__setattr__(self, "features", self.features.with_defaults(defaults))
         self.features.capability(FileSystemCapability(self.workspace))
         from .capability import ShellCapability
         self.features.capability(ShellCapability())
-        self.features.capability(
-            ExecutionCapability(retain_history=True) if self.execution is None else self.execution
-        )
 
     async def serve(self) -> None:
         async with Runtime.open(

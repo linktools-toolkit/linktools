@@ -22,7 +22,7 @@ from ._step_store import RuntimeStepStore
 from ._tool import RuntimeToolOperationBridge, ToolOperationBridge
 from ._budget import RunBudgetContext
 from ._compaction import ExternalModelRequestRecorder, CompactionCapability, CompactionPolicy
-from ..capability import ExecutionCapability, MemoryCapability, tool_effect_policy_from_metadata
+from ..capability import MemoryCapability, tool_effect_policy_from_metadata
 from ..capability.planning import HarnessPlanning, PlanningStore
 from pydantic_ai_harness.memory import MemoryStore
 from ._tool_boundary import require_tool_effects
@@ -31,7 +31,6 @@ from ._run_hooks import AgentRunCapture
 from ..spec import CapabilityRef
 from ._conversation_service import ConversationService
 from ._persistence_services import TraceService
-from ._persistence_configuration import execution_configuration
 from ..persistence.runs import AgentRunStore
 from ..persistence.runs import RuntimeAgentRunStore
 
@@ -124,6 +123,7 @@ async def compose_platform_capabilities(
     initial_output_retries_used: int = 0,
     tool_operations: ToolOperationBridge | None = None,
     stage_session_trace: bool = False,
+    retain_history: bool = False,
 ) -> tuple[AbstractCapability[None], ...]:
     capabilities: list[AbstractCapability[None]] = []
     run_recorder = recorder or AgentRunRecorder(
@@ -133,7 +133,7 @@ async def compose_platform_capabilities(
     )
     leaves = tuple(leaf for capability in runtime_capabilities for leaf in runtime_feature_leaves(capability))
     guarantees = (
-        execution_configuration(runtime_capabilities).retain_history,
+        retain_history,
         any(isinstance(leaf, StepPersistence) for leaf in leaves),
         any(isinstance(leaf, TraceCapability) for leaf in leaves),
     )
@@ -206,9 +206,6 @@ async def compose_platform_capabilities(
             if not isinstance(bound, AbstractCapability):
                 raise TypeError("bind_persistence must preserve the SDK capability type")
             return bound
-        if isinstance(capability, ExecutionCapability):
-            bound_types.add(ExecutionCapability)
-            return capability.bind(ConversationService(persistence), retain_history=guarantees[0])
         if isinstance(capability, StepPersistence):
             if not guarantees[1]:
                 return None
@@ -228,7 +225,7 @@ async def compose_platform_capabilities(
                         run_id=agent_run_id, parent_run_id=parent_agent_run_id,
                         agent_name=agent_id, metadata=native_metadata,
                         share_started=run_store.can_share_native_start(agent_run_id, capability.store),
-                        lifecycle_participant_types=(AgentRunCapture, AtomicStepPersistence, TraceCapability, ExecutionCapability, RunCallbackScope),
+                        lifecycle_participant_types=(AgentRunCapture, AtomicStepPersistence, TraceCapability, ConversationService, RunCallbackScope),
                         lifecycle_observer_types=(AtomicStepPersistence, TraceCapability),
                     )
                     persistence.native_registration = registration
@@ -279,10 +276,8 @@ async def compose_platform_capabilities(
         bound = template.visit_and_replace(bind)
         if bound is not None:
             capabilities.append(bound)
-    if ExecutionCapability not in bound_types:
-        capabilities.append(ExecutionCapability().bind(
-            ConversationService(persistence), retain_history=guarantees[0],
-        ))
+    if guarantees[0]:
+        capabilities.append(ConversationService(persistence))
     for enabled, feature, service in ((guarantees[2], TraceCapability, TraceService),):
         if enabled and feature not in bound_types:
             capabilities.append(feature().bind(

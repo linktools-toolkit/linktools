@@ -3,7 +3,7 @@
 import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 
-from linktools.ai.capability import AgentContext, ProviderMessagesCapability, SessionCapability, StepPersistenceCapability, TraceCapability
+from linktools.ai.capability import AgentContext, ProviderMessagesCapability, SessionCapability, TraceCapability
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistencePlan, PersistenceStorage
@@ -69,7 +69,7 @@ async def test_selected_projection_precedes_trace_without_rewriting_turn_or_tool
         for name in ("selected", "unselected"):
             original = f"private-{name}"
             await runtime.sessions.create_turn_session(name, principal=actor)
-            run = await runtime.sessions.start(name, original, agent=name, principal=actor, idempotency_key="first")
+            run = await runtime.sessions.start_turn(name, original, agent=name, principal=actor, idempotency_key="first")
             result = await run.wait_final(timeout_seconds=10)
             assert result.status is ExecutionStatus.SUCCEEDED, result.view
             input_by_turn[name] = run.key
@@ -86,7 +86,7 @@ async def test_selected_projection_precedes_trace_without_rewriting_turn_or_tool
                 assert expected in repr(item["request"])
                 if name == "selected":
                     assert original not in repr(item["request"])
-        replay = await runtime.sessions.start("selected", "private-selected", agent="selected",
+        replay = await runtime.sessions.start_turn("selected", "private-selected", agent="selected",
                                               principal=actor, idempotency_key="first")
         assert replay.key == input_by_turn["selected"]
         assert (await replay.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
@@ -119,7 +119,7 @@ async def test_selected_projection_requires_same_store_step_for_native_turns(tmp
     features.agent("default", allow_tools=(), allow_capabilities=(_REF.id,), allow_skills=(), allow_subagents=())
     model_features(_Models(_UsageFunctionModel(model)), features)
     if split:
-        features.capability(StepPersistenceCapability())
+        features.capability(SessionCapability(checkpoints=True))
         execution = StorageRoute.sqlite(tmp_path / "execution.db")
         conversation = StorageRoute.sqlite(tmp_path / "conversation.db")
         storage = PersistenceStorage(PersistencePlan(execution=execution, conversation=conversation, checkpoint=execution))
@@ -131,7 +131,7 @@ async def test_selected_projection_requires_same_store_step_for_native_turns(tmp
         actor = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=actor)
         with pytest.raises(AIError) as error:
-            await runtime.sessions.start("session", "inspect", agent="default",
+            await runtime.sessions.start_turn("session", "inspect", agent="default",
                                          principal=actor, idempotency_key="blocked")
         assert error.value.code is (ErrorCode.STORAGE_CAPABILITY_MISSING if split else ErrorCode.REQUEST_FIELD_INVALID)
         if not split:

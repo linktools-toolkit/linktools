@@ -3,6 +3,7 @@
 
 from linktools.ai.persistence import Persistence
 """Regression tests for workspace PersistenceStorage composition."""
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import model_features
 from linktools.ai.model import create_model_binding
 
@@ -219,8 +220,6 @@ def _workspace_runtime_storage(workspace: Workspace) -> PersistenceStorage:
 
 @pytest.mark.asyncio
 async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
-    from linktools.ai.capability import ExecutionCapability
-
     class HostAuthorization(TenantAuthorizationPolicy):
         """The workspace declares its native session authorization explicitly."""
 
@@ -228,7 +227,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
     models = create_model_binding(api="openai", model="gpt-test")
     authorization = HostAuthorization()
     features = workspace_features("workspace", workspace=workspace)
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     features = model_features(models, features)
     storage = _workspace_runtime_storage(workspace)
     async with (

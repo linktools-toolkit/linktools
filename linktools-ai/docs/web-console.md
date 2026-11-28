@@ -60,28 +60,20 @@ single-file text preview; it does not enable bulk reads, file attachments
 returned by a tool, dynamically loaded skills, or shell commands. The console
 shows the tool status and public preview, not raw parameters or results.
 
-**Recover** continues an interrupted ordinary turn from its retained Step
-checkpoint when the turn and tool receipts share a store. An unfinished ordinary
-tool's outcome is reported to the model as unknown. The original tool call is not
-run again, and its receipt is kept unchanged. Already confirmed tool results keep
-their original meaning. The browser does not have to start a new turn for this
-recovery.
+**Continue** attempts to recover the interrupted turn without a confirmation
+dialog. If Runtime verifies that the turn cannot continue but can be ended,
+the same button becomes **End turn**. Ending is explicit: previous history is
+kept, and the model and tools for that turn are not rerun. Runtime still
+verifies permission, the exact producer generation, an expired lease, and any
+existing child dispositions before ending the turn.
 
-A turn without a retained Step checkpoint can instead regenerate from the
-accepted prompt, frozen Agent binding, and admitted attachment bytes where its
-configured recovery mode supports that. This does not certify an interrupted
-tool's effects. Graph turns, split-store turns, and interrupted delegated work
-have separate recovery constraints.
-
-If recovery reports that a stopped ordinary turn cannot resume, the same
-**Recover** control stays visible. Choosing it again asks whether to end the
-failed turn, without retrying recovery or rerunning tools. The Runtime releases only the
-confirmed producer generation after its lease expires and preserves recorded
-tool uncertainty. This control does not end Graph or split-store turns.
-On SQLite, any persisted child must already be in a durable terminal state.
-Ending the parent does not change the child or its tool receipts. The next ordinary
-turn that uses the session context receives a short interruption notice, not
-the failed turn's tool calls or unconfirmed results.
+The SDK keeps its default of ending the turn. Built-in Web requests resume by default;
+other SDK consumers call `runtime.sessions.recover_turn(..., mode="resume")`
+explicitly to continue a turn or reconcile an admitted split-store turn.
+Pending ordinary tool calls without confirmed outcomes are reported to the model
+as interrupted, not dispatched again. Split-store recovery and interrupted
+cancellation use their owning reconciliation path rather than ordinary end.
+Graph recovery remains the Graph owner's responsibility.
 
 Connection configuration uses the shared CLI configuration and its `LINKTOOLS_`
 environment prefix. Model file-input policy uses the existing workspace file

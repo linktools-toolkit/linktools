@@ -177,13 +177,15 @@ async def _turn_view(
         if prompt == "":
             prompt = (await read_scalar_input(stored_input) if stored_input.codec == "text"
                       else project_ordinary_multipart_prompt(stored_input))
+    can_recover = row.get("graph_execution") is None and (
+        bool(row.get("needs_recovery")) or state == "ready" and row.get("split_step") is True
+    )
     return {
         "turn_id": row["turn_id"].decode("utf-8"),
         "turn_no": row["turn_no"],
         "status": "RECOVERY_REQUIRED" if row.get("needs_recovery") else _STATUS[state],
-        "can_recover": row.get("graph_execution") is None and (
-            bool(row.get("needs_recovery")) or state == "ready" and row.get("split_step") is True
-        ),
+        "can_recover": can_recover,
+        **({"recovery_generation": row["generation"]} if can_recover else {}),
         "created_at": row["created_at"].isoformat(),
         "updated_at": row["updated_at"].isoformat(),
         "user_input": {"version": 1, "prompt": prompt, "files": [], "attachments": attachments},

@@ -7,7 +7,7 @@ from linktools.ai.persistence import Persistence
 import pytest
 from pydantic_ai.models.decision import DecisionHandOff
 
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.model import FallbackBinding
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -28,10 +28,9 @@ class _AlwaysThinkingModel(_OfflineDecisionModel):
 
 
 def _features(first, second):
-    features = RuntimeFeatures("fallback-runtime")
+    features = RuntimeFeatures("fallback-runtime", defaults={"execution": {"retain_history": True}})
     features.agent("default", allow_tools=(), allow_subagents=())
     features.capability(TraceCapability(), scope="runtime")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     loads = []
 
     def load():

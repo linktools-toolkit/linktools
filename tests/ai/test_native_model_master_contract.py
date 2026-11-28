@@ -22,7 +22,7 @@ from pydantic_ai.tools import RunContext
 
 from linktools.ai.asset import AssetKey, AssetVersionRef
 from linktools.ai.capability import (
-    AgentContext, CapabilityContribution, ExecutionCapability, ReferencedInputsCapability, TraceCapability,
+    AgentContext, CapabilityContribution, ReferencedInputsCapability, TraceCapability,
 )
 from linktools.ai.core import ExecutionStatus, service_principal
 from linktools.ai.errors import AIError, ErrorCode
@@ -193,13 +193,12 @@ async def test_runtime_reference_stream_failure_keeps_attempt_coordinates_and_sa
     clients = _mock_clients(monkeypatch, handle)
     binding = create_model_binding(api="openai", model="fixture", api_key="synthetic",
                            base_url="https://offline.invalid/v1", max_retries=1, retry_delay=0)
-    features = RuntimeFeatures("reference-stream")
+    features = RuntimeFeatures("reference-stream", defaults={"execution": {"retain_history": True}})
     features.model("default", binding)
     features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     features.capability(ReferencedInputsCapability(load), id=_SOURCE.id,
                         revision=_SOURCE.revision, scope="agent")
     features.capability(TraceCapability(record_http_bodies=True), scope="runtime")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Persistence.open('reference-stream', storage=PersistenceStorage.in_memory()) as persistence_200, Runtime.open(persistence=persistence_200, features=features) as runtime:
         execution = await runtime.agents.get().start([reference])
         result = (await execution.wait(timeout_seconds=10)).result

@@ -368,7 +368,7 @@ async def test_runtime_sessions_refresh_delegates_to_the_injected_service() -> N
         async def refresh(self, session_id, *, principal, cursor, limit, max_age):
             calls.append((session_id, principal, cursor, limit))
             return result
-    facade = RuntimeSessions(Service(), object(), start_session=None, bind_session=None, ensure_open=lambda: calls.append("open"))
+    facade = RuntimeSessions(Service(), object(), bind_session=None, ensure_open=lambda: calls.append("open"))
     assert await facade.refresh("session", principal=_PRINCIPAL, cursor="cursor", limit=2) is result
     assert calls == ["open", ("session", _PRINCIPAL, "cursor", 2)]
 
@@ -431,7 +431,7 @@ async def test_sql_refresh_reads_session_and_history_without_writing(
     async with Runtime.open(namespace, storage=storage, features=features, authorization=HostPolicy()) as runtime:
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=principal)
-        turn = await runtime.sessions.start("session", "question", agent="default", principal=principal,
+        turn = await runtime.sessions.start_turn("session", "question", agent="default", principal=principal,
                                             idempotency_key="question")
         try:
             if active:

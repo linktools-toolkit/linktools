@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -36,8 +35,7 @@ async def test_pending_unsuccessful_standalone_has_one_source_commit_and_no_mode
             raise AIError(ErrorCode.INTERNAL_ERROR)
         return ModelResponse(parts=[TextPart("next answer")])
 
-    features = RuntimeFeatures("pending-outcome")
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    features = RuntimeFeatures("pending-outcome", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     features.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.sqlite(tmp_path / "state.db",
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
@@ -98,7 +96,7 @@ async def test_pending_unsuccessful_session_commits_actual_result_once_and_reope
     status = ExecutionStatus.CANCELLED if cancelled else ExecutionStatus.FAILED
 
     async def start(runtime, prompt, key):
-        return await runtime.sessions.start(
+        return await runtime.sessions.start_turn(
             "session", prompt, agent=runtime.agents.get(), principal=runtime.default_principal,
             idempotency_key=key,
         )
@@ -161,8 +159,7 @@ async def test_pending_source_dispatch_rechecks_ownership_after_context_material
         await model_release.wait()
         return ModelResponse(parts=[TextPart("answer")])
 
-    features = RuntimeFeatures("pending-ownership")
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    features = RuntimeFeatures("pending-ownership", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     features.agent("default", model="default", allow_tools=())
     cache = _ObservedCache()
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", coordination=cache)
@@ -275,8 +272,7 @@ async def test_pending_tools_share_local_owner_without_per_call_renewal(
             return ModelResponse(parts=[ToolCallPart("work", {}, tool_call_id=f"call-{i}") for i in range(3)])
         return ModelResponse(parts=[TextPart("answer")])
 
-    features = RuntimeFeatures("pending-owner-local")
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    features = RuntimeFeatures("pending-owner-local", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     features.tool(work, effect_policy="replay_safe")
     features.agent("default", model="default", allow_tools=("work",))
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", coordination=cache)

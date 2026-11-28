@@ -10,7 +10,6 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCall
 from pydantic_ai.models.function import AgentInfo
 
 from linktools.ai.agent import bind_output
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -38,10 +37,9 @@ async def test_captured_binding_is_used_by_agent_and_session_entries(entry: str,
         output_properties.append(set(tool.parameters_json_schema["properties"]))
         return ModelResponse(parts=[ToolCallPart(tool.name, {"captured_count": 7})])
 
-    features = RuntimeFeatures("binding-entries")
+    features = RuntimeFeatures("binding-entries", defaults={"execution": {"retain_history": True}})
     features.agent("default", model="default", system_prompt="CURRENT_DEFINITION",
                    allow_tools=(), allow_skills=(), allow_subagents=())
-    features.capability(ExecutionCapability(retain_history=True))
     features = model_features(_Models(_UsageFunctionModel(respond)), features)
     async with Persistence.open("binding-entries", storage=PersistenceStorage.in_memory()) as persistence:
         async with Runtime.open(persistence=persistence, features=features) as runtime:

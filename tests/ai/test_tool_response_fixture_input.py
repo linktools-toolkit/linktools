@@ -22,7 +22,7 @@ from pydantic_ai.capabilities import AbstractCapability
 import pytest
 
 from linktools.ai.asset import AssetKey, AssetStore, AssetVersionRef, InMemoryAssetBackend
-from linktools.ai.capability import ExecutionCapability, ToolResponseFixture, ToolResponsesCapability
+from linktools.ai.capability import ToolResponseFixture, ToolResponsesCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import (
     AuthorizationAction,
@@ -123,8 +123,7 @@ async def test_capture_retry_fork_and_child_keep_saved_fixture_after_default_cha
 ) -> None:
     assets, first, second = await _fixtures()
     principal = service_principal("default", "fixture-owner")
-    features = RuntimeFeatures("fixture-conversation")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("fixture-conversation", defaults={"execution": {"retain_history": True}})
     features.capability(ToolResponsesCapability(ToolResponseFixture(first, assets)), scope="runtime")
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Persistence.open('fixture-input', storage=storage) as persistence_112, Runtime.open(persistence=persistence_112, features=model_features(RuntimeUsageModels(), features)) as runtime:
@@ -167,9 +166,8 @@ async def test_capture_retry_fork_and_child_keep_saved_fixture_after_default_cha
                 entered.set()
                 await release.wait()
 
-    features = RuntimeFeatures("fixture-conversation")
+    features = RuntimeFeatures("fixture-conversation", defaults={"execution": {"retain_history": True}})
     features.capability(ParentBarrier(), scope="runtime")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(ToolResponsesCapability(ToolResponseFixture(second, assets)), scope="runtime")
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Persistence.open('fixture-input', storage=storage) as persistence_145, Runtime.open(persistence=persistence_145, features=model_features(RuntimeUsageModels(), features)) as runtime:
@@ -212,8 +210,7 @@ async def test_capture_retry_fork_and_child_keep_saved_fixture_after_default_cha
 @pytest.mark.asyncio
 async def test_fixture_session_rejection_leaves_no_admitted_turn(tmp_path: Path) -> None:
     assets, first, _second = await _fixtures()
-    features = RuntimeFeatures("fixture-conversation")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("fixture-conversation", defaults={"execution": {"retain_history": True}})
     features.capability(ToolResponsesCapability(ToolResponseFixture(first, assets)), scope="runtime")
     class HostAuthorization(TenantAuthorizationPolicy):
         pass
@@ -227,7 +224,7 @@ async def test_fixture_session_rejection_leaves_no_admitted_turn(tmp_path: Path)
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=principal)
         with pytest.raises(AIError) as rejected:
-            await runtime.agents.get().start("question", session_id="session", idempotency_key="fixture")
+            await runtime.agents.get().session("session").start("question", idempotency_key="fixture")
         assert rejected.value.code is ErrorCode.REQUEST_FIELD_INVALID
         assert rejected.value.safe_details["reason"] == "turn_agent_features_unsupported"
         assert rejected.value.safe_details["features"] == ["tool_response_fixture"]

@@ -14,7 +14,7 @@ def test_terminal_worker_exit_retries_idempotent_effect_as_new_turn(tmp_path: Pa
         import asyncio, json, os, sys
         from pathlib import Path
         from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
-        from linktools.ai.capability import AgentContext, ExecutionCapability
+        from linktools.ai.capability import AgentContext
         from linktools.ai.core import CommitPolicy, ExecutionStatus, ToolOperationStatus
         from linktools.ai.model.messages import decode_model_messages
         from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -42,8 +42,7 @@ def test_terminal_worker_exit_retries_idempotent_effect_as_new_turn(tmp_path: Pa
                 return ModelResponse([TextPart('done')])
             return ModelResponse([ToolCallPart('save', {'value': 7}, 'save-call')])
         async def main():
-            features = RuntimeFeatures('terminal-retry')
-            features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()))
+            features = RuntimeFeatures('terminal-retry', defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
             features.tool(save)
             features.agent('default', allow_tools=('save',))
             async with Persistence.open('terminal-retry', storage=PersistenceStorage.sqlite(
@@ -51,7 +50,7 @@ def test_terminal_worker_exit_retries_idempotent_effect_as_new_turn(tmp_path: Pa
                 coordination=InMemoryCacheBackend(max_bytes=4*1024*1024),
             )) as state, Runtime.open(persistence=state,
                 features=model_features(_Models(_UsageFunctionModel(model)), features),
-                metrics=None, auto_recover=False,
+                metrics=None,
             ) as runtime:
                 if mode != 'create':
                     assert await state.execution.executions.get((root / 'old-id').read_text(), tenant_id=runtime.tenant_id) is None

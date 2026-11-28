@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""In-process turn observation shared by terminal and ACP adapters."""
+"""Session admission and observation support for built-in clients."""
 
 import asyncio
 import json
+import secrets
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from ..errors import AIError, ErrorCode
 
 if TYPE_CHECKING:
-    from ..core import JsonValue, Principal
+    from collections.abc import Mapping, Sequence
+    from pydantic import BaseModel
+
+    from ..core import JsonValue, Principal, ThinkingValue
+    from ..execution import Execution
+    from ..model import UserPromptInput
     from ._runtime_service import Runtime
 
 
@@ -20,6 +26,36 @@ _PREVIEW_TYPES = ("delta", "tool", "progress", "preview_reset", "thinking_comple
 _WAITING_STATES = {"WAITING_DEFERRED", "WAITING_RETRY"}
 _FINAL_STATES = {"SUCCEEDED", "FAILED", "CANCELLED", "RECOVERY_REQUIRED"}
 _END_STATES = _FINAL_STATES | _WAITING_STATES
+
+
+AppT = TypeVar("AppT")
+
+
+async def start_bound_execution(
+    runtime: "Runtime[AppT]", session_id: str, user_prompt: "UserPromptInput", *, principal: "Principal",
+    idempotency_key: str | None = None, output: "type[BaseModel] | None" = None,
+    correlation: "Mapping[str, object] | None" = None, files: "Sequence[str]" = (),
+    planning: bool | None = None, thinking: "ThinkingValue | None" = None,
+) -> "Execution[AppT]":
+    """Admit a definition-bound client request without a separate display read."""
+    from ..core import validate_idempotency_key, validate_resource_id
+    from ..storage import sql_observation_scope
+    from ..model import validate_user_input
+
+    runtime._ensure_open()
+    validate_resource_id(session_id)
+    prompt = validate_user_input(user_prompt)
+    key = secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key
+    validate_idempotency_key(key)
+
+    async def start(agent_id, resume):
+        return await runtime.agents.get(agent_id).execution_port.start(
+            prompt, files=files, output=output, principal=principal, session_id=session_id,
+            idempotency_key=key, mode="run", planning=planning, thinking=thinking,
+            correlation=correlation, _resume=resume)
+
+    with sql_observation_scope("runtime.session.start"):
+        return await runtime.sessions._agent_session_service().start_existing(session_id, principal, key, start)
 
 
 def uses_turn_sessions(runtime: "Runtime") -> bool:
@@ -219,4 +255,4 @@ async def _watch_turn_occupancy(
         unsubscribe()
 
 
-__all__ = ["TurnObserver", "uses_turn_sessions"]
+__all__ = ["TurnObserver", "start_bound_execution", "uses_turn_sessions"]

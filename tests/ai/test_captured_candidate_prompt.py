@@ -5,6 +5,7 @@ from linktools.ai.task.engine import TaskEngine
 
 from linktools.ai.persistence import Persistence
 """Captured conversation input uses the selected candidate's Agent behavior."""
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import model_features
 
 import pytest
@@ -16,7 +17,7 @@ from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationPolicy,
     EvaluationSpec, GraphTargetSpec, StartEvaluationRequest,
 )
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 from linktools.ai.inputs import AgentTaskInput, CaptureInputRequest
 from linktools.ai.execution import ExecutionInputContext
 from linktools.ai.runtime import Runtime
@@ -45,7 +46,7 @@ async def test_capture_uses_selected_candidate_prompt_and_preserves_history(
     group = RuntimeFeatures("fork-candidate")
     group.capability(TraceCapability(), scope="runtime")
     if source_kind == "fork":
-        group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+        configure_execution(group, retain_history=True)
     original_prompt = "Original Agent behavior."
     candidate_prompt = "Selected candidate behavior."
     for name, prompt in (("default", original_prompt), ("candidate", candidate_prompt)):

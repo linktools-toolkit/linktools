@@ -17,7 +17,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolRetu
 from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
 
-from linktools.ai.capability import AgentContext, ExecutionCapability
+from linktools.ai.capability import AgentContext
 from pydantic_ai_harness.step_persistence import StepPersistence
 from sqlalchemy.ext.asyncio import create_async_engine
 from linktools.ai.persistence import SqlStepStore
@@ -186,8 +186,7 @@ async def test_two_turn_storage_measurement(
     await provision_database(engine)
     steps = SqlStepStore(engine, namespace="turn-io", tenant_id="default")
     await steps.initialize()
-    features = RuntimeFeatures("turn-io")
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync()), scope="runtime")
+    features = RuntimeFeatures("turn-io", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync())
     if checkpointed:
         features.capability(StepPersistence(store=steps, capture_frontier=os.environ.get("TURN_IO_FRONTIER", "1") == "1"), scope="runtime")
     features.tool(work, effect_policy="replay_safe")

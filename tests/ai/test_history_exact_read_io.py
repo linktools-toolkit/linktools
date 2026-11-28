@@ -15,7 +15,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolRetu
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 
-from linktools.ai.capability import AgentContext, ExecutionCapability, StepPersistenceCapability, TraceCapability
+from linktools.ai.capability import AgentContext, TraceCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.history import History
@@ -89,11 +89,10 @@ async def test_exact_tool_history_keeps_authorized_projection(
         effects.append(index)
         return "item" * 100 + str(index)
 
-    features = RuntimeFeatures("history-read")
+    features = RuntimeFeatures("history-read", defaults={"execution": {"retain_history": True}})
     features.agent("default", model="default", allow_tools=("lookup",))
     features.tool(lookup, effect_policy="none")
-    features.capability(ExecutionCapability(retain_history=True))
-    features.capability(StepPersistenceCapability())
+    features = features.with_defaults({"execution": {**features.defaults.get("execution", {}), "checkpoints": True}})
     features.capability(TraceCapability(commit=CommitPolicy.sync()))
     owner: ContextVar[asyncio.Task | None] = ContextVar("history_read_owner", default=None)
     counts = Counter()

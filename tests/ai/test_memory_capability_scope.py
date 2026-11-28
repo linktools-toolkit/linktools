@@ -11,7 +11,7 @@ from pydantic_ai.capabilities import CombinedCapability, WrapperCapability
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo
 
-from linktools.ai.capability import AgentContext, ExecutionCapability, MemoryCapability
+from linktools.ai.capability import AgentContext, MemoryCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionInputContext
@@ -21,6 +21,7 @@ from linktools.commands.ai._common import _open_local_runtime
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.workspace import Workspace
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import model_features
 from .test_explicit_runtime_features import _FeatureFunctionModel, _FeatureModels
 
@@ -28,7 +29,7 @@ from .test_explicit_runtime_features import _FeatureFunctionModel, _FeatureModel
 def _features(scope: str | None) -> RuntimeFeatures:
     features = model_features(_FeatureModels())
     features.agent("default", model="default", allow_tools=())
-    features.capability(ExecutionCapability(retain_history=True))
+    configure_execution(features, retain_history=True)
     if scope is not None:
         features.capability(MemoryCapability(scope=scope))
     return features
@@ -188,7 +189,7 @@ async def test_memory_tools_retry_resolves_current_tools_but_retains_admitted_sc
 
     def features(scope: str | None, *, selected: bool = False) -> RuntimeFeatures:
         result = model_features(_FeatureModels(_FeatureFunctionModel(respond)))
-        result.capability(ExecutionCapability(retain_history=True))
+        configure_execution(result, retain_history=True)
         if scope == "business":
             def read_memory(context: AgentContext[object], file: str) -> str:
                 del context
@@ -285,7 +286,7 @@ async def test_imported_memory_retains_tools_without_host_memory(tmp_path: Path)
         return ModelResponse(parts=[TextPart("done")])
 
     features = model_features(_FeatureModels(_FeatureFunctionModel(respond)))
-    features.capability(ExecutionCapability(retain_history=True))
+    configure_execution(features, retain_history=True)
     context = ExecutionInputContext.from_messages((), memory={
         "memory/MEMORY.md": {"content": "captured memory", "version": "m1:" + "1" * 64},
     })
@@ -359,7 +360,7 @@ async def test_memory_removal_preserves_other_same_named_business_tools(tmp_path
 
     def features(memory: bool) -> RuntimeFeatures:
         result = model_features(_FeatureModels(_FeatureFunctionModel(respond)))
-        result.capability(ExecutionCapability(retain_history=True))
+        configure_execution(result, retain_history=True)
         if memory:
             result.capability(ReadMemoryOnly())
         result.tool(write_memory, effect_policy="none")
@@ -395,7 +396,7 @@ async def test_imported_memory_keeps_durable_source_with_terminal_commit(tmp_pat
         return ModelResponse(parts=[ToolCallPart("write_memory", {"file": "NEW.md", "content": "new captured note"}, tool_call_id="write")])
 
     features = model_features(_FeatureModels(_FeatureFunctionModel(respond)))
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()))
+    configure_execution(features, retain_history=True, commit=CommitPolicy.terminal())
     storage = PersistenceStorage.sqlite(tmp_path / "memory.db", coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
     context = ExecutionInputContext.from_messages((), memory={
         "memory/MEMORY.md": {"content": "captured memory", "version": "m1:" + "1" * 64},

@@ -85,7 +85,6 @@ def _crash_before_tool_event(database: str, effects: str, native_database: str) 
             Runtime.open(
                 persistence=state,
                 features=_split_execution_features(Path(effects), Path(native_database), []),
-                auto_recover=False,
             ) as runtime,
         ):
             execution = await runtime.agents.get().start("inspect", idempotency_key="request")
@@ -117,7 +116,7 @@ async def test_public_split_recovery_preserves_unknown_admission_after_process_e
     calls: list[str] = []
     async with Persistence.open("split-tool-crash", storage=PersistenceStorage.sqlite(database)) as state:
         async with Runtime.open(
-            persistence=state, features=_split_execution_features(effects, native_database, calls), auto_recover=False,
+            persistence=state, features=_split_execution_features(effects, native_database, calls),
         ) as runtime:
             execution = await runtime.agents.get().start("inspect", idempotency_key="request")
             tenant = runtime.default_principal.tenant_id

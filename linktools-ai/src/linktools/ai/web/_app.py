@@ -33,7 +33,7 @@ from ..execution import ExecutionTreeEvent, ListExecutionRequest, TaskModelProje
 from ..session import CreateSessionRequest, ListSessionRequest
 from ..execution.stream import local_execution_stream
 from ..runtime import Runtime
-from ..runtime.turn_clients import uses_turn_sessions
+from ..runtime.turn_clients import start_bound_execution, uses_turn_sessions
 from ..session import SessionTurn, ToolProcessItem, project_tool_process_event
 
 if TYPE_CHECKING:
@@ -667,21 +667,23 @@ class _Console:
                 if upload is None:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                 prompt, names = _uploaded_prompt(_text(payload, "prompt"), payload.get("attachments", []), upload)
-                turn_id = await runtime.sessions.start_turn(
+                turn = await runtime.sessions.start_turn(
                     session_id, prompt, agent="default",
                     principal=self.principal, idempotency_key=request_id, thinking=payload.get("thinking"),
                     planning=planning, attachment_display_names=names,
                 )
+                turn_id = turn.key.turn_id
                 return _json({"turn_id": turn_id}, 202)
-            if action == "abandon":
-                accepted = await runtime.sessions.abandon_turn(
-                    session_id, _text(payload, "turn_id"), expected_generation=payload.get("expected_generation"),
-                    principal=self.principal,
+            if action == "recover":
+                accepted = await runtime.sessions.recover_turn(
+                    session_id, _text(payload, "turn_id"), principal=self.principal,
+                    mode=payload.get("mode", "resume"), expected_generation=payload.get("expected_generation"),
                 )
                 return _json({"accepted": accepted})
-            if action in {"cancel", "recover"}:
-                operation = runtime.sessions.cancel_turn if action == "cancel" else runtime.sessions.recover_turn
-                accepted = await operation(session_id, _text(payload, "turn_id"), principal=self.principal)
+            if action == "cancel":
+                accepted = await runtime.sessions.cancel_turn(
+                    session_id, _text(payload, "turn_id"), principal=self.principal,
+                )
                 return _json({"accepted": accepted})
             if action in {"update", "close", "fork"}:
                 revision = payload.get("expected_revision")
@@ -724,8 +726,8 @@ class _Console:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={
                     "field": "attachments", "reason": "sql_turn_required",
                 })
-            execution = await runtime.sessions.start(
-                session_id, _text(payload, "prompt"), principal=self.principal,
+            execution = await start_bound_execution(
+                runtime, session_id, _text(payload, "prompt"), principal=self.principal,
                 idempotency_key=request_id,
                 planning=payload.get("planning", False), thinking=payload.get("thinking"),
             )
@@ -1225,7 +1227,16 @@ def _debug_error(request: Request, error: AIError) -> None:
 
 async def _error(request: Request, error: Exception) -> Response:
     if isinstance(error, AIError):
-        _debug_error(request, error)
+        if request.url.path == "/api/session/recover" and (
+            error.code is ErrorCode.STORAGE_RECOVERY_REQUIRED or "recovery_stage" in error.safe_details
+        ):
+            _logger.warning(
+                "Session recover blocked: operation_id=%r code=%s recovery_stage=%r reason=%r",
+                _operation_id(request, error), error.code.value,
+                error.safe_details.get("recovery_stage"), error.safe_details.get("reason"),
+            )
+        else:
+            _debug_error(request, error)
         code = error.code.value
         status = 404 if code in {"AUTHORIZATION_DENIED", "SESSION_NOT_FOUND", "EXECUTION_NOT_FOUND"} else (
             409 if code == "SESSION_TURN_PENDING" or any(part in code for part in ("CONFLICT", "BUSY", "CLOSED", "MISMATCH")) else (

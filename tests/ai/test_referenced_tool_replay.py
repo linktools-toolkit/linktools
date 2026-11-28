@@ -34,7 +34,7 @@ from linktools.ai.asset import AssetKey, AssetVersionRef
 from linktools.ai.spec import CapabilityRef
 from linktools.ai.storage import StorageEntryRevision
 from linktools.ai.capability import (
-    AgentContext, ExecutionCapability,
+    AgentContext,
     ReferencedInputsCapability, TraceCapability)
 from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint
@@ -172,14 +172,13 @@ def _recovery_features(
     loader: Callable[[AgentContext[None], ReferencedContent], Awaitable[bytes]],
     text_loader: Callable[[AgentContext[None], ReferencedContent], Awaitable[bytes]] | None = None,
 ) -> RuntimeFeatures:
-    group = RuntimeFeatures(_RECOVERY_NAMESPACE)
+    group = RuntimeFeatures(_RECOVERY_NAMESPACE, defaults={"execution": {"retain_history": True}})
     group.capability(ReferencedInputsCapability(loader), id=_SOURCE.id,
                      revision=_SOURCE.revision, scope="agent")
     if text_loader is not None:
         group.capability(ReferencedInputsCapability(text_loader), id=_TEXT_SOURCE.id,
                          revision=_TEXT_SOURCE.revision, scope="agent")
     group.capability(native_checkpoint(), scope="runtime")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.capability(TraceCapability(record_http_bodies=True), scope="runtime")
     group.agent("default", allow_tools=(), allow_skills=(), allow_subagents=())
     return model_features(_Models(_UsageFunctionModel(_recovery_model)), group)
@@ -258,7 +257,7 @@ async def test_pending_reference_reopens_from_checkpoint_with_original_principal
         loaded.append((agent_context.principal, content))
         return _TEXT_BODY
 
-    async with Persistence.open(_RECOVERY_NAMESPACE, storage=PersistenceStorage.from_root(path, exclusive_writer=True)) as persistence_260, Runtime.open(persistence=persistence_260, authorization=_RecoveryAuthorization(), features=_recovery_features(authorized_load, authorized_text if multiple_sources else None), auto_recover=False) as runtime:
+    async with Persistence.open(_RECOVERY_NAMESPACE, storage=PersistenceStorage.from_root(path, exclusive_writer=True)) as persistence_260, Runtime.open(persistence=persistence_260, authorization=_RecoveryAuthorization(), features=_recovery_features(authorized_load, authorized_text if multiple_sources else None)) as runtime:
         checkpoint = await runtime._state.execution.executions.get(
             execution_id, tenant_id=_ADMITTED.tenant_id,
         )
@@ -272,7 +271,7 @@ async def test_pending_reference_reopens_from_checkpoint_with_original_principal
         )).result
         assert result.status is ExecutionStatus.SUCCEEDED, result.error_diagnostics
         assert result.output == {"text": "recovered reference"}
-    async with Persistence.open(_RECOVERY_NAMESPACE, storage=PersistenceStorage.from_root(path, exclusive_writer=True)) as persistence_277, Runtime.open(persistence=persistence_277, authorization=_RecoveryAuthorization(), features=_recovery_features(authorized_load, authorized_text if multiple_sources else None), auto_recover=False) as reopened:
+    async with Persistence.open(_RECOVERY_NAMESPACE, storage=PersistenceStorage.from_root(path, exclusive_writer=True)) as persistence_277, Runtime.open(persistence=persistence_277, authorization=_RecoveryAuthorization(), features=_recovery_features(authorized_load, authorized_text if multiple_sources else None)) as reopened:
         history = await reopened.executions.history(
             execution_id, principal=_ADMITTED, include_content=True,
         )

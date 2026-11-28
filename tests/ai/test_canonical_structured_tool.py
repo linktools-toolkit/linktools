@@ -9,7 +9,7 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.usage import RequestUsage
 
-from linktools.ai.capability import ExecutionCapability, FileSystemCapability
+from linktools.ai.capability import FileSystemCapability
 from linktools.ai.core import TenantAuthorizationPolicy, UsageMetrics
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.turns import SessionTurnKey
@@ -60,8 +60,7 @@ async def test_read_only_structured_tool_result_survives_cold_context_not_public
         return ModelResponse(parts=[TextPart("Context restored.")])
 
     def features(model):
-        value = RuntimeFeatures("structured-tool-context")
-        value.capability(ExecutionCapability(retain_history=True), scope="runtime")
+        value = RuntimeFeatures("structured-tool-context", defaults={"execution": {"retain_history": True}})
         value.capability(FileSystemCapability(workspace), scope="runtime")
         value.agent("default", allow_tools=("read_file",), allow_capabilities=())
         return model_features(_Models(_UsageFunctionModel(model)), value)
@@ -70,9 +69,9 @@ async def test_read_only_structured_tool_result_survives_cold_context_not_public
         frames = asyncio.Queue()
         detach = runtime.sessions.observe_turn_session("chat", frames.put_nowait)
         try:
-            turn_id = await runtime.sessions.start_turn(
+            turn_id = (await runtime.sessions.start_turn(
                 "chat", prompt, agent="default", principal=runtime.default_principal, idempotency_key=request_id,
-            )
+            )).key.turn_id
             async with asyncio.timeout(10):
                 while True:
                     frame = await frames.get()

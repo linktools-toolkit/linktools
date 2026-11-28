@@ -25,7 +25,7 @@ from linktools.ai.capability import AgentContext
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime import Runtime
@@ -148,14 +148,14 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
             # This matrix enables arbitrary tools and structured output. The
             # narrower split Step profiles have their own round-trip tests.
             with pytest.raises(AIError) as unavailable:
-                await agent.start("first question", idempotency_key="first", output=_Answer, session_id="session")
+                await agent.session("session").start("first question", idempotency_key="first", output=_Answer)
             assert unavailable.value.code is ErrorCode.STORAGE_CAPABILITY_MISSING
             assert (await runtime.history.turn_session_state("session", principal=runtime.default_principal))[
                 "active_turn_id"
             ] is None
             assert model_calls == tool_calls == []
             return
-        turn = await agent.start("first question", idempotency_key="first", output=_Answer, session_id="session")
+        turn = await agent.session("session").start("first question", idempotency_key="first", output=_Answer)
         try:
             await asyncio.wait_for(ready.wait(), 10)
             assert (await runtime.history.turn_session_state("session", principal=runtime.default_principal))[
@@ -188,7 +188,7 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
         agent = runtime.agents.get()
         assert await runtime.history.turn_session("session", principal=runtime.default_principal) == history
         before_replay = list(model_calls)
-        replay = await agent.start("first question", idempotency_key="first", output=_Answer, session_id="session")
+        replay = await agent.session("session").start("first question", idempotency_key="first", output=_Answer)
         assert replay.key == turn.key
         assert (await replay.wait_final(timeout_seconds=10)).view == terminal.view
         assert model_calls == before_replay
@@ -197,7 +197,7 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
         assert bool(evidence.items) is trace
         restored_trace = {item.step_event_seq: item for item in evidence.items}
         assert all(restored_trace.get(item.step_event_seq) == item for item in observed_trace)
-        second = await agent.start("second question", idempotency_key="second", output=_Answer, session_id="session")
+        second = await agent.session("session").start("second question", idempotency_key="second", output=_Answer)
         following = await second.wait_final(timeout_seconds=10)
         assert following.status is ExecutionStatus.SUCCEEDED
         assert following.view["output"] == second_output
@@ -361,8 +361,7 @@ async def test_remote_force_cancel_fences_late_provider(
             return ModelResponse(parts=[TextPart("late answer")])
         return ModelResponse(parts=[TextPart("next turn finished")])
 
-    group: RuntimeFeatures[None] = RuntimeFeatures("application")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group: RuntimeFeatures[None] = RuntimeFeatures("application", defaults={"execution": {"retain_history": True}})
     group.tool(late_effect, effect_policy="non_replay_safe")
     group.agent("default", model="default", allow_tools=("late_effect",))
     if trace:
@@ -426,7 +425,7 @@ async def test_remote_force_cancel_fences_late_provider(
 @pytest.mark.asyncio
 async def test_remote_native_stop_fences_late_tool_and_releases_session(tmp_path: Path) -> None:
     from pydantic_ai.messages import TextPart
-    from linktools.ai.capability import StepPersistenceCapability
+    from linktools.ai.capability import SessionCapability
     from linktools.ai.core import TenantAuthorizationPolicy
 
     class HostAuthorization(TenantAuthorizationPolicy):
@@ -450,7 +449,7 @@ async def test_remote_native_stop_fences_late_tool_and_releases_session(tmp_path
         return ModelResponse(parts=[TextPart("next answer")])
 
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
-    group.capability(StepPersistenceCapability(), scope="runtime")
+    group.capability(SessionCapability(checkpoints=True), scope="runtime")
     group.tool(effect, effect_policy="non_replay_safe")
     group.agent("default", model="default", allow_tools=("effect",))
     features = model_features(_Models(_UsageFunctionModel(model)), group)
@@ -462,7 +461,7 @@ async def test_remote_native_stop_fences_late_tool_and_releases_session(tmp_path
     ):
         actor = owner.default_principal
         await owner.sessions.create_turn_session("session", principal=actor)
-        held = await owner.sessions.start("session", "held", principal=actor, agent="default", idempotency_key="held")
+        held = await owner.sessions.start_turn("session", "held", principal=actor, agent="default", idempotency_key="held")
         try:
             await asyncio.wait_for(entered.wait(), 5)
             async with (
@@ -471,7 +470,7 @@ async def test_remote_native_stop_fences_late_tool_and_releases_session(tmp_path
             ):
                 assert await observer.sessions.cancel_turn("session", held.key.turn_id, principal=actor)
                 with pytest.raises(AIError) as busy:
-                    await observer.sessions.start("session", "busy", principal=actor, agent="default",
+                    await observer.sessions.start_turn("session", "busy", principal=actor, agent="default",
                                                   idempotency_key="busy")
                 assert busy.value.code is ErrorCode.SESSION_BUSY
                 release.set()
@@ -479,7 +478,7 @@ async def test_remote_native_stop_fences_late_tool_and_releases_session(tmp_path
                 result = await observer.history.turn_result("session", held.key.turn_id, principal=actor)
                 assert result["status"] == "CANCELLED" and result.get("output") is None
                 assert not await remote_state.checkpoint.tools.list_by_execution(held.key.turn_id, tenant_id=actor.tenant_id)
-                next_turn = await observer.sessions.start("session", "next", principal=actor, agent="default",
+                next_turn = await observer.sessions.start_turn("session", "next", principal=actor, agent="default",
                                                           idempotency_key="next")
                 assert (await next_turn.wait_final(timeout_seconds=10)).view["output"] == {"text": "next answer"}
         finally:
@@ -523,8 +522,7 @@ async def test_remote_force_cancel_orders_with_tool_admission(
             return ModelResponse(parts=[TextPart("finished")])
         return ModelResponse(parts=[ToolCallPart("effect", {}, tool_call_id="effect-call")])
 
-    group: RuntimeFeatures[None] = RuntimeFeatures("application")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group: RuntimeFeatures[None] = RuntimeFeatures("application", defaults={"execution": {"retain_history": True}})
     group.tool(effect, effect_policy="non_replay_safe")
     group.agent("default", model="default", allow_tools=("effect",))
     models = _Models(_UsageFunctionModel(model))
@@ -593,8 +591,7 @@ async def test_remote_force_cancel_requires_explicit_tool_effect_resolution(
         requests.append("request")
         return ModelResponse(parts=[ToolCallPart("uncertain_effect", {}, tool_call_id="uncertain-call")])
 
-    group: RuntimeFeatures[None] = RuntimeFeatures("application")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group: RuntimeFeatures[None] = RuntimeFeatures("application", defaults={"execution": {"retain_history": True}})
     group.tool(uncertain_effect, effect_policy="non_replay_safe")
     group.agent("default", model="default", allow_tools=("uncertain_effect",))
     models = _Models(_UsageFunctionModel(model))
@@ -733,8 +730,7 @@ async def test_remote_force_cancel_recursively_fences_ordinary_delegated_tree(tm
         await release.wait()
         return ModelResponse(parts=[TextPart(f"late {prompt}")])
 
-    group: RuntimeFeatures[None] = RuntimeFeatures("application")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group: RuntimeFeatures[None] = RuntimeFeatures("application", defaults={"execution": {"retain_history": True}})
     group.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / "delegated-cancel.db"
@@ -814,8 +810,7 @@ async def test_unknown_delegated_tool_effect_prevents_parent_cancel(tmp_path: Pa
         await release.wait()
         return ModelResponse(parts=[TextPart("late parent answer")])
 
-    group: RuntimeFeatures[None] = RuntimeFeatures("application")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group: RuntimeFeatures[None] = RuntimeFeatures("application", defaults={"execution": {"retain_history": True}})
     group.tool(uncertain_effect, effect_policy="non_replay_safe")
     group.agent("default", model="default", allow_tools=("uncertain_effect",))
     models = _Models(_UsageFunctionModel(model))
@@ -905,8 +900,7 @@ async def test_remote_force_cancel_of_model_delegation_respects_root_owner(
         await release.wait()
         return ModelResponse(parts=[TextPart("late child answer")])
 
-    group: RuntimeFeatures[None] = RuntimeFeatures("application")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group: RuntimeFeatures[None] = RuntimeFeatures("application", defaults={"execution": {"retain_history": True}})
     group.agent("default", model="default", allow_tools=(), allow_subagents=("child",))
     group.agent("child", model="default", allow_tools=(), allow_subagents=())
     if restart:
@@ -1008,8 +1002,7 @@ async def test_no_trace_terminal_readback_preserves_execution_and_single_metric(
         del messages, info
         return ModelResponse(parts=[TextPart("durable answer")])
 
-    group: RuntimeFeatures[None] = RuntimeFeatures("application")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group: RuntimeFeatures[None] = RuntimeFeatures("application", defaults={"execution": {"retain_history": True}})
     group.agent("default", model="default", allow_tools=())
     if restart:
         group.capability(native_checkpoint(), scope="runtime")
@@ -1065,8 +1058,7 @@ async def test_default_admission_without_worker_never_restarts_on_reopen(
             return PersistenceStorage.from_root(tmp_path / "runtime", exclusive_writer=True)
         return PersistenceStorage.sqlite(tmp_path / "runtime.db")
 
-    group: RuntimeFeatures[None] = RuntimeFeatures("application")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group: RuntimeFeatures[None] = RuntimeFeatures("application", defaults={"execution": {"retain_history": True}})
     group.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     initial = storage()

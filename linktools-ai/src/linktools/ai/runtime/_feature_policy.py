@@ -10,12 +10,13 @@ from pydantic_ai.capabilities import AbstractCapability, WrapperCapability
 from pydantic_ai_harness.step_persistence import StepPersistence
 
 from ..capability import (
-    AgentContext, AssetCapability, CapabilityContribution, ExecutionCapability,
-    MemoryCapability, SessionCapability, StepPersistenceCapability,
+    AgentContext, AssetCapability, CapabilityContribution,
+    MemoryCapability, SessionCapability,
     ToolResponseFixture, ToolResponsesCapability, TraceCapability,
 )
 from ..errors import AIError, ErrorCode
 from ..persistence.capabilities import CapabilityPersistence
+from ._step_capability import _StepPersistenceCapability
 from ._capabilities import runtime_feature_leaves
 from ._persistence_configuration import validate_persistence_capabilities, capability_persistence_ids
 
@@ -23,7 +24,6 @@ from ._persistence_configuration import validate_persistence_capabilities, capab
 @dataclass(frozen=True, slots=True)
 class _RuntimeFeaturePolicy:
     capabilities: tuple[AbstractCapability[AgentContext[object]], ...]
-    execution: ExecutionCapability
     session: SessionCapability
     memory_scope: str | None
     tool_responses: ToolResponseFixture | None
@@ -32,7 +32,7 @@ class _RuntimeFeaturePolicy:
 
     @property
     def restart_checkpoints(self) -> bool:
-        return any(isinstance(leaf, (StepPersistence, StepPersistenceCapability))
+        return any(isinstance(leaf, (StepPersistence, _StepPersistenceCapability))
                    for item in self.capabilities for leaf in runtime_feature_leaves(item))
 
     @property
@@ -44,8 +44,6 @@ class _RuntimeFeaturePolicy:
 def _runtime_feature_policy(
     candidates: Sequence[CapabilityContribution[object]],
 ) -> _RuntimeFeaturePolicy:
-    execution_capability = ExecutionCapability()
-    execution_declared = False
     session_capability = SessionCapability()
     session_declared = False
     memory_scope: str | None = None
@@ -55,12 +53,10 @@ def _runtime_feature_policy(
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "Persistent capabilities require runtime scope")
         if isinstance(capability, (
             StepPersistence,
-            StepPersistenceCapability,
             TraceCapability,
             ToolResponsesCapability,
             SessionCapability,
             MemoryCapability,
-            ExecutionCapability,
         )):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "Runtime feature capabilities require Runtime scope")
 
@@ -80,12 +76,7 @@ def _runtime_feature_policy(
             declared_ids.add(leaf.id)
 
     def consume_runtime_declaration(capability: AbstractCapability[AgentContext[object]]) -> AbstractCapability[AgentContext[object]] | None:
-        nonlocal tool_responses, session_capability, session_declared, execution_capability, execution_declared, memory_scope
-        if isinstance(capability, ExecutionCapability):
-            if execution_declared:
-                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            execution_capability, execution_declared = capability, True
-            return capability
+        nonlocal tool_responses, session_capability, session_declared, memory_scope
         if isinstance(capability, MemoryCapability):
             if memory_scope is not None:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
@@ -150,9 +141,6 @@ def _runtime_feature_policy(
         selected = candidate.value.visit_and_replace(capture_persistence)
         if selected is not None:
             runtime_capability_values.append(selected)
-    if not execution_declared:
-        runtime_capability_values.append(execution_capability)
-        captured_capabilities.append(execution_capability)
     runtime_capabilities = tuple(runtime_capability_values)
     runtime_ids: set[str] = set()
 
@@ -166,6 +154,6 @@ def _runtime_feature_policy(
         capability.apply(register_runtime_id)
     validate_persistence_capabilities(captured_capabilities)
     return _RuntimeFeaturePolicy(
-        runtime_capabilities, execution_capability, session_capability,
+        runtime_capabilities, session_capability,
         memory_scope, tool_responses, capability_revisions, tuple(capability_revisions),
     )

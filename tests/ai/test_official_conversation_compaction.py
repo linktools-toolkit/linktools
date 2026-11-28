@@ -9,7 +9,7 @@ import pytest
 from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, TextPart, ToolCallPart, UserPromptPart
 from pydantic_ai_harness.step_persistence import InMemoryStepStore, StepPersistence
 
-from linktools.ai.capability import AgentContext, ExecutionCapability, StepPersistenceCapability
+from linktools.ai.capability import AgentContext, SessionCapability
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistencePlan, PersistenceStorage
@@ -21,6 +21,7 @@ from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.runtime._regenerable_turn import _RegenerableTurnRunner
 from linktools.ai.storage import InMemoryObjectStore, StorageRoute
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 
 
@@ -56,8 +57,8 @@ async def test_native_checkpoint_does_not_replace_conversation_compaction(tmp_pa
         return ModelResponse(parts=[TextPart("done")])
 
     features = RuntimeFeatures("native-conversation-compaction")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    features.capability(StepPersistenceCapability() if sql else StepPersistence(store=steps), scope="runtime")
+    configure_execution(features, retain_history=True)
+    features.capability(SessionCapability(checkpoints=True) if sql else StepPersistence(store=steps), scope="runtime")
     features.tool(work, effect_policy="replay_safe")
     features.agent("default", model="default", allow_tools=("work",), allow_subagents=())
     model = _UsageFunctionModel(respond, profile={"context_window": 3000})
@@ -80,7 +81,7 @@ async def test_native_checkpoint_does_not_replace_conversation_compaction(tmp_pa
 
         async def start(prompt, request):
             if sql:
-                return await runtime.sessions.start(
+                return await runtime.sessions.start_turn(
                     session.session_id, prompt, agent="default", principal=runtime.default_principal,
                     idempotency_key=request,
                 )
@@ -208,7 +209,7 @@ async def test_recovered_sql_turn_that_executes_model_retains_new_summary(tmp_pa
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=principal)
         for i in range(12):
-            first = await runtime.sessions.start("session", f"seed {i}", agent="default", principal=principal,
+            first = await runtime.sessions.start_turn("session", f"seed {i}", agent="default", principal=principal,
                                                  idempotency_key=f"seed-{i}")
             assert (await first.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
         assert not summaries
@@ -220,7 +221,7 @@ async def test_recovered_sql_turn_that_executes_model_retains_new_summary(tmp_pa
 
         with monkeypatch.context() as fault:
             fault.setattr(_RegenerableTurnRunner, "settle", stop_before_model)
-            second = await runtime.sessions.start("session", "large new question " * 3500, agent="default", principal=principal,
+            second = await runtime.sessions.start_turn("session", "large new question " * 3500, agent="default", principal=principal,
                                                   idempotency_key="second")
             await asyncio.wait_for(stopped.wait(), 5)
         assert _RegenerableTurnRunner.settle is settle and len(provider_calls) == 12
@@ -232,7 +233,7 @@ async def test_recovered_sql_turn_that_executes_model_retains_new_summary(tmp_pa
                 **turns._turn_values(second.key), generation=1,
             ).values(lease_until=0))
             assert row.rowcount == 1
-        assert await runtime.sessions.recover_turn("session", second.key.turn_id, principal=principal)
+        assert await runtime.sessions.recover_turn("session", second.key.turn_id, mode="resume", principal=principal)
         result = await turns.get_turn(second.key)
         assert (result["generation"], result["state"]) == (2, "succeeded")
         assert len(provider_calls) == 13 and len(summaries) == 1, (len(provider_calls), len(summaries), len(provider_calls[-1]), len(str(provider_calls[-1])))

@@ -10,7 +10,6 @@ from contextlib import aclosing
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.usage import RequestUsage
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import AuthorizationAction, ExecutionStatus, TenantAuthorizationPolicy, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -35,8 +34,7 @@ async def test_public_sql_sdk_session_creates_and_replays_native_turn(tmp_path):
         calls.append(True)
         return ModelResponse(parts=[TextPart("native")], usage=RequestUsage(input_tokens=7, output_tokens=11))
 
-    features = RuntimeFeatures("sdk-native-session")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("sdk-native-session", defaults={"execution": {"retain_history": True}})
     features.agent("default", allow_tools=(), allow_capabilities=())
     model_features(_Models(_UsageFunctionModel(model)), features)
     async with (
@@ -60,8 +58,8 @@ async def test_public_sql_sdk_session_creates_and_replays_native_turn(tmp_path):
 
         agent = runtime.agents.get()
         with pytest.raises(AIError) as missing:
-            await agent.start("must not create a legacy session", principal=principal,
-                              session_id="absent", idempotency_key="missing")
+            await agent.session("absent").start("must not create a legacy session", principal=principal,
+                              idempotency_key="missing")
         assert missing.value.code is ErrorCode.AUTHORIZATION_DENIED
         assert state.conversation.sessions is None
         with pytest.raises(AIError) as missing:
@@ -84,7 +82,7 @@ async def test_public_sql_sdk_session_creates_and_replays_native_turn(tmp_path):
             assert same.key == turn.key
             [terminal] = [frame async for frame in frames]
             assert terminal["type"] == "terminal" and terminal["state"] == "succeeded"
-        direct = await runtime.sessions.start("chat", "Hello", principal=principal, agent=agent, idempotency_key="send")
+        direct = await runtime.sessions.start_turn("chat", "Hello", principal=principal, agent=agent, idempotency_key="send")
         assert direct.key == turn.key
         async with asyncio.timeout(10):
             waited = await direct.wait()
@@ -94,8 +92,7 @@ async def test_public_sql_sdk_session_creates_and_replays_native_turn(tmp_path):
 
 
         async with asyncio.timeout(10):
-            plan = await agent.start_plan("Plan next", principal=principal, session_id=created.session_id,
-                                          idempotency_key="plan")
+            plan = await runtime.sessions.start_turn(created.session_id, "Plan next", agent=agent, principal=principal, idempotency_key="plan", mode="plan", planning=True)
             planned = await plan.wait()
         assert planned.key.session_id == created.session_id and planned.key != turn.key
         assert planned.status is ExecutionStatus.SUCCEEDED
@@ -103,12 +100,12 @@ async def test_public_sql_sdk_session_creates_and_replays_native_turn(tmp_path):
         assert await state.execution.executions.get(planned.key.turn_id, tenant_id=principal.tenant_id) is None
 
         async with asyncio.timeout(10):
-            started = await agent.start("third", principal=principal, session_id=created.session_id,
+            started = await agent.session(created.session_id).start("third", principal=principal,
                                         idempotency_key="start-native")
             assert (await started.wait_final()).status is ExecutionStatus.SUCCEEDED
-            run = await agent.run("fourth", principal=principal, session_id=created.session_id,
+            run = await agent.session(created.session_id).run("fourth", principal=principal,
                                   idempotency_key="run-native")
-            plan_run = await agent.plan("fifth", principal=principal, session_id=created.session_id,
+            plan_run = await agent.session(created.session_id).plan("fifth", principal=principal,
                                         idempotency_key="plan-native")
         assert run.cursor is plan_run.cursor is None
         assert run.result.key.session_id == plan_run.result.key.session_id == created.session_id
@@ -125,8 +122,7 @@ async def test_public_sql_sdk_session_creates_and_replays_native_turn(tmp_path):
 @pytest.mark.asyncio
 async def test_sql_host_without_session_authorization_does_not_fall_back(tmp_path):
     runtime_name = "sdk-sql-no-session-auth"
-    features = RuntimeFeatures(runtime_name)
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures(runtime_name, defaults={"execution": {"retain_history": True}})
     features.agent("default", allow_tools=(), allow_capabilities=())
 
     async def model(_messages, _info):
@@ -144,7 +140,7 @@ async def test_sql_host_without_session_authorization_does_not_fall_back(tmp_pat
             lambda: runtime.sessions.create(CreateSessionRequest(principal, "chat", "create")),
             lambda: runtime.sessions.get("chat", principal=principal),
             lambda: runtime.sessions.inspect("chat", principal=principal),
-            lambda: agent.start("must not create a legacy session", session_id="chat"),
+            lambda: agent.session("chat").start("must not create a legacy session"),
         ):
             with pytest.raises(AIError) as missing:
                 await operation()
@@ -168,8 +164,7 @@ async def test_native_sdk_freezes_effective_agent_planning_and_thinking(tmp_path
         return ModelResponse(parts=[TextPart("done")])
 
     def features(*, revision, planning, thinking):
-        result = RuntimeFeatures("sdk-native-defaults")
-        result.capability(ExecutionCapability(retain_history=True), scope="runtime")
+        result = RuntimeFeatures("sdk-native-defaults", defaults={"execution": {"retain_history": True}})
         result.agent("default", revision=revision, allow_tools=(), allow_capabilities=(), planning=planning, thinking=thinking)
         return model_features(_Models(_UsageFunctionModel(model)), result)
 
@@ -185,11 +180,11 @@ async def test_native_sdk_freezes_effective_agent_planning_and_thinking(tmp_path
         selected = agent if role == "bound-sdk-agent" else "default"
 
         async def send(key, **options):
-            return await runtime.sessions.start(
+            return await runtime.sessions.start_turn(
                 "session", "question", agent=selected, principal=principal, idempotency_key=key, **options,
             )
 
-        admitted = (await agent.start("question", session_id="session", idempotency_key="turn")
+        admitted = (await agent.session("session").start("question", idempotency_key="turn")
                     if role == "bound-sdk-agent" else await send("turn"))
         assert (await admitted.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
         row = await state.session_turns.get_turn(admitted.key)
@@ -219,7 +214,7 @@ async def test_native_sdk_freezes_effective_agent_planning_and_thinking(tmp_path
             Runtime.open(persistence=state, authorization=HostAuthorization(),
                          features=features(revision=2, planning=False, thinking="low")) as runtime,
         ):
-            same = await runtime.sessions.start(
+            same = await runtime.sessions.start_turn(
                 "session", "question", agent="default", principal=runtime.default_principal, idempotency_key="turn",
             )
             assert same.key == admitted.key
@@ -235,8 +230,7 @@ async def test_agent_bound_native_session_mutations_use_canonical_revisions(tmp_
     async def model(_messages, _info):
         return ModelResponse(parts=[TextPart("done")])
 
-    features = RuntimeFeatures("sdk-native-mutations")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("sdk-native-mutations", defaults={"execution": {"retain_history": True}})
     features.agent("default", allow_tools=(), allow_capabilities=())
     model_features(_Models(_UsageFunctionModel(model)), features)
     async with (

@@ -13,7 +13,7 @@ import pytest
 from pydantic_ai.exceptions import ApprovalRequired
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 
-from linktools.ai.capability import AgentContext, ExecutionCapability, StepPersistenceCapability, TraceCapability
+from linktools.ai.capability import AgentContext, SessionCapability, TraceCapability
 from linktools.ai.core import (
     ApprovalDecision, ApprovalStatus, ExecutionStatus, TenantAuthorizationPolicy, ToolOperationStatus, service_principal,
 )
@@ -24,6 +24,7 @@ from linktools.ai.persistence.runs import ModelInteractionStateStepArchive
 from linktools.ai.persistence.turns import SessionTurnKey
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, _wait_for_committed
 
 
@@ -190,11 +191,11 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
         )])
 
     name = "canonical-web-subagent"
-    features = RuntimeFeatures(name)
+    features = RuntimeFeatures(name, defaults={"execution": {"retain_history": True}})
     features.model("parent", _model("parent", parent))
     features.model("child", _model("child", child))
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    features.capability(StepPersistenceCapability(), scope="runtime")
+    configure_execution(features, retain_history=True)
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
     features.tool(lookup, effect_policy="none")
     if ordinary:
         features.tool(ordinary_effect, effect_policy="non_replay_safe")
@@ -346,7 +347,7 @@ async def test_ai_web_native_delegation_replays_exact_turn_without_relaunch(
                 unavailable.setattr(ModelInteractionStateStepArchive, "list_model_interactions", trace_forbidden)
                 unavailable.setattr(ModelInteractionStateStepArchive, "list_trace_events", trace_forbidden)
                 unavailable.setattr(ModelInteractionStateStepArchive, "list_turn_trace_events", trace_forbidden)
-                assert await runtime.sessions.recover_turn(_SESSION, turn_id, principal=runtime.default_principal)
+                assert await runtime.sessions.recover_turn(_SESSION, turn_id, mode="resume", principal=runtime.default_principal)
 
             row = await turns.get_turn(key)
             assert row["state"] == "succeeded" and row["generation"] == 2
@@ -409,11 +410,11 @@ async def test_approved_parent_tool_continues_to_native_subagent(tmp_path: Path,
         return ModelResponse(parts=[TextPart(_ANSWER)])
 
     name = "canonical-subagent-after-approval"
-    features = RuntimeFeatures(name)
+    features = RuntimeFeatures(name, defaults={"execution": {"retain_history": True}})
     features.model("parent", _model("parent", parent))
     features.model("child", _model("child", child))
-    features.capability(ExecutionCapability(retain_history=True))
-    features.capability(StepPersistenceCapability())
+    configure_execution(features, retain_history=True)
+    features.capability(SessionCapability(checkpoints=True))
     features.tool(confirm_fixture, effect_policy=effect_policy)
     features.tool(lookup, effect_policy="none")
     features.agent("default", model="parent", allow_subagents=("reviewer",),
@@ -425,7 +426,7 @@ async def test_approved_parent_tool_continues_to_native_subagent(tmp_path: Path,
     ):
         principal = service_principal(runtime.tenant_id, "approval-fixture")
         await runtime.sessions.create_turn_session(_SESSION, principal=principal)
-        turn = await runtime.sessions.start(
+        turn = await runtime.sessions.start_turn(
             _SESSION, "Confirm fixture A first", agent="default", principal=principal, idempotency_key="original",
         )
         paused_result = await asyncio.wait_for(turn.wait(), timeout=10)
@@ -471,7 +472,7 @@ async def test_approved_parent_tool_continues_to_native_subagent(tmp_path: Path,
         assert child_id != turn.key.turn_id
         assert await state.execution.executions.get(turn.key.turn_id, tenant_id=runtime.tenant_id) is None
         assert state.conversation.sessions is None
-        replay = await runtime.sessions.start(
+        replay = await runtime.sessions.start_turn(
             _SESSION, "Confirm fixture A first", agent="default", principal=principal, idempotency_key="original",
         )
         assert replay.key == turn.key

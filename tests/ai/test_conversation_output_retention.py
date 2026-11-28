@@ -11,7 +11,7 @@ import pytest
 from pydantic import BaseModel
 from pydantic_ai.messages import BinaryContent, ModelResponse, TextPart, ToolCallPart
 
-from linktools.ai.capability import ExecutionCapability, StepPersistenceCapability
+from linktools.ai.capability import SessionCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import AuthorizationAction, ExecutionStatus, Principal, PromptLimits, ResourceKind, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
@@ -28,6 +28,7 @@ from linktools.ai.persistence.codec import (
 from linktools.ai.persistence.state import OperationQuery, StateTransaction
 from linktools.ai.storage import FilesystemObjectStore, InMemoryCacheBackend, StorageRoute, StoredPayload, read_object
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 from .test_evaluation_retention import Offline
 
@@ -40,7 +41,7 @@ class _HostAuthorization(TenantAuthorizationPolicy):
 
 
 async def _send(runtime: Runtime, session: str, prompt: str):
-    turn = await runtime.sessions.start(session, prompt, agent="default", principal=runtime.default_principal,
+    turn = await runtime.sessions.start_turn(session, prompt, agent="default", principal=runtime.default_principal,
                                         idempotency_key=prompt)
     return await turn.wait_final(timeout_seconds=5)
 
@@ -53,7 +54,7 @@ def _features(*, conversation: bool = True) -> RuntimeFeatures:
     features = RuntimeFeatures(_NAMESPACE)
     features.agent("default", model="default", allow_tools=())
     if conversation:
-        features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+        configure_execution(features, retain_history=True)
     return features
 
 
@@ -123,7 +124,7 @@ async def test_native_output_uses_transcript_owner_after_reopen(tmp_path: Path, 
     ):
         principal = Principal("owner", runtime.tenant_id)
         await runtime.sessions.create_turn_session("session", principal=principal)
-        turn = await runtime.sessions.start("session", "original user input", agent="default", principal=principal,
+        turn = await runtime.sessions.start_turn("session", "original user input", agent="default", principal=principal,
                                             idempotency_key="input", output=_Answer)
         result = await turn.wait_final(timeout_seconds=5)
         assert result.status is ExecutionStatus.SUCCEEDED and result.view["output"] == output
@@ -434,7 +435,7 @@ async def test_cancelled_turn_retains_original_input_without_completed_output(tm
     ):
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=principal)
-        turn = await runtime.sessions.start("session", "cancelled original input", agent="default",
+        turn = await runtime.sessions.start_turn("session", "cancelled original input", agent="default",
                                             principal=principal, idempotency_key="cancelled")
         await asyncio.wait_for(entered.wait(), 5)
         active = await runtime.history.turn_result("session", turn.key.turn_id, principal=principal)
@@ -482,7 +483,7 @@ async def test_unknown_terminal_commit_retains_exactly_one_canonical_turn(
             raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
 
         monkeypatch.setattr(turns, "finish", finish)
-        turn = await runtime.sessions.start("session", "original unknown-commit input", agent="default",
+        turn = await runtime.sessions.start_turn("session", "original unknown-commit input", agent="default",
                                             principal=principal, idempotency_key="request")
         await asyncio.wait_for(lost.wait(), 5)
         expected = await runtime.history.turn_result("session", turn.key.turn_id, principal=principal)
@@ -493,7 +494,7 @@ async def test_unknown_terminal_commit_retains_exactly_one_canonical_turn(
         Persistence.open(_NAMESPACE, storage=storage) as state,
         Runtime.open(persistence=state, features=features, authorization=authorization) as runtime,
     ):
-        replay = await runtime.sessions.start("session", "original unknown-commit input", agent="default",
+        replay = await runtime.sessions.start_turn("session", "original unknown-commit input", agent="default",
                                               principal=principal, idempotency_key="request")
         assert replay.key == turn.key
         assert (await replay.wait_final(timeout_seconds=5)).view == expected
@@ -541,7 +542,7 @@ async def test_split_route_never_publishes_completed_output_before_terminal_rece
         return ModelResponse(parts=[TextPart("split route result")])
 
     features = _features(conversation=False)
-    features.capability(StepPersistenceCapability(), scope="runtime")
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
     model_features(_Models(_UsageFunctionModel(model)), features)
     receipts = []
     original_publish = _CanonicalSplitStep.publish_terminal
@@ -576,7 +577,7 @@ async def test_split_route_never_publishes_completed_output_before_terminal_rece
         with monkeypatch.context() as patch:
             patch.setattr(_CanonicalSplitStep, "publish_terminal", publish)
             patch.setattr(turns, "publish_split_terminal", target)
-            turn = await runtime.sessions.start("session", "original split input", agent="default",
+            turn = await runtime.sessions.start_turn("session", "original split input", agent="default",
                                                 principal=principal, idempotency_key="request")
             try:
                 await asyncio.wait_for(entered.wait(), 5)
@@ -599,7 +600,7 @@ async def test_split_route_never_publishes_completed_output_before_terminal_rece
         turns = state.session_turns
         if publication == "missing":
             await turns.expire_stopped_lease(turn.key, generation=1)
-            assert await runtime.sessions.recover_turn("session", turn.key.turn_id, principal=principal)
+            assert await runtime.sessions.recover_turn("session", turn.key.turn_id, mode="resume", principal=principal)
         row = await turns.get_turn(turn.key)
         assert (row["state"], row["generation"], row["split_source_receipt"]) == (
             "succeeded", 1, receipts[0].encode(),
@@ -607,7 +608,7 @@ async def test_split_route_never_publishes_completed_output_before_terminal_rece
         [retained] = (await _timeline(runtime.history, principal))["items"]
         assert retained["output"] == {"text": "split route result"}
         assert retained["user_input"]["prompt"] == "original split input"
-        replay = await runtime.sessions.start("session", "original split input", agent="default",
+        replay = await runtime.sessions.start_turn("session", "original split input", agent="default",
                                               principal=principal, idempotency_key="request")
         assert replay.key == turn.key
         assert (await replay.wait_final(timeout_seconds=5)).view == retained
@@ -759,7 +760,7 @@ async def test_cancelled_unconfirmed_model_response_does_not_enter_following_con
         actor = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=actor)
         assert (await _send(runtime, "session", "confirmed first input")).status is ExecutionStatus.SUCCEEDED
-        second = await runtime.sessions.start("session", "unconfirmed cancelled input", agent="default",
+        second = await runtime.sessions.start_turn("session", "unconfirmed cancelled input", agent="default",
                                               principal=actor, idempotency_key="cancel")
         try:
             await asyncio.wait_for(entered.wait(), 5)

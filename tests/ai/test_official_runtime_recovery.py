@@ -12,7 +12,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolRetu
 from pydantic_ai_harness.step_persistence import RunRecord, StepPersistence
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.capability import AgentContext, ExecutionCapability
+from linktools.ai.capability import AgentContext, SessionCapability
 from linktools.ai.core import ApprovalDecision, AuthorizationPolicy, ExecutionStatus, Principal, TenantAuthorizationPolicy, ToolOperationStatus
 from linktools.ai.execution import ApprovalDecisionRequest
 from linktools.ai.migrate import provision_database
@@ -30,17 +30,17 @@ async def _runtime(database: Path, model, tool, *, restart_checkpoints: bool = T
     await provision_database(engine)
     steps = SqlStepStore(engine, namespace="native-recovery", tenant_id="default")
     await steps.initialize()
-    features = RuntimeFeatures("native-recovery")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("native-recovery", defaults={"execution": {"retain_history": True}})
     if restart_checkpoints:
         features.capability(StepPersistence(store=steps, capture_frontier=True), scope="runtime")
+        features.capability(SessionCapability(checkpoints=True), scope="runtime")
     features.tool(tool, effect_policy="replay_safe")
     features.agent("default", model="default", allow_tools=(tool.__name__,))
     try:
         async with Persistence.open("native-recovery", storage=PersistenceStorage.sql(engine)) as persistence:
             async with Runtime.open(persistence=persistence,
                 features=model_features(_Models(_UsageFunctionModel(model)), features),
-                auto_recover=False, authorization=authorization) as runtime:
+                authorization=authorization) as runtime:
                 yield runtime, persistence, steps
     finally:
         await engine.dispose()
@@ -147,7 +147,7 @@ async def test_cold_session_recovers_settled_tool_using_original_step_receipt(tm
     async with _runtime(database, interrupted, work, authorization=authorization) as (runtime, state, steps):
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=principal)
-        turn = await runtime.sessions.start(
+        turn = await runtime.sessions.start_turn(
             "session", "question", agent="default", principal=principal, idempotency_key="start",
         )
         await asyncio.wait_for(blocked.wait(), 5)
@@ -168,8 +168,8 @@ async def test_cold_session_recovers_settled_tool_using_original_step_receipt(tm
 
     async with _runtime(database, recovered, work, authorization=authorization) as (runtime, state, steps):
         await _expire(state.session_turns, turn.key, generation=1)
-        assert await runtime.sessions.recover_turn("session", turn.key.turn_id, principal=principal)
-        replay = await runtime.sessions.start(
+        assert await runtime.sessions.recover_turn("session", turn.key.turn_id, mode="resume", principal=principal)
+        replay = await runtime.sessions.start_turn(
             "session", "question", agent="default", principal=principal, idempotency_key="start",
         )
         assert replay.key == turn.key

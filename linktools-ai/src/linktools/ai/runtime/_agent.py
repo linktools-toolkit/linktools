@@ -76,14 +76,14 @@ class Session(Generic[AppT]):
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT] | _NativeSessionTurn[AppT, _NativeTurnResult]":
         """Start run mode; planning enables the planning capability without selecting plan mode."""
-        return await self._definition().start(
+        return await self._start_on_owner(
             user_prompt,
             files=files,
             session_context=session_context,
             budget=budget,
             output=output,
             principal=principal or self._principal,
-            session_id=self.session_id,
+            mode="run",
             idempotency_key=idempotency_key,
             planning=planning,
             thinking=thinking,
@@ -110,9 +110,9 @@ class Session(Generic[AppT]):
         raise_on_stream_error: bool = False,
     ) -> "WaitResult[ExecutionResult] | WaitResult[_NativeTurnResult]":
         """Run and wait; planning enables a capability, while include_event_content only controls observation."""
-        return await self._definition().run(
+        return await self._run_on_owner(
             user_prompt, files=files, session_context=session_context, budget=budget,
-            output=output, principal=principal or self._principal, session_id=self.session_id,
+            output=output, principal=principal or self._principal, mode="run",
             idempotency_key=idempotency_key, planning=planning, thinking=thinking,
             correlation=correlation, timeout_seconds=timeout_seconds, on_event=on_event,
             include_event_content=include_event_content, close_timeout_seconds=close_timeout_seconds,
@@ -138,22 +138,103 @@ class Session(Generic[AppT]):
         raise_on_stream_error: bool = False,
     ) -> "WaitResult[ExecutionResult] | WaitResult[_NativeTurnResult]":
         """Execute plan mode with plan-safe tools and wait. This can call models and tools; it is not a dry run."""
-        validate_wait(on_event, None, include_event_content, timeout_seconds, close_timeout_seconds,
-                      raise_on_stream_error=raise_on_stream_error)
-        return await self._definition().plan(
+        return await self._run_on_owner(
             user_prompt,
             files=files,
             session_context=session_context,
             budget=budget,
             output=output,
             principal=principal or self._principal,
-            session_id=self.session_id,
+            mode="plan", planning=True,
             idempotency_key=idempotency_key,
             thinking=thinking,
             correlation=correlation,
             timeout_seconds=timeout_seconds,
             on_event=on_event,
             include_event_content=include_event_content,
+            close_timeout_seconds=close_timeout_seconds,
+            raise_on_stream_error=raise_on_stream_error,
+        )
+
+    async def _start_on_owner(
+        self, user_prompt: "UserPromptInput", *, files: Sequence[str], session_context: SessionContext,
+        budget: RunBudget | None, output: "type[BaseModel] | None", principal: "Principal | None",
+        idempotency_key: str | None, mode: ExecutionMode, planning: bool | None,
+        thinking: "ThinkingValue | None", correlation: "Mapping[str, object] | None",
+    ) -> "Execution[AppT] | _NativeSessionTurn[AppT, _NativeTurnResult]":
+        agent = self._definition()
+        sessions = self._runtime.sessions
+        if sessions._uses_turn_sessions:
+            return await sessions.start_turn(
+                self.session_id, user_prompt, agent=agent, principal=self._runtime._resolve_principal(principal),
+                idempotency_key=secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
+                files=files, session_context=session_context, budget=budget, output=output,
+                mode=mode, planning=planning, thinking=thinking, correlation=correlation,
+            )
+        return await agent.execution_port.start(
+            validate_user_input(user_prompt), files=files, session_context=session_context,
+            budget=budget, output=output, principal=principal, session_id=self.session_id,
+            idempotency_key=idempotency_key, mode=mode, planning=planning, thinking=thinking,
+            correlation=correlation,
+        )
+
+    def _open_native_observer(self, principal, on_event, include_event_content):
+        if on_event is None or not self._runtime.sessions._uses_turn_sessions:
+            return nullcontext()
+        if include_event_content:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "include_event_content"})
+        from ._native_session import _NativeMetadataObserver
+
+        return _NativeMetadataObserver(
+            self._runtime, self.session_id, self._runtime._resolve_principal(principal),
+            local_workspace=False,
+        )
+
+    async def _run_on_owner(
+        self,
+        user_prompt: "UserPromptInput",
+        *,
+        mode: ExecutionMode,
+        files: Sequence[str] = (),
+        session_context: SessionContext = "all",
+        budget: RunBudget | None = None,
+        output: "type[BaseModel] | None" = None,
+        principal: "Principal | None" = None,
+        idempotency_key: "str | None" = None,
+        planning: "bool | None" = None,
+        thinking: "ThinkingValue | None" = None,
+        correlation: "Mapping[str, object] | None" = None,
+        timeout_seconds: "float | None" = None,
+        on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,
+        include_event_content: bool = False,
+        close_timeout_seconds: float = 5.0,
+        raise_on_stream_error: bool = False,
+    ) -> "WaitResult[ExecutionResult] | WaitResult[_NativeTurnResult]":
+        """Run and wait, optionally delivering a live callback.
+
+        Native SQL sessions project metadata only. include_event_content has
+        no effect without a callback and is rejected for native callbacks.
+        """
+        validate_wait(on_event, None, include_event_content, timeout_seconds, close_timeout_seconds,
+                      raise_on_stream_error=raise_on_stream_error)
+        from ._native_session import _NativeSessionTurn
+
+        with self._open_native_observer(principal, on_event, include_event_content) as observer:
+            execution = await self._start_on_owner(
+                user_prompt, files=files, session_context=session_context, budget=budget, output=output,
+                principal=principal, idempotency_key=idempotency_key,
+                mode=mode, planning=planning, thinking=thinking, correlation=correlation,
+            )
+            if isinstance(execution, _NativeSessionTurn):
+                if observer is None:
+                    return WaitResult(await execution.wait_final(timeout_seconds=timeout_seconds), None)
+                assert on_event is not None
+                return await execution._wait_observed(
+                    observer, agent_id=self.agent_id, on_event=on_event, timeout_seconds=timeout_seconds,
+                    close_timeout_seconds=close_timeout_seconds, raise_on_stream_error=raise_on_stream_error,
+                )
+        return await execution.wait(
+            timeout_seconds=timeout_seconds, on_event=on_event, include_event_content=include_event_content,
             close_timeout_seconds=close_timeout_seconds,
             raise_on_stream_error=raise_on_stream_error,
         )
@@ -349,63 +430,20 @@ class Agent(Generic[AppT]):
         user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
-        session_context: SessionContext = "all",
         budget: RunBudget | None = None,
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
-        session_id: "str | None" = None,
         idempotency_key: "str | None" = None,
         planning: "bool | None" = None,
         thinking: "ThinkingValue | None" = None,
         correlation: "Mapping[str, object] | None" = None,
         input_context: ExecutionInputContext | None = None,
-    ) -> "Execution[AppT] | _NativeSessionTurn[AppT, _NativeTurnResult]":
+    ) -> "Execution[AppT]":
         """Start run mode; planning enables the planning capability without selecting plan mode."""
-        return await self._start_on_owner(
-            user_prompt, files=files, session_context=session_context, budget=budget, output=output,
-            principal=principal, session_id=session_id, idempotency_key=idempotency_key, mode="run",
-            planning=planning, thinking=thinking, correlation=correlation, input_context=input_context,
-        )
-
-    async def _start_on_owner(
-        self, user_prompt: "UserPromptInput", *, files: Sequence[str], session_context: SessionContext,
-        budget: RunBudget | None, output: "type[BaseModel] | None", principal: "Principal | None",
-        session_id: str | None, idempotency_key: str | None, mode: ExecutionMode, planning: bool | None,
-        thinking: "ThinkingValue | None", correlation: "Mapping[str, object] | None",
-        input_context: ExecutionInputContext | None = None,
-    ) -> "Execution[AppT] | _NativeSessionTurn[AppT, _NativeTurnResult]":
-        if session_id is not None:
-            sessions = self._runtime.sessions
-            if sessions._uses_turn_sessions:
-                if input_context is not None:
-                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "input_context"})
-                actor = self._runtime._resolve_principal(principal)
-                session = sessions._bind_native_session(session_id, principal=actor, local_workspace=False)
-                receipt = await sessions._start_turn_receipt(
-                    session_id, user_prompt, agent=self, principal=actor,
-                    idempotency_key=secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
-                    files=files, session_context=session_context, budget=budget, output=output,
-                    mode=mode, planning=planning,
-                    thinking=thinking, correlation=correlation,
-                )
-                return replace(session._turn(receipt.turn_id, actor), _replayed=receipt.replayed)
         return await self.execution_port.start(
-            validate_user_input(user_prompt), files=files, session_context=session_context,
-            budget=budget, output=output, principal=principal, session_id=session_id,
-            idempotency_key=idempotency_key, mode=mode, planning=planning, thinking=thinking,
-            correlation=correlation, **({"input_context": input_context} if mode == "run" else {}),
-        )
-
-    def _open_native_observer(self, session_id, principal, on_event, include_event_content):
-        if session_id is None or on_event is None or not self._runtime.sessions._uses_turn_sessions:
-            return nullcontext()
-        if include_event_content:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "include_event_content"})
-        from ._native_session import _NativeMetadataObserver
-
-        return _NativeMetadataObserver(
-            self._runtime, session_id, self._runtime._resolve_principal(principal),
-            local_workspace=False,
+            validate_user_input(user_prompt), files=files, budget=budget, output=output,
+            principal=principal, session_id=None, idempotency_key=idempotency_key, mode="run",
+            planning=planning, thinking=thinking, correlation=correlation, input_context=input_context,
         )
 
     async def run(
@@ -413,11 +451,9 @@ class Agent(Generic[AppT]):
         user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
-        session_context: SessionContext = "all",
         budget: RunBudget | None = None,
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
-        session_id: "str | None" = None,
         idempotency_key: "str | None" = None,
         planning: "bool | None" = None,
         thinking: "ThinkingValue | None" = None,
@@ -428,34 +464,18 @@ class Agent(Generic[AppT]):
         include_event_content: bool = False,
         close_timeout_seconds: float = 5.0,
         raise_on_stream_error: bool = False,
-    ) -> "WaitResult[ExecutionResult] | WaitResult[_NativeTurnResult]":
-        """Run and wait, optionally delivering a live callback.
-
-        Native SQL sessions project metadata only. include_event_content has
-        no effect without a callback and is rejected for native callbacks.
-        """
+    ) -> "WaitResult[ExecutionResult]":
+        """Start an independent execution and wait for its result."""
         validate_wait(on_event, None, include_event_content, timeout_seconds, close_timeout_seconds,
                       raise_on_stream_error=raise_on_stream_error)
-        from ._native_session import _NativeSessionTurn
-
-        with self._open_native_observer(session_id, principal, on_event, include_event_content) as observer:
-            execution = await self._start_on_owner(
-                user_prompt, files=files, session_context=session_context, budget=budget, output=output,
-                principal=principal, session_id=session_id, idempotency_key=idempotency_key,
-                mode="run", planning=planning, thinking=thinking, correlation=correlation, input_context=input_context,
-            )
-            if isinstance(execution, _NativeSessionTurn):
-                if observer is None:
-                    return WaitResult(await execution.wait_final(timeout_seconds=timeout_seconds), None)
-                assert on_event is not None
-                return await execution._wait_observed(
-                    observer, agent_id=self.id, on_event=on_event, timeout_seconds=timeout_seconds,
-                    close_timeout_seconds=close_timeout_seconds, raise_on_stream_error=raise_on_stream_error,
-                )
+        execution = await self.start(
+            user_prompt, files=files, budget=budget, output=output,
+            principal=principal, idempotency_key=idempotency_key, planning=planning, thinking=thinking,
+            correlation=correlation, input_context=input_context,
+        )
         return await execution.wait(
             timeout_seconds=timeout_seconds, on_event=on_event, include_event_content=include_event_content,
-            close_timeout_seconds=close_timeout_seconds,
-            raise_on_stream_error=raise_on_stream_error,
+            close_timeout_seconds=close_timeout_seconds, raise_on_stream_error=raise_on_stream_error,
         )
 
     async def start_plan(
@@ -463,19 +483,17 @@ class Agent(Generic[AppT]):
         user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
-        session_context: SessionContext = "all",
         budget: RunBudget | None = None,
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
-        session_id: "str | None" = None,
         idempotency_key: "str | None" = None,
         thinking: "ThinkingValue | None" = None,
         correlation: "Mapping[str, object] | None" = None,
-    ) -> "Execution[AppT] | _NativeSessionTurn[AppT, _NativeTurnResult]":
-        """Start a plan on its existing session owner, without waiting for completion."""
-        return await self._start_on_owner(
-            user_prompt, files=files, session_context=session_context, budget=budget, output=output,
-            principal=principal, session_id=session_id, idempotency_key=idempotency_key,
+    ) -> "Execution[AppT]":
+        """Start an independent plan, without waiting for completion."""
+        return await self.execution_port.start(
+            validate_user_input(user_prompt), files=files, budget=budget, output=output,
+            principal=principal, session_id=None, idempotency_key=idempotency_key,
             mode="plan", planning=True, thinking=thinking, correlation=correlation,
         )
 
@@ -484,11 +502,9 @@ class Agent(Generic[AppT]):
         user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
-        session_context: SessionContext = "all",
         budget: RunBudget | None = None,
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
-        session_id: "str | None" = None,
         idempotency_key: "str | None" = None,
         thinking: "ThinkingValue | None" = None,
         correlation: "Mapping[str, object] | None" = None,
@@ -497,33 +513,17 @@ class Agent(Generic[AppT]):
         include_event_content: bool = False,
         close_timeout_seconds: float = 5.0,
         raise_on_stream_error: bool = False,
-    ) -> "WaitResult[ExecutionResult] | WaitResult[_NativeTurnResult]":
-        """Execute plan mode with plan-safe tools and wait; this is not a dry run.
-
-        Like run(), native SQL callbacks are metadata-only.
-        """
+    ) -> "WaitResult[ExecutionResult]":
+        """Execute an independent plan with plan-safe tools and wait."""
         validate_wait(on_event, None, include_event_content, timeout_seconds, close_timeout_seconds,
                       raise_on_stream_error=raise_on_stream_error)
-        from ._native_session import _NativeSessionTurn
-
-        with self._open_native_observer(session_id, principal, on_event, include_event_content) as observer:
-            execution = await self._start_on_owner(
-                user_prompt, files=files, session_context=session_context, budget=budget, output=output,
-                principal=principal, session_id=session_id, idempotency_key=idempotency_key,
-                mode="plan", planning=True, thinking=thinking, correlation=correlation,
-            )
-            if isinstance(execution, _NativeSessionTurn):
-                if observer is None:
-                    return WaitResult(await execution.wait_final(timeout_seconds=timeout_seconds), None)
-                assert on_event is not None
-                return await execution._wait_observed(
-                    observer, agent_id=self.id, on_event=on_event, timeout_seconds=timeout_seconds,
-                    close_timeout_seconds=close_timeout_seconds, raise_on_stream_error=raise_on_stream_error,
-                )
+        execution = await self.start_plan(
+            user_prompt, files=files, budget=budget, output=output,
+            principal=principal, idempotency_key=idempotency_key, thinking=thinking, correlation=correlation,
+        )
         return await execution.wait(
             timeout_seconds=timeout_seconds, on_event=on_event, include_event_content=include_event_content,
-            close_timeout_seconds=close_timeout_seconds,
-            raise_on_stream_error=raise_on_stream_error,
+            close_timeout_seconds=close_timeout_seconds, raise_on_stream_error=raise_on_stream_error,
         )
 
     def session(

@@ -8,7 +8,6 @@ from contextlib import nullcontext
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability
 from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.core import CommitPolicy, ExecutionStatus
@@ -53,9 +52,7 @@ async def test_turn_owner_survives_handle_return_timeout_and_promotion(tmp_path:
         await finish.wait()
         return ModelResponse(parts=[TextPart("answer")])
 
-    features = RuntimeFeatures("lifecycle-probe")
-    features.capability(ExecutionCapability(retain_history=True,
-        commit=CommitPolicy.sync() if mode in {"sync", "checkpoint"} else CommitPolicy.terminal()), scope="runtime")
+    features = RuntimeFeatures("lifecycle-probe", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.sync() if mode in {"sync", "checkpoint"} else CommitPolicy.terminal())
     if mode == "checkpoint":
         features.capability(native_checkpoint(), scope="runtime")
     features.agent("default", model="default", allow_tools=())
@@ -118,10 +115,9 @@ async def test_parent_and_parallel_children_keep_independent_turn_owners(tmp_pat
         await finish.wait()
         return ModelResponse(parts=[TextPart("child complete")])
 
-    features = RuntimeFeatures("subagent-owner-probe")
+    features = RuntimeFeatures("subagent-owner-probe", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync())
     features.model("parent", _Models(_UsageFunctionModel(parent)))
     features.model("child", _Models(_UsageFunctionModel(child)))
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync()), scope="runtime")
     features.agent("default", model="parent", allow_tools=(), allow_subagents=("child",))
     features.agent("child", model="child", allow_tools=(), allow_subagents=("default",))
     cache = _ObservedCache()
@@ -164,8 +160,7 @@ async def test_turn_owner_outlives_worker_until_owned_work_settles(tmp_path: Pat
         await finish.wait()
         return ModelResponse(parts=[TextPart("answer")])
 
-    features = RuntimeFeatures("owned-work")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("owned-work", defaults={"execution": {"retain_history": True}})
     features.agent("default", model="default", allow_tools=())
     cache = _ObservedCache()
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache, coordination=cache)
@@ -216,8 +211,7 @@ async def test_lease_renewal_failure_stops_worker_and_releases_ownership(tmp_pat
                 return None
             return await super().renew_turn(lease, lease_seconds=lease_seconds)
 
-    features = RuntimeFeatures("lost-owner")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("lost-owner", defaults={"execution": {"retain_history": True}})
     features.agent("default", model="default", allow_tools=())
     cache = LostLeaseCache()
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache, coordination=cache)
@@ -271,10 +265,9 @@ async def test_runtime_handoff_stops_child_wait_without_cancelling_logical_child
         finally:
             stopped.set()
 
-    features = RuntimeFeatures("subagent-handoff")
+    features = RuntimeFeatures("subagent-handoff", defaults={"execution": {"retain_history": True}})
     features.model("parent", _Models(_UsageFunctionModel(parent)))
     features.model("child", _Models(_UsageFunctionModel(child)))
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(native_checkpoint(), scope="runtime")
     features.agent("default", model="parent", allow_tools=(), allow_subagents=("child",))
     features.agent("child", model="child", allow_tools=())
@@ -341,10 +334,9 @@ async def test_parent_lease_loss_stops_only_old_workers_without_logical_child_ca
                 return None
             return await super().renew_turn(lease, lease_seconds=lease_seconds)
 
-    features = RuntimeFeatures("parent-owner-loss")
+    features = RuntimeFeatures("parent-owner-loss", defaults={"execution": {"retain_history": True}})
     features.model("parent", _Models(_UsageFunctionModel(parent)))
     features.model("child", _Models(_UsageFunctionModel(child)))
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     if checkpoint:
         features.capability(native_checkpoint(), scope="runtime")
     features.agent("default", model="parent", allow_tools=(), allow_subagents=("child",))
@@ -397,10 +389,9 @@ async def test_child_owner_loss_does_not_force_cancel_logical_child(tmp_path: Pa
                 return None
             return await super().renew_turn(lease, lease_seconds=lease_seconds)
 
-    features = RuntimeFeatures("child-owner-loss")
+    features = RuntimeFeatures("child-owner-loss", defaults={"execution": {"retain_history": True}})
     features.model("parent", _Models(_UsageFunctionModel(parent)))
     features.model("child", _Models(_UsageFunctionModel(child)))
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(native_checkpoint(), scope="runtime")
     features.agent("default", model="parent", allow_tools=(), allow_subagents=("child",))
     features.agent("child", model="child", allow_tools=())

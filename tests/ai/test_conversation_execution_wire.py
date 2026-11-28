@@ -10,7 +10,6 @@ from dataclasses import replace
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence.codec import (
@@ -32,7 +31,7 @@ async def test_execution_writer_preserves_conversation_and_reader_applies_defaul
     persisted: bool, conversation: bool,
 ) -> None:
     storage = PersistenceStorage.in_memory()
-    features = _features(*(ExecutionCapability(retain_history=True),) if conversation else ())
+    features = _features(retain_history=conversation)
     async with Persistence.open('conversation-wire', storage=storage) as persistence_33, Runtime.open(persistence=persistence_33, features=model_features(_FeatureModels(), features)) as runtime:
         execution = await runtime.agents.get().start("answer")
         await execution.wait(timeout_seconds=5)

@@ -14,7 +14,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolRetu
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 
-from linktools.ai.capability import AgentContext, ExecutionCapability
+from linktools.ai.capability import AgentContext
 from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.core import CommitPolicy, ExecutionStatus
@@ -150,8 +150,7 @@ async def test_two_turn_storage_measurement(
         if calls[question] <= 3:
             return ModelResponse(parts=[ToolCallPart("work", {}, tool_call_id=f"call-{question}-{calls[question]}")])
         return ModelResponse(parts=[TextPart("answer")])
-    features = RuntimeFeatures("turn-io")
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync()), scope="runtime")
+    features = RuntimeFeatures("turn-io", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync())
     if checkpointed:
         features.capability(native_checkpoint(), scope="runtime")
     features.tool(work, effect_policy="replay_safe")

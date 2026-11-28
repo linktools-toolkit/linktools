@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, UserPromptPart
 
-from linktools.ai.capability import AgentContext, ExecutionCapability
+from linktools.ai.capability import AgentContext
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import CommitPolicy, ExecutionStatus, TenantAuthorizationPolicy, canonical_json_bytes
 from linktools.ai.runtime import Runtime
@@ -42,8 +42,7 @@ async def test_promotion_archives_accepted_context(
             assert await runtime._state.execution.executions.get(owner['execution'], tenant_id=owner['tenant']) is None
             return ModelResponse(parts=[ToolCallPart('lookup', {}, tool_call_id='lookup-call')])
         return ModelResponse(parts=[TextPart('answer')])
-    group = RuntimeFeatures('tool-pending')
-    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    group = RuntimeFeatures('tool-pending', defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     group.tool(lookup, effect_policy=effect_policy)
     group.agent('default', model='default', allow_tools=('lookup',))
     async with Persistence.open('pending-tool', storage=state) as persistence_43, Runtime.open(persistence=persistence_43, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
@@ -87,8 +86,7 @@ async def test_native_session_admission_reuses_verified_turn_history(tmp_path: P
         seen.append(visible[-1])
         return ModelResponse(parts=[TextPart("answer")])
 
-    features = RuntimeFeatures("review-context")
-    features.capability(ExecutionCapability(retain_history=True))
+    features = RuntimeFeatures("review-context", defaults={"execution": {"retain_history": True}})
     features.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.from_root(tmp_path / "context")
     async with (
@@ -100,7 +98,7 @@ async def test_native_session_admission_reuses_verified_turn_history(tmp_path: P
         await agent.create_session("session")
         snapshots = {}
         for prompt in prompts:
-            turn = await agent.start(prompt, session_id="session", idempotency_key=prompt)
+            turn = await agent.session("session").start(prompt, idempotency_key=prompt)
             assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
             row = await state.session_turns.get_turn(turn.key)
             snapshots[turn.key] = canonical_json_bytes(dict(row)["result_json"])
@@ -130,9 +128,8 @@ async def test_session_admission_captures_current_rules_without_rewriting_histor
         observed.append(info.instructions or "")
         return ModelResponse(parts=[TextPart("answer")])
 
-    features = RuntimeFeatures("current-instructions")
+    features = RuntimeFeatures("current-instructions", defaults={"execution": {"retain_history": True}})
     features.capability(AssetCapability(assets))
-    features.capability(ExecutionCapability(retain_history=True))
     features.agent("default", model="default", allow_tools=())
     rule = AssetKey("rule", "current.md")
     expected = None
@@ -154,7 +151,7 @@ async def test_session_admission_captures_current_rules_without_rewriting_histor
                     ),))
                 elif index == 2:
                     await assets.delete(rule)
-                turn = await agent.start(f"question {index}", session_id="session",
+                turn = await agent.session("session").start(f"question {index}",
                                          idempotency_key=f"question-{index}")
                 assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
                 row = await persistence.session_turns.get_turn(turn.key)
@@ -217,8 +214,7 @@ async def test_projection_boundary_read_budget(tmp_path: Path, monkeypatch: pyte
     async def model(messages, info):
         count = sum(isinstance(part, ToolReturnPart) for message in messages for part in message.parts)
         return ModelResponse(parts=[ToolCallPart('lookup', {}, tool_call_id=f'call-{count}')]) if count < rounds else ModelResponse(parts=[TextPart('done')])
-    features = RuntimeFeatures('review-boundaries')
-    features.capability(ExecutionCapability(retain_history=True))
+    features = RuntimeFeatures('review-boundaries', defaults={"execution": {"retain_history": True}})
     features.capability(TraceCapability(commit=CommitPolicy.sync()))
     features.capability(native_checkpoint())
     features.tool(lookup, effect_policy='none')
@@ -281,8 +277,7 @@ async def test_native_admission_does_not_stage_a_second_large_history_owner(tmp_
         return ModelResponse(parts=[TextPart(large if calls == 1 else "done")])
 
     namespace = "review-pending-large"
-    features = RuntimeFeatures(namespace)
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()))
+    features = RuntimeFeatures(namespace, defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     storage = PersistenceStorage.sqlite(
         tmp_path / "pending.db", coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024),
@@ -294,13 +289,13 @@ async def test_native_admission_does_not_stage_a_second_large_history_owner(tmp_
     ):
         agent = runtime.agents.get()
         await agent.create_session("session")
-        first = await agent.start("first", session_id="session", idempotency_key="first")
+        first = await agent.session("session").start("first", idempotency_key="first")
         assert (await first.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
         turns = state.session_turns
         first_row = await turns.get_turn(first.key)
         blocked = True
         try:
-            execution = await agent.start("second", session_id="session", idempotency_key="second")
+            execution = await agent.session("session").start("second", idempotency_key="second")
             await asyncio.wait_for(entered.wait(), 5)
             pending = await turns.get_turn(execution.key)
             assert (pending["context_from"], pending["context_through"]) == (1, 1)

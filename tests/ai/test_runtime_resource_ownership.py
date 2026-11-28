@@ -12,13 +12,14 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
-from linktools.ai.capability import AssetCapability, StepPersistenceCapability
+from linktools.ai.capability import AssetCapability
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.storage import StorageOverlay
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import RuntimeUsageModels, model_features
 
 pytestmark = pytest.mark.asyncio
@@ -28,8 +29,8 @@ def _assets(backend: InMemoryAssetBackend | None = None) -> AssetStore:
     return AssetStore(StorageOverlay(InMemoryAssetBackend() if backend is None else backend))
 
 
-def _features(*capabilities: object) -> RuntimeFeatures:
-    features = model_features(RuntimeUsageModels(), RuntimeFeatures())
+def _features(*capabilities: object, checkpoints: bool = False) -> RuntimeFeatures:
+    features = model_features(RuntimeUsageModels(), RuntimeFeatures(defaults={"execution": {"checkpoints": checkpoints}}))
     for capability in capabilities:
         features.capability(capability)
     return features
@@ -167,7 +168,7 @@ async def test_default_step_capability_uses_execution_storage_and_borrows_engine
         await provision_database(engine)
     storage = PersistenceStorage.sql(engine) if sql else PersistenceStorage.from_root(tmp_path)
     try:
-        async with Runtime.open("steps", storage=storage, features=_features(StepPersistenceCapability())) as runtime:
+        async with Runtime.open("steps", storage=storage, features=_features(checkpoints=True)) as runtime:
             assert (await runtime.agents.get().run("question")).result.output == {"text": "done"}
         async with Persistence.open("steps", storage=storage) as persistence:
             steps = await persistence.create_step_store()
@@ -194,7 +195,7 @@ async def test_explicit_step_store_is_borrowed_inside_native_containers() -> Non
             self.closed = True
 
     steps = Store()
-    feature = PrefixTools(CombinedCapability([StepPersistenceCapability(store=steps)]), prefix="test_", id="wrapped-steps")
+    feature = PrefixTools(CombinedCapability([StepPersistence(store=steps, capture_frontier=True)]), prefix="test_", id="wrapped-steps")
     async with Runtime.open("borrowed", storage=PersistenceStorage.in_memory(), features=_features(feature)) as runtime:
         await runtime.agents.get().run("question")
     assert not steps.closed
@@ -205,7 +206,7 @@ async def test_explicit_step_store_is_borrowed_inside_native_containers() -> Non
 async def test_default_step_capability_rejects_memory_instead_of_inventing_durability() -> None:
     with pytest.raises(AIError) as failure:
         async with Runtime.open("memory", storage=PersistenceStorage.in_memory(),
-                                features=_features(StepPersistenceCapability())):
+                                features=_features(checkpoints=True)):
             pytest.fail("missing SQL route was accepted")
     assert failure.value.code is ErrorCode.STORAGE_CAPABILITY_MISSING
 
@@ -213,7 +214,7 @@ async def test_default_step_capability_rejects_memory_instead_of_inventing_durab
 async def test_project_and_native_step_declarations_conflict() -> None:
     with pytest.raises(AIError) as failure:
         async with Runtime.open("duplicate", storage=PersistenceStorage.in_memory(), features=_features(
-            StepPersistenceCapability(store=InMemoryStepStore()), StepPersistence(store=InMemoryStepStore()),
+            StepPersistence(store=InMemoryStepStore()), checkpoints=True,
         )):
             pytest.fail("duplicate persistence was accepted")
     assert failure.value.code is ErrorCode.CAPABILITY_CONFLICT
@@ -241,7 +242,7 @@ async def test_created_step_adapter_closes_after_later_composition_failure(tmp_p
     monkeypatch.setattr(Persistence, "create_agent_run_store", fail)
     async with Persistence.open("partial", storage=PersistenceStorage.from_root(tmp_path)) as persistence:
         with pytest.raises(ValueError, match="run store failed"):
-            async with Runtime.open(persistence=persistence, features=_features(StepPersistenceCapability())):
+            async with Runtime.open(persistence=persistence, features=_features(checkpoints=True)):
                 pytest.fail("failed composition entered")
         assert closed.is_set()
         assert persistence.ready
@@ -283,7 +284,7 @@ async def test_producer_close_failure_keeps_owned_dependencies_until_retry(tmp_p
     monkeypatch.setattr(RuntimeAgentRunStore, "preflight_close", preflight_close)
     async with Persistence.open("close-order", storage=PersistenceStorage.from_root(tmp_path)) as persistence:
         runtime = Runtime.open(persistence=persistence, features=_features(
-            AssetCapability(assets), StepPersistenceCapability(),
+            AssetCapability(assets), checkpoints=True,
         ))
         await runtime.__aenter__()
         await runtime.agents.get().run("question")
@@ -318,16 +319,6 @@ async def test_owned_assets_clean_partial_initialization() -> None:
     await runtime.close()
 
 
-async def test_step_declaration_requires_runtime_binding() -> None:
-    from pydantic_ai import Agent
-    from pydantic_ai.models.test import TestModel
-
-    with pytest.raises(AIError) as failure:
-        agent = Agent(TestModel(), capabilities=[StepPersistenceCapability()])
-        await agent.run("question")
-    assert failure.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-
-
 async def test_default_steps_recover_after_runtime_handoff_and_reopen(tmp_path: Path) -> None:
     from pydantic_ai.models.function import FunctionModel
     from linktools.ai.core import ExecutionStatus
@@ -340,18 +331,16 @@ async def test_default_steps_recover_after_runtime_handoff_and_reopen(tmp_path: 
         await asyncio.Event().wait()
         yield "unreachable"
 
-    declaration = StepPersistenceCapability()
-    features = _features(declaration)
+    features = _features(checkpoints=True)
     features.model("default", _Models(FunctionModel(stream_function=blocked)))
     storage = PersistenceStorage.from_root(tmp_path)
     async with Runtime.open("handoff", storage=storage, features=features) as owner:
         execution = await owner.agents.get().start("question", idempotency_key="input")
         await asyncio.wait_for(entered.wait(), 5)
         await asyncio.wait_for(owner.handoff(), 5)
-    assert declaration.store is None
 
     features.model("default", RuntimeUsageModels())
-    async with Runtime.open("handoff", storage=storage, features=features, auto_recover=False) as successor:
+    async with Runtime.open("handoff", storage=storage, features=features) as successor:
         recovered = await successor.executions.recover(
             execution.execution_id, principal=successor.default_principal, idempotency_key="recover",
         )
@@ -361,7 +350,6 @@ async def test_default_steps_recover_after_runtime_handoff_and_reopen(tmp_path: 
         )
         result = await successor.executions.inspect(execution.execution_id, principal=successor.default_principal)
         assert result.status is ExecutionStatus.SUCCEEDED
-    assert declaration.store is None
 
 
 async def test_late_asset_replacement_does_not_transfer_or_alias_open_store() -> None:
@@ -383,17 +371,17 @@ async def test_late_asset_replacement_does_not_transfer_or_alias_open_store() ->
 
 
 async def test_late_execution_buffer_replacement_is_not_silently_ignored() -> None:
-    from linktools.ai.capability import ExecutionCapability
     from linktools.ai.core import CommitPolicy
     from .test_execution_terminal_payload_runtime import _PayloadBuffer
 
-    features = _features()
+    configuration = CommitPolicy.terminal(buffer=_PayloadBuffer())
+    features = configure_execution(_features(), commit=configuration)
     async with Runtime.open("buffer-owner", storage=PersistenceStorage.in_memory(), features=features) as runtime:
-        features.capability(ExecutionCapability(commit=CommitPolicy.terminal(buffer=_PayloadBuffer())))
+        configure_execution(features, commit=CommitPolicy.terminal(buffer=_PayloadBuffer()))
         with pytest.raises(AIError) as error:
             await runtime.agents.get().start("new buffer")
         assert error.value.safe_details["reason"] == "runtime_resource_replacement"
-        features.capability(ExecutionCapability(commit=CommitPolicy.terminal()))
+        configure_execution(features, commit=configuration)
         assert (await runtime.agents.get().run("same resources")).result.output == {"text": "done"}
 
 

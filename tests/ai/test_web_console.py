@@ -3,6 +3,7 @@
 
 from linktools.ai.persistence import Persistence
 """Public Web transport parity, local trust boundary, and observer lifetime."""
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import model_features
 
 import asyncio
@@ -19,7 +20,7 @@ pytest.importorskip("uvicorn")
 from linktools.ai.errors import ErrorDiagnostics
 from linktools.ai.observe import Metrics
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.capability import ExecutionCapability, StepPersistenceCapability, TraceCapability
+from linktools.ai.capability import SessionCapability, TraceCapability
 from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.history import History
@@ -217,8 +218,7 @@ async def test_two_session_streams_follow_same_turn_and_release(monkeypatch: pyt
         return await original(messages, info)
 
     monkeypatch.setattr(helpers, "_runtime_usage_model", model)
-    features = RuntimeFeatures("web-session-events")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("web-session-events", defaults={"execution": {"retain_history": True}})
     storage = PersistenceStorage.in_memory(coordination=InMemoryCacheBackend(max_bytes=0))
     async with Persistence.open("web-session-events", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=model_features(RuntimeUsageModels(), features),
@@ -275,6 +275,59 @@ async def test_two_session_streams_follow_same_turn_and_release(monkeypatch: pyt
                 finally:
                     release.set()
                     disconnect.set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("code_name", "stage", "reason"), (
+    ("STORAGE_RECOVERY_REQUIRED", "tool_receipts", "pending_tool_receipt_name_mismatch"),
+    ("STORAGE_INTEGRITY_ERROR", "approval", "settled_call_frontier_mismatch"),
+))
+async def test_session_recover_logs_safe_blocking_reason_without_debug(
+    monkeypatch: pytest.MonkeyPatch, code_name: str, stage: str, reason: str,
+) -> None:
+    from types import SimpleNamespace
+
+    from linktools.ai.core import Principal
+    from linktools.ai.errors import AIError, ErrorCode
+    from linktools.ai.web import _app
+
+    logged: list[str] = []
+    monkeypatch.setattr(_app, "environ", SimpleNamespace(debug=False))
+    monkeypatch.setattr(_app._logger, "warning", lambda message, *args: logged.append(message % args))
+    details = {"recovery_stage": stage, "reason": reason}
+
+    async def recover_turn(session_id, turn_id, *, principal, mode, expected_generation):
+        assert (session_id, turn_id) == ("private-session-id", "private-turn-id")
+        raise AIError(
+            ErrorCode[code_name],
+            "private-exception-detail",
+            safe_details=details,
+            diagnostics=ErrorDiagnostics.from_exception(ValueError("private-cause")),
+        )
+
+    runtime = SimpleNamespace(
+        history=None, default_principal=Principal("runtime", "default"),
+        sessions=SimpleNamespace(
+            _uses_turn_sessions=True, cancel_turn=None, recover_turn=recover_turn, turn_attachment_limits=None,
+        ),
+    )
+    async with client(create_app(runtime=runtime)) as http:
+        response = await http.post(
+            "/api/session/recover?session_id=private-session-id",
+            headers=_HEADERS, json={"request_id": "recover-request", "turn_id": "private-turn-id"},
+        )
+
+    assert response.status_code == 503
+    payload = response.json()
+    assert payload["code"] == code_name
+    assert payload["operation_id"] == "recover-request"
+    assert payload["retryable"] is False
+    assert payload["safe_details"] == details
+    assert len(logged) == 1
+    for value in ("recover-request", code_name, *details.values()):
+        assert value in logged[0]
+    assert "private-" not in logged[0]
+    assert "private-" not in response.text
 
 
 @pytest.mark.asyncio
@@ -415,8 +468,7 @@ async def test_session_creation_does_not_require_session_read_authority() -> Non
 @pytest.mark.asyncio
 async def test_session_execution_history_trace_result_and_metrics_use_runtime() -> None:
     metrics = Metrics.in_memory()
-    features = RuntimeFeatures("web-test")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("web-test", defaults={"execution": {"retain_history": True}})
     features.capability(TraceCapability(), scope="runtime")
     async with Persistence.open('web-test', storage=PersistenceStorage.in_memory()) as persistence_104, Runtime.open(persistence=persistence_104, metrics=metrics, features=model_features(RuntimeUsageModels(), features)) as runtime:
         async with client(create_app(runtime=runtime, metrics=metrics)) as http:
@@ -494,8 +546,8 @@ async def test_reopened_console_preserves_history_and_hides_unavailable_resource
 
     def features() -> RuntimeFeatures:
         result = model_features(RuntimeUsageModels(), RuntimeFeatures("web-reopen"))
-        result.capability(ExecutionCapability(retain_history=True), scope="runtime")
-        result.capability(StepPersistenceCapability(), scope="runtime")
+        configure_execution(result, retain_history=True)
+        result.capability(SessionCapability(checkpoints=True), scope="runtime")
         return result
 
     async with Persistence.open("web-reopen", storage=storage) as persistence:
@@ -512,9 +564,9 @@ async def test_reopened_console_preserves_history_and_hides_unavailable_resource
 
             unsubscribe = runtime.sessions.observe_turn_session("visible", observe)
             try:
-                visible_turn = await runtime.sessions.start_turn(
+                visible_turn = (await runtime.sessions.start_turn(
                     "visible", "visible message", agent="default", principal=principal, idempotency_key="visible",
-                )
+                )).key.turn_id
                 await asyncio.wait_for(terminal.wait(), 5)
             finally:
                 unsubscribe()
@@ -569,8 +621,7 @@ async def test_rejected_message_needs_new_identity_after_session_owner_finishes(
         return await original(messages, info)
 
     monkeypatch.setattr(helpers, "_runtime_usage_model", model)
-    features = RuntimeFeatures("web-busy")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("web-busy", defaults={"execution": {"retain_history": True}})
     async with Persistence.open('web-busy', storage=PersistenceStorage.in_memory()) as persistence_190, Runtime.open(persistence=persistence_190, features=model_features(RuntimeUsageModels(), features)) as runtime:
         async with client(create_app(runtime=runtime)) as http:
             created = await http.post("/api/sessions", json={"session_id": "session", "request_id": "create"}, headers=_HEADERS)
@@ -622,8 +673,7 @@ async def test_independent_clients_serialize_session_admission_and_cancel_exact_
         return await original(messages, info)
 
     monkeypatch.setattr(helpers, "_runtime_usage_model", model)
-    features = RuntimeFeatures("web-clients")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("web-clients", defaults={"execution": {"retain_history": True}})
     async with Persistence.open('web-clients', storage=PersistenceStorage.in_memory()) as persistence_243, Runtime.open(persistence=persistence_243, features=model_features(RuntimeUsageModels(), features)) as runtime:
         app = create_app(runtime=runtime)
         async with client(app) as first, client(app) as second:
@@ -707,8 +757,7 @@ async def test_read_only_history_requires_no_model_and_never_opens_runtime(tmp_p
             await super().authorize(principal, action, resource)
 
     storage = PersistenceStorage.from_root(tmp_path)
-    features = RuntimeFeatures("web-history")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("web-history", defaults={"execution": {"retain_history": True}})
     async with (
         Persistence.open("default", storage=storage) as persistence,
         Runtime.open(persistence=persistence, features=model_features(RuntimeUsageModels(), features),
@@ -724,9 +773,9 @@ async def test_read_only_history_requires_no_model_and_never_opens_runtime(tmp_p
 
         unsubscribe = runtime.sessions.observe_turn_session("session", observe)
         try:
-            turn_id = await runtime.sessions.start_turn(
+            turn_id = (await runtime.sessions.start_turn(
                 "session", "saved", agent="default", principal=principal, idempotency_key="send",
-            )
+            )).key.turn_id
             await asyncio.wait_for(terminal.wait(), 5)
         finally:
             unsubscribe()
@@ -1168,8 +1217,7 @@ def test_web_cli_rejects_invalid_input_types(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_opaque_session_ids_round_trip_through_query_identity() -> None:
     identity = "../team/conversation?notes#你好"
-    features = RuntimeFeatures("opaque-web")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures("opaque-web", defaults={"execution": {"retain_history": True}})
     async with Persistence.open('opaque-web', storage=PersistenceStorage.in_memory()) as persistence_641, Runtime.open(persistence=persistence_641, features=model_features(RuntimeUsageModels(), features)) as runtime:
         async with client(create_app(runtime=runtime)) as http:
             created = await http.post("/api/sessions", json={"session_id": identity, "request_id": "create-opaque", "title": "Opaque session"}, headers=_HEADERS)
@@ -1583,8 +1631,8 @@ async def test_chat_tool_positions_match_history_when_parallel_results_finish_ou
         ])
 
     features = _persistence_capabilities()
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    features.capability(StepPersistenceCapability(), scope="runtime")
+    configure_execution(features, retain_history=True)
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
     features.tool(lookup, name="read_file", effect_policy="none")
     features.agent("default", model="default", allow_tools=("read_file",))
     model_features(_Models(_UsageFunctionModel(respond)), features)
@@ -1711,7 +1759,7 @@ async def test_passive_session_tool_notice_requires_event_authorization(allowed:
 async def test_workspace_tool_title_requires_native_registration(tmp_path: Path, native: bool) -> None:
     from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 
-    from linktools.ai.capability import ExecutionCapability, TraceCapability
+    from linktools.ai.capability import TraceCapability
     from linktools.ai.workspace import Workspace
 
     from ._runtime_test_helpers import _Models, _UsageFunctionModel, workspace_features
@@ -1736,7 +1784,7 @@ async def test_workspace_tool_title_requires_native_registration(tmp_path: Path,
             return "custom source"
 
         features.tool(read_file, effect_policy="none")
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     features.capability(TraceCapability(), scope="runtime")
     features.agent("default", allow_tools=("read_file",))
     model_features(_Models(_UsageFunctionModel(respond)), features)
@@ -1806,8 +1854,8 @@ async def test_chat_tool_failure_uses_exact_model_response_without_durable_audit
         return ModelResponse(parts=[ToolCallPart("lookup", args, tool_call_id="failed-lookup")])
 
     features = _persistence_capabilities()
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    features.capability(StepPersistenceCapability(), scope="runtime")
+    configure_execution(features, retain_history=True)
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
     features.tool(lookup, effect_policy="none")
     features.agent("default", allow_tools=("lookup",))
     model_features(_Models(_UsageFunctionModel(respond)), features)
@@ -1823,9 +1871,9 @@ async def test_chat_tool_failure_uses_exact_model_response_without_durable_audit
             "failures", local_frames.append, local_tool_feedback=True,
         )
         with TurnObserver(runtime, "failures", principal, local_workspace=True) as observer:
-            turn_id = await runtime.sessions.start_turn(
+            turn_id = (await runtime.sessions.start_turn(
                 "failures", "lookup", principal=principal, agent="default", idempotency_key="turn",
-            )
+            )).key.turn_id
             try:
                 async with asyncio.timeout(10):
                     async for frame in observer.events(turn_id):

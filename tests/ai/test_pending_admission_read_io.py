@@ -75,19 +75,19 @@ async def test_pending_admission_shares_fresh_identity_and_session_transaction(
                 for index in range(2):
                     request = f"request-{index}"
                     session_reads.clear()
-                    turn = await runtime.sessions.start("session", "question", principal=principal,
+                    turn = await runtime.sessions.start_turn("session", "question", principal=principal,
                                                         agent="default", idempotency_key=request)
                     assert len(session_reads) == 1 and "EXISTS (SELECT" in session_reads[0]
                     assert (await turn.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
-                    replay = await runtime.sessions.start("session", "question", principal=principal,
+                    replay = await runtime.sessions.start_turn("session", "question", principal=principal,
                                                           agent="default", idempotency_key=request)
                     assert replay.key == turn.key
                     with pytest.raises(AIError) as conflict:
-                        await runtime.sessions.start("session", "different", principal=principal,
+                        await runtime.sessions.start_turn("session", "different", principal=principal,
                                                      agent="default", idempotency_key=request)
                     assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
                     with pytest.raises(AIError) as denied:
-                        await runtime.sessions.start("session", "question", agent="default", idempotency_key=request,
+                        await runtime.sessions.start_turn("session", "question", agent="default", idempotency_key=request,
                                                      principal=Principal("foreign", principal.tenant_id))
                     assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
                     assert len(batches) == index + 1
@@ -222,7 +222,7 @@ async def test_closed_native_session_can_replay_exact_receipt_but_cannot_admit(
     features = model_features(_Models(_UsageFunctionModel(model)), features)
 
     async def start(runtime, *, prompt="question", key="request", principal=None):
-        return await runtime.sessions.start(
+        return await runtime.sessions.start_turn(
             "session", prompt, principal=principal or runtime.default_principal,
             agent="default", idempotency_key=key,
         )

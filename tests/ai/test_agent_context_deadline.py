@@ -5,12 +5,12 @@ from linktools.ai.task.engine import TaskEngine
 
 from linktools.ai.persistence import Persistence
 """Public admission deadlines retain their durable scope without hot-path reads."""
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import model_features
 
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
 from pathlib import Path
-from linktools.ai.capability import ExecutionCapability
 from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint
 
@@ -49,7 +49,7 @@ def _group(contexts: list[AgentContext[None]]) -> RuntimeFeatures[None]:
     group: RuntimeFeatures[None] = RuntimeFeatures("deadline")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     group.capability(_Capture(contexts), scope="runtime")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(group, retain_history=True)
     return group
 
 
@@ -152,7 +152,7 @@ async def test_cold_recovery_restores_absolute_deadline_once(tmp_path: Path, mon
         execution_id = run.execution_id
     assert not contexts
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
-    async with Persistence.open('deadline-recovery', storage=storage) as persistence_125, Runtime.open(persistence=persistence_125, features=model_features(RuntimeUsageModels(), features), auto_recover=False) as runtime:
+    async with Persistence.open('deadline-recovery', storage=storage) as persistence_125, Runtime.open(persistence=persistence_125, features=model_features(RuntimeUsageModels(), features)) as runtime:
         reads: list[str] = []
         read = runtime._state.execution.budgets.read
 

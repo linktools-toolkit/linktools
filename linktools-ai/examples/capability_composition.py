@@ -21,7 +21,7 @@ from pydantic_ai_harness.step_persistence import SqliteStepStore, StepPersistenc
 
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import (
-    AgentContext, AssetCapability, ExecutionCapability,
+    AgentContext, AssetCapability,
     FileSystemCapability, MemoryCapability, SessionCapability, ShellCapability, TraceCapability,
 )
 from linktools.ai.core import ExecutionStatus, JsonValue
@@ -159,8 +159,7 @@ async def admitted_memory_after_reopen(root: Path) -> None:
             return ModelResponse(parts=[ToolCallPart("read_memory", {"file": "MEMORY.md"}, tool_call_id="read")])
         return ModelResponse(parts=[TextPart("fresh execution")])
 
-    original = RuntimeFeatures("memory-original")
-    original.capability(ExecutionCapability(retain_history=True))
+    original = RuntimeFeatures("memory-original", defaults={"execution": {"retain_history": True}})
     original.capability(MemoryCapability(scope="example-notes"))
     original.model("offline", OfflineModel("memory", respond))
     original.agent("default", model="offline", allow_tools=("write_memory", "read_memory"),
@@ -171,8 +170,7 @@ async def admitted_memory_after_reopen(root: Path) -> None:
         assert first.result.status is ExecutionStatus.SUCCEEDED
         execution_id = first.result.execution_id
 
-    current = RuntimeFeatures("memory-current")
-    current.capability(ExecutionCapability(retain_history=True))
+    current = RuntimeFeatures("memory-current", defaults={"execution": {"retain_history": True}})
     current.model("offline", OfflineModel("memory", respond))
     current.agent("default", model="offline", allow_tools=(), allow_skills=(), allow_subagents=())
     async with Runtime.open("capability-memory", storage=PersistenceStorage.from_root(root, exclusive_writer=True),
@@ -212,9 +210,8 @@ async def planning_and_sessions(root: Path) -> None:
     # The official database-backed store opens and closes a connection per call.
     # Runtime borrows the store; its lifetime also covers reads after Runtime closes.
     steps = SqliteStepStore(database=root / "steps.db")
-    features = RuntimeFeatures("planning-session")
+    features = RuntimeFeatures("planning-session", defaults={"execution": {"retain_history": True}})
     features.capability(CombinedCapability([
-        ExecutionCapability(retain_history=True),
         StepPersistence(store=steps, capture_frontier=True),
         TraceCapability(), SessionCapability(), ObserveRuns(runs),
     ], id="example.session-policy"))

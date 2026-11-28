@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from linktools.ai.persistence import Persistence
 from linktools.ai.task.engine import TaskEngine
-from ._runtime_test_helpers import model_features
+from ._runtime_test_helpers import configure_execution, model_features
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
@@ -28,7 +28,6 @@ from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.tools import ToolDefinition
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.capability import AgentContext, CapabilityContribution
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.spec import AgentSpec
@@ -40,7 +39,7 @@ from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext
 
-from ._runtime_test_helpers import _Models, _UsageFunctionModel
+from ._runtime_test_helpers import configure_execution, _Models, _UsageFunctionModel
 
 pytestmark = pytest.mark.asyncio
 
@@ -356,7 +355,7 @@ async def test_reopened_session_and_historical_retry_use_current_host_runtime_ca
     models = _Models(_UsageFunctionModel(_immediate))
     principal = Principal("conversation-owner", "default", "service")
     authorization = HostAuthorization()
-    first_features = _policies(_group(), _GlobalPolicy(first_backend), ExecutionCapability(retain_history=True))
+    first_features = _policies(configure_execution(_group(), retain_history=True), _GlobalPolicy(first_backend))
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Persistence.open("runtime_capability-reopen", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=model_features(models, first_features), authorization=authorization,
@@ -365,19 +364,19 @@ async def test_reopened_session_and_historical_retry_use_current_host_runtime_ca
         first = await agent.start("standalone", principal=principal)
         assert (await first.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         await agent.create_session("conversation", principal=principal)
-        session_first = await agent.start("first", session_id="conversation", principal=principal)
+        session_first = await agent.session("conversation").start("first", principal=principal)
         assert (await session_first.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
 
     current = _GlobalPolicy(next_backend)
     current.id = "host.replacement"
-    next_features = _policies(_group(), current, ExecutionCapability(retain_history=True))
+    next_features = _policies(configure_execution(_group(), retain_history=True), current)
     async with Persistence.open("runtime_capability-reopen", storage=storage) as persistence, Runtime.open(
         persistence=persistence, features=model_features(models, next_features), authorization=authorization,
     ) as runtime:
         historical = await runtime.executions.get(first.execution_id, principal=principal)
         retry = await historical.retry("retry")
         assert (await retry.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
-        second = await runtime.agents.get().start("second", session_id="conversation", principal=principal)
+        second = await runtime.agents.get().session("conversation").start("second", principal=principal)
         assert (await second.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
         assert first_backend.entered == [first.execution_id, session_first.key.turn_id]
         assert next_backend.entered == [retry.execution_id, second.key.turn_id]

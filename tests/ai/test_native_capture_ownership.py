@@ -8,7 +8,7 @@ import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 from pydantic_ai.tools import ToolDefinition
 
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
@@ -59,13 +59,12 @@ async def test_reused_conversation_and_checkpoint_declarations_keep_context_per_
 
     store = StagingAgentRunStore()
     await store.initialize()
-    conversation = ExecutionCapability(retain_history=True)
     checkpoint = native_checkpoint()
     for identity in ("first", "second"):
         recorder = AgentRunRecorder(store, execution_id=identity, agent_run_id=identity)
         capture = AgentRunCapture(recorder=recorder, agent_id="agent", agent_run_id=identity)
         agent = Agent(TestModel(custom_output_text="answer " + identity), capabilities=(
-            capture, conversation.bind(ConversationService(capture), retain_history=True), checkpoint,
+            capture, ConversationService(capture), checkpoint,
         ))
         result = await agent.run(identity, run_id=identity, conversation_id=identity)
         saved = await checkpoint.store.latest_snapshot(run_id=identity)

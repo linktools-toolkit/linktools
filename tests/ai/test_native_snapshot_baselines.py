@@ -9,11 +9,11 @@ from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
-from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepPersistence
+from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord
 from sqlalchemy import event, select
 from sqlalchemy.dialects import mysql
 
-from linktools.ai.capability import ExecutionCapability
+from linktools.ai.capability import SessionCapability
 from linktools.ai.core import TenantAuthorizationPolicy
 from linktools.ai.model.messages import encode_model_messages
 from linktools.ai.persistence import NativeCheckpoint, Persistence, PersistenceStorage, SqlStepStore
@@ -22,6 +22,7 @@ from linktools.ai.persistence._step_schema import build_step_sql_metadata
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.steps import native_store_locator
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 from ._sqlite_insert_measurement import bound_insert_rows
 
@@ -87,9 +88,14 @@ async def test_session_new_runs_reuse_history_beyond_cache_and_after_reopen(
     for phase, turns in enumerate((3, 1)):
         async with Persistence.open(namespace, storage=PersistenceStorage.sqlite(path)) as state:
             native = await state.create_step_store(max_cached_messages=0 if prior_source == "cache_disabled" else 2)
+
+            async def open_bounded_steps():
+                return native
+
+            monkeypatch.setattr(state, "create_step_store", open_bounded_steps)
             features = RuntimeFeatures(namespace)
-            features.capability(StepPersistence(store=native, capture_frontier=True), scope="runtime")
-            features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+            features.capability(SessionCapability(checkpoints=True), scope="runtime")
+            configure_execution(features, retain_history=True)
             features.agent("default", model="default", allow_tools=())
             try:
                 async with Runtime.open(persistence=state,
@@ -120,7 +126,7 @@ async def test_session_new_runs_reuse_history_beyond_cache_and_after_reopen(
                         event.listen(native.storage_context.engine.sync_engine, "before_cursor_execute", writes.capture)
                         try:
                             question = f"question-{phase}-{turn}"
-                            turn_handle = await runtime.sessions.start(
+                            turn_handle = await runtime.sessions.start_turn(
                                 session.session_id, question, agent="default", principal=runtime.default_principal,
                                 idempotency_key=question,
                             )

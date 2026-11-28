@@ -7,7 +7,7 @@ at Runtime scope; storage retention alone does not select it. Without this
 capability, the owning Runtime exposes its existing live staging content while
 retained locally. Final results follow execution retention. Session management is supplied by the default `SessionCapability`; retained
 conversation content and model context for subsequent turns require
-`ExecutionCapability(retain_history=True)` and follow conversation retention. An unretained
+`defaults["execution"]["retain_history"] = True` and follow conversation retention. An unretained
 completed turn makes subsequent resume/fork fail with
 `SESSION_HISTORY_UNAVAILABLE`; it cannot be repaired by enabling history retention
 later. See
@@ -374,7 +374,7 @@ form; reconcile by exact logical identity and lifecycle state. A non-null event
 coordinate certifies that event's persistence, not a newer transcript or model
 interaction read boundary. None of these coordinates are interchangeable.
 
-With `ExecutionCapability`, each admitted completed session turn retains its canonical
+Each completed native session turn retains its canonical
 user input and public final output alongside the transcript range. `SessionTurn.output`
 is the committed execution output, including structured JSON or JSON null; it is
 not reconstructed from model text parts. Check `status` to distinguish successful
@@ -387,7 +387,7 @@ in the Conversation object store before publishing the turn. Runtime close and
 session close do not delete durable conversation history; existing offline object
 cleanup uses the retained turn references as roots. Forks retain the selected
 parent turn prefix. Model context compaction does not rewrite the canonical input
-or final output. Without `ExecutionCapability`, standalone execution results
+or final output. Standalone execution results
 retain their existing execution-scoped lifetime.
 
 A same-group terminal commit publishes execution and conversation together. With
@@ -628,7 +628,7 @@ Without a coordinator, source control and conditional writes remain in effect.
 Pending turns can additionally use the coordinator's pending views; see
 [independent commit boundaries](runtime-capabilities.md#independent-commit-boundaries).
 
-With `ExecutionCapability(retain_history=True)` and non-transient conversation storage,
+With `defaults["execution"]["retain_history"] = True` and non-transient conversation storage,
 successful standalone executions retain
 their actual final model context for
 `execution.fork`, including imported history and tool calls and returns, even
@@ -638,7 +638,7 @@ it does not retain the full intermediate trace or enable restart checkpoints.
 An execution without the admitted conversation guarantee cannot gain fork support
 from trace or checkpoint data: fork reports `CAPABILITY_REQUIRED_MISSING`.
 
-With `ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal())`, eligible
+With retained execution history and `execution_commit=CommitPolicy.terminal()`, eligible
 terminal-only source turns retain this context in the existing final
 owner batch in one database write transaction. An explicit terminal payload
 buffer also freezes the retained final context when Trace is absent. Newly
@@ -697,7 +697,7 @@ requires a new graph recovery key.
 
 Startup-wide execution reconciliation is disabled by default. To opt into
 automatically recovering admitted checkpoint-enabled executions on a local
-SQLite source, pass `auto_recover=True` and use
+SQLite source, declare `RuntimeFeatures(..., defaults={"execution": {"auto_recover": True}})` and use
 `PersistenceStorage.from_root(root, exclusive_writer=True)` so the live writer
 lock supplies exclusive ownership. The flag or file path alone does not grant
 restart recovery. With the flag enabled, shared SQL startup can still finish

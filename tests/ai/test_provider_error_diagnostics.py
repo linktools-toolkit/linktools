@@ -11,7 +11,7 @@ from anthropic import APIStatusError as AnthropicStatusError
 from openai import APIStatusError as OpenAIStatusError
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 
-from linktools.ai.capability import AgentContext, ExecutionCapability, ReferencedInputsCapability, TraceCapability
+from linktools.ai.capability import AgentContext, ReferencedInputsCapability, TraceCapability
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.history import History
@@ -180,11 +180,10 @@ async def test_provider_rejection_identifiers_survive_history_reopen(
         return result
 
     monkeypatch.setattr("linktools.ai.model._openai.DefaultAsyncHttpxClient", client)
-    features = RuntimeFeatures("provider-diagnostics")
+    features = RuntimeFeatures("provider-diagnostics", defaults={"execution": {"retain_history": True}})
     features.agent("default", allow_tools=(), allow_skills=(), allow_subagents=())
     features.model("default", create_model_binding(api="openai-responses", model="gpt-4.1", input_types=("document",), api_key="synthetic-secret",
         base_url="https://offline.invalid/v1", max_retries=2, retry_delay=0))
-    features.capability(ExecutionCapability(retain_history=True))
     features.capability(TraceCapability(record_http_bodies=False))
 
     async def load(context: AgentContext[None], content: ReferencedContent) -> bytes:

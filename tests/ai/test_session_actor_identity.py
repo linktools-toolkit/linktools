@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import AuthorizationAction, CommitPolicy, ExecutionStatus, Principal, ResourceKind, ResourceRef, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.history import History
@@ -45,11 +44,11 @@ async def test_shared_session_preserves_actor_in_live_and_portable_history(
         await finish.wait()
         return ModelResponse(parts=[TextPart("answer")])
 
-    features = RuntimeFeatures("shared-session")
+    features = RuntimeFeatures(
+        "shared-session", defaults={"execution": {"retain_history": True}},
+        execution_commit=CommitPolicy.terminal() if terminal_commit else CommitPolicy.sync(),
+    )
     features.agent("default", model="default", allow_tools=())
-    features.capability(ExecutionCapability(
-        retain_history=True, **({"commit": CommitPolicy.terminal()} if terminal_commit else {}),
-    ), scope="runtime")
     cache = InMemoryCacheBackend(max_bytes=2**24)
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache, coordination=cache)
     owner, peer = Principal("owner", "default"), Principal("peer", "default")

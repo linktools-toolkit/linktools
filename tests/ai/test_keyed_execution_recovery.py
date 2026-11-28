@@ -479,7 +479,7 @@ async def test_native_session_stale_recovery_and_close_cannot_displace_current_o
         await runtime.sessions.create_turn_session("session", principal=principal)
 
         async def start(host, key):
-            return await host.sessions.start(
+            return await host.sessions.start_turn(
                 "session", key, principal=principal, agent=host.agents.get(), idempotency_key=key,
             )
 
@@ -495,7 +495,7 @@ async def test_native_session_stale_recovery_and_close_cannot_displace_current_o
                 "session", principal=principal, expected_revision=before["revision"],
             )
             for _ in range(2):
-                assert not await other.sessions.recover_turn("session", original.key.turn_id, principal=principal)
+                assert not await other.sessions.recover_turn("session", original.key.turn_id, mode="resume", principal=principal)
                 with pytest.raises(AIError) as conflict:
                     await start(other, "contender")
                 assert conflict.value.code is ErrorCode.SESSION_BUSY

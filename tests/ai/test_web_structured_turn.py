@@ -95,10 +95,10 @@ async def test_web_structured_turn_replays_the_validated_output_item(tmp_path, c
         )
         assert duplicate.status_code == 202 and duplicate.json() == {"turn_id": turn_id}
         with pytest.raises(AIError) as conflict:
-            await runtime.sessions.start_turn(
+            (await runtime.sessions.start_turn(
                 "session", "count", agent="default", principal=runtime.default_principal,
                 idempotency_key="run", output=DifferentOutput,
-            )
+            )).key.turn_id
         assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
         assert output_requests == [(1, True)]
 
@@ -116,7 +116,6 @@ async def test_web_structured_turn_replays_the_validated_output_item(tmp_path, c
 async def test_native_structured_preview_is_live_selected_and_replaced_on_validation_retry(tmp_path, opted_in):
     from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
-    from linktools.ai.capability import ExecutionCapability
     from linktools.ai.web._app import _native_turn_event_wire
 
     class Policy(TenantAuthorizationPolicy):
@@ -145,8 +144,9 @@ async def test_native_structured_preview_is_live_selected_and_replaced_on_valida
                                     tool_call_id="valid")}
             yield {0: DeltaToolCall(json_args=' answer"}')}
 
-    features = _persistence_capabilities()
-    features.capability(ExecutionCapability(output_preview_field="message" if opted_in else None))
+    from linktools.ai.runtime import RuntimeFeatures
+
+    features = RuntimeFeatures("structured-preview", defaults={"stream": {"output_preview_field": "message"}} if opted_in else None)
     features.agent("default", allow_tools=(), allow_skills=(), allow_subagents=())
     model_features(_Models(FunctionModel(stream_function=respond)), features)
     storage = PersistenceStorage.sqlite(tmp_path / "structured-preview.db")
@@ -157,7 +157,7 @@ async def test_native_structured_preview_is_live_selected_and_replaced_on_valida
         await runtime.sessions.create_turn_session("session", principal=actor)
         frames = []
         with TurnObserver(runtime, "session", actor, local_workspace=False) as observer:
-            turn = await runtime.sessions.start("session", "answer", agent="default", principal=actor,
+            turn = await runtime.sessions.start_turn("session", "answer", agent="default", principal=actor,
                                                 idempotency_key="run", output=Answer)
             try:
                 async with asyncio.timeout(10):

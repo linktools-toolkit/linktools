@@ -12,7 +12,7 @@ from pydantic_ai.messages import ModelMessage
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 from linktools.ai.core import CommitPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -59,15 +59,13 @@ async def test_failed_unsubmitted_turn_preserves_error_and_releases_exact_stagin
             return ModelResponse(parts=[TextPart("unconfirmed failed output")])
         return ModelResponse(parts=[TextPart("independent next output")])
 
-    features = RuntimeFeatures("failed-pending")
-    features.capability(ExecutionCapability(retain_history=True, commit=policy))
+    features = RuntimeFeatures("failed-pending", defaults={"execution": {"retain_history": True}}, execution_commit=policy)
     features.capability(TraceCapability(commit=policy))
     features.agent("default", model="default")
     model_features(_Models(_UsageFunctionModel(model)), features)
 
     async with Persistence.open("failed-pending", storage=storage) as state:
-        async with Runtime.open(persistence=state, features=features, metrics=None,
-                                  auto_recover=False) as runtime:
+        async with Runtime.open(persistence=state, features=features, metrics=None) as runtime:
             backend = runtime._execution_service.runtime_backend()
             cleanup_finished = asyncio.Event()
             original_cleanup = backend._cleanup_failed_pending_turn

@@ -3,6 +3,7 @@
 
 from linktools.ai.persistence import Persistence
 """A terminal standalone run retains exact model context without a durable trace."""
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import model_features
 
 from ._runtime_test_helpers import workspace_features
@@ -18,7 +19,7 @@ from pydantic_ai import capture_run_messages
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 from sqlalchemy import event
 
-from linktools.ai.capability import ExecutionCapability, AgentContext
+from linktools.ai.capability import AgentContext
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
@@ -60,10 +61,9 @@ async def test_standalone_fork_preserves_actual_tools_and_imported_context_after
             ])
         return ModelResponse(parts=[TextPart("answer:" + prompts[-1])])
 
-    group = RuntimeFeatures("standalone-fork")
+    group = RuntimeFeatures("standalone-fork", defaults={"execution": {"retain_history": True}})
     group.tool(lookup, effect_policy="none")
     group.agent("default", model="default", system_prompt="Keep the original system message", allow_tools=("lookup",))
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     imported = ExecutionInputContext.from_messages((
         ModelRequest(parts=[UserPromptPart("imported question")]),
         ModelResponse(parts=[TextPart("imported answer")]),
@@ -115,8 +115,7 @@ async def test_terminal_standalone_tool_context_joins_one_physical_write_transac
         return ModelResponse(parts=[TextPart("answer")])
 
     cache = InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)
-    group = RuntimeFeatures("one-fork-boundary")
-    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    group = RuntimeFeatures("one-fork-boundary", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     group.tool(lookup, effect_policy="none")
     group.agent("default", model="default", allow_tools=("lookup",))
     state = PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache, coordination=cache)
@@ -198,9 +197,8 @@ async def test_reopened_standalone_fork_rejects_mismatched_checkpoint_binding(
         calls.append(deepcopy(messages))
         return ModelResponse(parts=[TextPart("answer")])
 
-    group = RuntimeFeatures("corrupt-fork")
+    group = RuntimeFeatures("corrupt-fork", defaults={"execution": {"retain_history": True}})
     group.agent("default", model="default", allow_tools=())
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     models = _Models(_UsageFunctionModel(model))
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None)
     async with Persistence.open('corrupt-fork', storage=storage) as persistence_194, Runtime.open(persistence=persistence_194, features=model_features(models, group)) as runtime:
@@ -265,7 +263,7 @@ async def test_standalone_fork_keeps_actual_file_result_after_file_changes(tmp_p
     workspace = Workspace.load(tmp_path)
     cache = InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None
     group = workspace_features("file-fork", workspace=workspace)
-    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal() if cached else CommitPolicy.sync()), scope="runtime")
+    configure_execution(group, retain_history=True, commit=CommitPolicy.terminal() if cached else CommitPolicy.sync())
     group.agent("default", model="default", allow_tools=("read_file",))
     async with Persistence.open('file-fork', storage=PersistenceStorage.sqlite(tmp_path / 'state.db', cache=cache, coordination=cache)) as persistence_226, Runtime.open(persistence=persistence_226, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         with capture_run_messages() as messages:
@@ -291,9 +289,8 @@ async def test_unfinished_standalone_run_never_publishes_a_complete_fork_seed(tm
             raise ValueError("provider failed")
         await asyncio.Event().wait()
 
-    group = RuntimeFeatures("incomplete-fork")
+    group = RuntimeFeatures("incomplete-fork", defaults={"execution": {"retain_history": True}})
     group.agent("default", model="default", allow_tools=())
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     storage = PersistenceStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
     source_group = None
     try:
@@ -333,9 +330,8 @@ async def test_unfinished_standalone_run_never_publishes_a_complete_fork_seed(tm
 @pytest.mark.asyncio
 @pytest.mark.parametrize("thinking", (None, False, "max"))
 async def test_standalone_fork_reopens_with_the_same_thinking_policy(tmp_path, thinking) -> None:
-    group = RuntimeFeatures("thinking-fork")
+    group = RuntimeFeatures("thinking-fork", defaults={"execution": {"retain_history": True}})
     group.agent("default", model="default", allow_tools=())
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     model = _UsageFunctionModel(
         lambda messages, info: ModelResponse(parts=[TextPart("done")]),
         profile={"supports_thinking": True},

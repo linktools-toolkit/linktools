@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 
-from linktools.ai.capability import AgentContext, CapabilityContribution, StepPersistenceCapability
+from linktools.ai.capability import AgentContext, CapabilityContribution, SessionCapability
 from linktools.ai.core import ApprovalDecision, ApprovalStatus, ExecutionStatus, Principal, ToolOperationStatus
 from linktools.ai.execution import ApprovalDecisionRequest
 from linktools.ai.persistence import Persistence
@@ -25,7 +25,7 @@ _PRINCIPAL = Principal("reader", "default")
 
 
 async def _send(runtime: Runtime):
-    return await runtime.sessions.start(
+    return await runtime.sessions.start_turn(
         _SESSION, "inspect", agent=runtime.agents.get(), principal=_PRINCIPAL, idempotency_key="original",
     )
 
@@ -48,7 +48,7 @@ def _features(root: Path) -> RuntimeFeatures:
     tool = features.tool(lookup, effect_policy="none")
     tool.requires_approval = True
     features._register(CapabilityContribution.from_opaque("tool", "lookup", tool))
-    features.capability(StepPersistenceCapability())
+    features.capability(SessionCapability(checkpoints=True))
     features.agent("default", model="default", allow_tools=("lookup",))
     return model_features(_Models(_UsageFunctionModel(reply)), features)
 
@@ -113,11 +113,11 @@ async def test_split_session_recovers_its_original_approval_after_process_exit(t
         if phase == "waiting":
             [approval] = await runtime.approvals.list(key, principal=principal)
             assert approval.approval_id == approval_id and approval.status is ApprovalStatus.PENDING
-            assert not await runtime.sessions.recover_turn(_SESSION, turn_id, principal=principal)
+            assert not await runtime.sessions.recover_turn(_SESSION, turn_id, mode="resume", principal=principal)
             await _approve(runtime, key, approval_id)
         assert (await state.session_turns.get_turn(key))["state"] == "ready"
         assert not (tmp_path / "effects.log").exists()
-        assert await runtime.sessions.recover_turn(_SESSION, turn_id, principal=principal)
+        assert await runtime.sessions.recover_turn(_SESSION, turn_id, mode="resume", principal=principal)
         result = await repeated.wait_final(timeout_seconds=15)
         assert result.key == key and result.status is ExecutionStatus.SUCCEEDED
         assert result.view["output"] == {"text": "approved lookup finished"}
@@ -126,7 +126,7 @@ async def test_split_session_recovers_its_original_approval_after_process_exit(t
         [settled] = await state.checkpoint.tools.list_by_execution(turn_id, tenant_id=tenant)
         assert settled.tool_operation_id == original.tool_operation_id
         assert settled.status is ToolOperationStatus.COMPLETED
-        assert not await runtime.sessions.recover_turn(_SESSION, turn_id, principal=principal)
+        assert not await runtime.sessions.recover_turn(_SESSION, turn_id, mode="resume", principal=principal)
 
     assert (tmp_path / "effects.log").read_text().splitlines() == ["fixture"]
     assert (tmp_path / "provider.log").read_text().splitlines() == ["initial", "continuation"]

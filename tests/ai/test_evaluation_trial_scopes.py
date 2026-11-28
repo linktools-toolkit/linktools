@@ -343,7 +343,7 @@ async def test_child_agent_reads_captured_input_with_its_own_model_and_runtime_b
             try:
                 async with (
                     Persistence.open(NAMESPACE, storage=child_storage, tenant_id=PRINCIPAL.tenant_id) as persistence_332,
-                    Runtime.open(persistence=persistence_332, context=CONTEXT, features=model_features(models, group), auto_recover=False) as child,
+                    Runtime.open(persistence=persistence_332, context=CONTEXT, features=model_features(models, group)) as child,
                     AsyncExitStack() as child_stack,
                 ):
                     child_target = Task.from_agent("scopes.agent", child.agents.get())
@@ -442,7 +442,7 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
         try:
             async with (
                 Persistence.open(NAMESPACE, storage=child_storage, tenant_id=PRINCIPAL.tenant_id) as persistence_426,
-                Runtime.open(persistence=persistence_426, context=ExecutionContext(workspace), features=model_features(models, group), auto_recover=False) as child,
+                Runtime.open(persistence=persistence_426, context=ExecutionContext(workspace), features=model_features(models, group)) as child,
                 AsyncExitStack() as child_stack,
             ):
                 target = Task.from_agent("scopes.recovery-agent", child.agents.get())
@@ -494,7 +494,7 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
     try:
         async with (
             Persistence.open(NAMESPACE, storage=storage, tenant_id=PRINCIPAL.tenant_id) as persistence_475,
-            Runtime.open(persistence=persistence_475, context=CONTEXT, features=model_features(planning_models, group), auto_recover=False) as runtime,
+            Runtime.open(persistence=persistence_475, context=CONTEXT, features=model_features(planning_models, group)) as runtime,
             AsyncExitStack() as owner_stack,
         ):
             target = Task.from_agent("scopes.recovery-agent", runtime.agents.get())
@@ -543,7 +543,7 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
         reopened = PersistenceStorage.sqlite(tmp_path / "state.sqlite")
         async with (
             Persistence.open(NAMESPACE, storage=reopened, tenant_id=PRINCIPAL.tenant_id) as persistence_518,
-            Runtime.open(persistence=persistence_518, context=CONTEXT, features=model_features(reopened_models, group), auto_recover=False) as runtime,
+            Runtime.open(persistence=persistence_518, context=CONTEXT, features=model_features(reopened_models, group)) as runtime,
             AsyncExitStack() as owner_stack,
         ):
             target = Task.from_agent("scopes.recovery-agent", runtime.agents.get())
@@ -1045,7 +1045,7 @@ async def test_explicit_live_effects_run_in_each_trial_runtime_environment(
         try:
             async with (
                 Persistence.open(NAMESPACE, storage=child_storage, tenant_id=PRINCIPAL.tenant_id) as persistence_997,
-                Runtime.open(persistence=persistence_997, context=ExecutionContext(tmp_path if child_environment in {'app', 'both'} else None), features=workspace if child_environment in {'workspace', 'both'} else None, auto_recover=False),
+                Runtime.open(persistence=persistence_997, context=ExecutionContext(tmp_path if child_environment in {'app', 'both'} else None), features=workspace if child_environment in {'workspace', 'both'} else None),
                 TaskEngine.open(*tasks, persistence=persistence_997, context=ExecutionContext(tmp_path if child_environment in {'app', 'both'} else None)) as child,
             ):
                 child_stores.append(child.persistence)
@@ -1122,7 +1122,7 @@ async def test_reconcile_preserves_unscoped_live_submission_with_app_and_workspa
     reopened = PersistenceStorage.sqlite(tmp_path / "state.sqlite")
     async with (
         Persistence.open(NAMESPACE, storage=reopened, tenant_id=PRINCIPAL.tenant_id) as persistence_1069,
-        Runtime.open(persistence=persistence_1069, context=ExecutionContext(tmp_path), features=workspace_features('workspace', workspace=Workspace.load(tmp_path)), auto_recover=False),
+        Runtime.open(persistence=persistence_1069, context=ExecutionContext(tmp_path), features=workspace_features('workspace', workspace=Workspace.load(tmp_path))),
         TaskEngine.open(*tasks, persistence=persistence_1069, context=ExecutionContext(tmp_path)) as engine,
         Evaluations.open(engine) as evaluations,
     ):

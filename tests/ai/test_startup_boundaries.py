@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 from linktools.ai.persistence import Persistence
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
-from linktools.ai.capability import ExecutionCapability, SessionCapability
+from linktools.ai.core import CommitPolicy, ExecutionStatus, TenantAuthorizationPolicy
+from linktools.ai.capability import SessionCapability, TraceCapability
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.storage._database import SqlStorageContext
@@ -31,8 +31,13 @@ def _session_features(model, checkpointed: bool) -> RuntimeFeatures:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('checkpointed', (False, True))
-async def test_first_provider_has_durable_prepared_input_and_original_authority(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpointed: bool) -> None:
+@pytest.mark.parametrize(("checkpointed", "trace"), (
+    (False, None), (True, None), (False, CommitPolicy.sync()),
+    (False, CommitPolicy.batch()), (False, CommitPolicy.terminal()),
+))
+async def test_first_provider_has_durable_prepared_input_and_original_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpointed: bool, trace: CommitPolicy | None,
+) -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
     calls = []
@@ -41,8 +46,9 @@ async def test_first_provider_has_durable_prepared_input_and_original_authority(
         entered.set()
         await release.wait()
         return ModelResponse(parts=[TextPart('answer')])
-    group = RuntimeFeatures('startup')
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group = RuntimeFeatures('startup', defaults={"execution": {"retain_history": True}})
+    if trace is not None:
+        group.capability(TraceCapability(commit=trace), scope="runtime")
     checkpoint = native_checkpoint() if checkpointed else None
     if checkpoint is not None:
         group.capability(checkpoint, scope="runtime")
@@ -81,7 +87,10 @@ async def test_first_provider_has_durable_prepared_input_and_original_authority(
                 assert len(calls) == 1
             finally:
                 release.set()
-                await execution.wait()
+                terminal = await execution.wait()
+            assert terminal.result.status is ExecutionStatus.SUCCEEDED
+            if trace is not None:
+                assert (await execution.model_interactions()).items
 
 
 @pytest.mark.asyncio
@@ -103,8 +112,7 @@ async def test_startup_unknown_commit_never_repeats_provider(
     async def model(messages, info):
         calls.append(messages)
         return ModelResponse(parts=[TextPart('answer')])
-    group = RuntimeFeatures('startup-ack')
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group = RuntimeFeatures('startup-ack', defaults={"execution": {"retain_history": True}})
     if checkpointed:
         group.capability(native_checkpoint(), scope="runtime")
     group.agent('default', model='default', allow_tools=())
@@ -181,7 +189,7 @@ async def test_two_runtimes_share_one_first_attempt_after_parallel_preparation(
     ):
         principal = first.default_principal
         await first.sessions.create_turn_session("session", principal=principal)
-        starts = asyncio.gather(*(runtime.sessions.start(
+        starts = asyncio.gather(*(runtime.sessions.start_turn(
             "session", "question", agent="default", principal=principal, idempotency_key="same",
         ) for runtime in (first, second)))
         try:
@@ -224,12 +232,12 @@ async def test_busy_native_session_rejects_without_admitting_another_turn(tmp_pa
     ):
         principal = first.default_principal
         await first.sessions.create_turn_session("session", principal=principal)
-        one = await first.sessions.start("session", "question", agent="default", principal=principal,
+        one = await first.sessions.start_turn("session", "question", agent="default", principal=principal,
                                          idempotency_key="owner")
         try:
             await asyncio.wait_for(entered.wait(), 5)
             with pytest.raises(AIError) as busy:
-                await second.sessions.start("session", "other", agent="default", principal=principal,
+                await second.sessions.start_turn("session", "other", agent="default", principal=principal,
                                             idempotency_key="rejected")
             assert busy.value.code is ErrorCode.SESSION_BUSY
             observed = await second.history.turn_session_state("session", principal=principal)
@@ -237,7 +245,7 @@ async def test_busy_native_session_rejects_without_admitting_another_turn(tmp_pa
         finally:
             release.set()
         assert (await one.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
-        two = await second.sessions.start("session", "other", agent="default", principal=principal,
+        two = await second.sessions.start_turn("session", "other", agent="default", principal=principal,
                                           idempotency_key="rejected")
         assert (await two.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
         page = await second.history.turn_session("session", principal=principal)
@@ -282,7 +290,7 @@ async def test_native_cancel_before_provider_never_dispatches(
     ):
         principal = first.default_principal
         await first.sessions.create_turn_session("session", principal=principal)
-        turn = await first.sessions.start("session", "question", agent="default", principal=principal,
+        turn = await first.sessions.start_turn("session", "question", agent="default", principal=principal,
                                           idempotency_key="same")
         try:
             await asyncio.wait_for(preparing.wait(), 5)
@@ -315,8 +323,7 @@ async def test_preparation_failure_stays_unclaimed_and_can_be_explicitly_cancell
     async def model(messages, info):
         calls.append(messages)
         return ModelResponse(parts=[TextPart('answer')])
-    group = RuntimeFeatures('startup-preparation-failure')
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group = RuntimeFeatures('startup-preparation-failure', defaults={"execution": {"retain_history": True}})
     if checkpointed:
         group.capability(native_checkpoint(), scope="runtime")
     group.agent('default', model='default', allow_tools=())
@@ -450,8 +457,7 @@ async def test_deadline_expires_during_preparation_without_dispatch(
     async def model(messages, info):
         calls.append(messages)
         return ModelResponse(parts=[TextPart('not expected')])
-    group = RuntimeFeatures('startup-budget-review')
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group = RuntimeFeatures('startup-budget-review', defaults={"execution": {"retain_history": True}})
     group.agent('default', model='default', allow_tools=())
     state = PersistenceStorage.sqlite(tmp_path / 'state.db')
     original = ExecutionContextArchive.prepare
@@ -491,8 +497,7 @@ async def test_admission_readback_rejects_real_session_partial(
     async def model(messages, info):
         calls.append(messages)
         return ModelResponse(parts=[TextPart('not expected')])
-    capabilities = RuntimeFeatures('partial-review')
-    capabilities.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    capabilities = RuntimeFeatures('partial-review', defaults={"execution": {"retain_history": True}})
     capabilities.agent('default', model='default', allow_tools=())
     state = PersistenceStorage.in_memory()
     async with Persistence.open('partial-review', storage=state) as persistence_446, Runtime.open(persistence=persistence_446, features=model_features(_Models(_UsageFunctionModel(model)), capabilities)) as runtime:
@@ -541,8 +546,7 @@ async def test_cancelled_admission_commit_never_dispatches_before_resolution(
     async def model(messages, info):
         calls.append(messages)
         return ModelResponse(parts=[TextPart('not expected')])
-    features = RuntimeFeatures('cancelled-admission')
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features = RuntimeFeatures('cancelled-admission', defaults={"execution": {"retain_history": True}})
     features.agent('default', model='default', allow_tools=())
     state = PersistenceStorage.sqlite(tmp_path / 'state.db')
     async with Persistence.open('cancelled-admission', storage=state) as persistence, Runtime.open(
@@ -656,7 +660,7 @@ async def test_native_admission_rollback_does_not_dispatch_or_hold_session(
         with monkeypatch.context() as patch:
             patch.setattr(SqlSessionTurns, "_accept_in_group", rollback_after_write)
             with pytest.raises(AIError) as rejected_start:
-                await runtime.sessions.start(
+                await runtime.sessions.start_turn(
                     "session", "question", agent="default", principal=principal, idempotency_key="same",
                 )
 
@@ -665,7 +669,7 @@ async def test_native_admission_rollback_does_not_dispatch_or_hold_session(
         assert await state.session_turns.get_turn(rejected_key) is None
         assert await runtime.history.turn_session_state("session", principal=principal) == before
         assert calls == []
-        turn = await runtime.sessions.start(
+        turn = await runtime.sessions.start_turn(
             "session", "question", agent="default", principal=principal, idempotency_key="same",
         )
         assert turn.key != rejected_key

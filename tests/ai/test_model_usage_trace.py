@@ -643,11 +643,10 @@ async def test_partial_output_retries_are_checkpointed_before_run_failure(
     persistence = _persistence(store, "partial-run")
     capture = next(item for item in persistence.capabilities if isinstance(item, AgentRunCapture))
     if not trace:
-        from linktools.ai.capability import ExecutionCapability
         from linktools.ai.runtime._conversation_service import ConversationService
         persistence = CombinedCapability([
             *[item for item in persistence.capabilities if not isinstance(item, TraceCapability)],
-            ExecutionCapability().bind(ConversationService(capture), retain_history=True),
+            ConversationService(capture),
         ])
     native = InMemoryStepStore()
     boundary = RuntimeStepStore(native, InMemoryStepStore(),

@@ -46,7 +46,7 @@ async def _hold_turn(root: Path) -> None:
         runtime = local.runtime
         actor = runtime.default_principal
         await runtime.sessions.create(CreateSessionRequest(actor, "session", "create"))
-        turn = await runtime.sessions.start("session", "first", principal=actor, agent="default", idempotency_key="first")
+        turn = await runtime.sessions.start_turn("session", "first", principal=actor, agent="default", idempotency_key="first")
         try:
             await asyncio.wait_for(entered.wait(), 10)
             print("turn-held", flush=True)
@@ -92,7 +92,7 @@ async def test_local_session_rejects_cross_process_busy_and_releases(
             event.listen(Engine, "after_cursor_execute", count_statement)
             try:
                 with pytest.raises(AIError) as caught:
-                    await runtime.sessions.start("session", "other", principal=actor, agent="default", idempotency_key="second")
+                    await runtime.sessions.start_turn("session", "other", principal=actor, agent="default", idempotency_key="second")
             finally:
                 event.remove(Engine, "after_cursor_execute", count_statement)
             record_property("busy_attempt_selects", sum(verb in {"SELECT", "WITH"} for verb in statements))
@@ -100,13 +100,13 @@ async def test_local_session_rejects_cross_process_busy_and_releases(
             assert model_calls == 0
 
             await runtime.sessions.create(CreateSessionRequest(actor, "other-session", "create-other"))
-            independent = await runtime.sessions.start("other-session", "independent", principal=actor, agent="default", idempotency_key="other")
+            independent = await runtime.sessions.start_turn("other-session", "independent", principal=actor, agent="default", idempotency_key="other")
             assert (await independent.wait_final(timeout_seconds=10)).view["output"] == {"text": "complete"}
 
             _, stderr = await asyncio.wait_for(owner.communicate(b"release\n"), 20)
             assert owner.returncode == 0, stderr.decode()
             # A busy request never admitted a turn; the same key can enter now.
-            following = await runtime.sessions.start("session", "other", principal=actor, agent="default", idempotency_key="second")
+            following = await runtime.sessions.start_turn("session", "other", principal=actor, agent="default", idempotency_key="second")
             assert (await following.wait_final(timeout_seconds=10)).view["output"] == {"text": "complete"}
             assert model_calls == 2
     finally:

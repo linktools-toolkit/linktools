@@ -88,7 +88,7 @@ async def test_native_inactivity_observers_do_not_consume_committed_turn(
         agent = owner.agents.get()
         await agent.create_session("session", principal=principal)
         block()
-        turn = await owner.sessions.start(
+        turn = await owner.sessions.start_turn(
             "session", "question", agent=agent, principal=principal, idempotency_key="native-pending",
         )
         await asyncio.wait_for(entered.wait(), 5)

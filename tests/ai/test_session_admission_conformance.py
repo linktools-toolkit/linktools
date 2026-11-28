@@ -155,7 +155,7 @@ async def test_sql_admission_is_atomic_and_token_survives_reopen(tmp_path) -> No
 
             async def start(key):
                 try:
-                    return await runtime.sessions.start(
+                    return await runtime.sessions.start_turn(
                         "session", key, agent="default", principal=principal, idempotency_key=key,
                     )
                 except AIError as error:

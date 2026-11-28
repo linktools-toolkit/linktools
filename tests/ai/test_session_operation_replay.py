@@ -106,7 +106,7 @@ async def test_native_session_replay_obeys_host_session_authority(tmp_path: Path
         outsider = Principal(principal_id="outsider", tenant_id="tenant")
         await runtime.sessions.create_turn_session("session", principal=owner)
         async def start(actor):
-            return await runtime.sessions.start(
+            return await runtime.sessions.start_turn(
                 "session", "question", principal=actor, agent="default", idempotency_key="request",
             )
 

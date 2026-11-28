@@ -15,7 +15,7 @@ from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.asset import AssetKey, AssetVersionRef
-from linktools.ai.capability import AgentContext, ExecutionCapability, ReferencedInputsCapability, TraceCapability
+from linktools.ai.capability import AgentContext, ReferencedInputsCapability, TraceCapability
 from linktools.ai.core import ExecutionStatus, service_principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ReferencedContent
@@ -59,10 +59,9 @@ async def test_wrong_input_bytes_commit_failed_result_and_reopen_without_loading
         def materialize(self) -> FunctionModel:
             return FunctionModel(stream_function=respond)
 
-    features = RuntimeFeatures("reference-failure")
+    features = RuntimeFeatures("reference-failure", defaults={"execution": {"retain_history": True}})
     features.model("default", Binding())
     features.agent("default", allow_tools=(), allow_skills=(), allow_subagents=())
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(TraceCapability(record_http_bodies=True), scope="runtime")
     features.capability(ReferencedInputsCapability(load), id=_SOURCE.id,
                         revision=_SOURCE.revision, scope="agent")

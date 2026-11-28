@@ -6,6 +6,7 @@ import functools
 import inspect
 import re
 from collections.abc import Callable, Mapping, Sequence
+from copy import copy
 from dataclasses import replace, dataclass, field
 from types import MappingProxyType
 from typing import Generic, Literal, TypeVar, get_type_hints
@@ -17,7 +18,7 @@ from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.workspaces import WorkspaceBackend
 
 from ..asset import AssetStoreReader
-from ..core import ImmutableJsonMapping, JsonValue, PromptLimits
+from ..core import CommitPolicy, ImmutableJsonMapping, JsonValue, PromptLimits
 from ..errors import AIError, ErrorCode
 from ..model import ModelBinding
 from ..spec import (
@@ -78,6 +79,7 @@ class RuntimeFeaturesResolution(Generic[AppT]):
     filter: Callable[[AgentSpec, CapabilityContribution[object]], bool] | None = field(
         default=None, repr=False, compare=False,
     )
+    execution_commit: CommitPolicy = field(default_factory=CommitPolicy.sync)
 
     def __post_init__(self) -> None:
         if not isinstance(self.group_id, str) or not self.group_id.strip():
@@ -135,10 +137,14 @@ class RuntimeFeatures(Generic[AppT]):
         workspace_factory: "Callable[..., WorkspaceBackend] | None" = LocalWorkspaceBackend,
         limits: PromptLimits | None = None,
         defaults: Mapping[str, JsonValue] | None = None,
+        execution_commit: CommitPolicy = CommitPolicy.sync(),
         filter: Callable[[AgentSpec, CapabilityContribution[object]], bool] | None = None,
     ) -> None:
         if not isinstance(group_id, str) or not group_id.strip():
             raise ValueError("capability group id must be a non-empty string")
+        if not isinstance(execution_commit, CommitPolicy) or execution_commit.mode not in {"sync", "terminal"}:
+            raise ValueError("Execution requires sync or terminal commit")
+        self._execution_commit = execution_commit
         self._defaults = _freeze_defaults({} if defaults is None else defaults)
         _validate_filter(filter)
         self._limits = PromptLimits() if limits is None else limits
@@ -158,6 +164,14 @@ class RuntimeFeatures(Generic[AppT]):
     def defaults(self) -> Mapping[str, JsonValue]:
         """Return frozen, namespaced settings for declaration-time consumers."""
         return self._defaults
+
+    def with_defaults(self, defaults: Mapping[str, JsonValue]) -> "RuntimeFeatures[AppT]":
+        """Copy the declarations with a new defaults map, borrowing the same resources."""
+        features = copy(self)
+        features._defaults = _freeze_defaults(defaults)
+        features._contributions = list(self._contributions)
+        features._models = dict(self._models)
+        return features
 
     @property
     def filter(self) -> Callable[[AgentSpec, CapabilityContribution[object]], bool] | None:
@@ -349,6 +363,7 @@ class RuntimeFeatures(Generic[AppT]):
             workspace_factory=self._workspace_factory,
             limits=limits,
             defaults=self._defaults,
+            execution_commit=self._execution_commit,
             filter=capability_filter,
         )
         _logger.info(

@@ -3,6 +3,7 @@
 
 from linktools.ai.persistence import Persistence
 """Cross-owner observation and cancellation of coordinated pending turns."""
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import model_features
 import asyncio
 from contextlib import asynccontextmanager
@@ -11,7 +12,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability, SessionCapability
+from linktools.ai.capability import SessionCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
@@ -51,9 +52,9 @@ class _TurnNoticeChannel:
                 asyncio.get_running_loop().call_soon(receive, notice)
 
 
-def _group(terminal: bool = True):
-    group = RuntimeFeatures('shared-pending')
-    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync()), scope='runtime')
+def _group(terminal: bool = True, *, auto_recover: bool = False):
+    group = RuntimeFeatures('shared-pending', defaults={"execution": {"auto_recover": auto_recover}})
+    configure_execution(group, retain_history=True, commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync())
     group.agent('default', model='default', allow_tools=())
     if not terminal:
         # The synchronous canonical writer also exercises durable native Step.
@@ -89,7 +90,7 @@ async def test_shared_pending_duplicate_wait_publishes_one_turn(tmp_path: Path) 
         principal = owner.default_principal
 
         async def start(runtime, prompt="question", key="request"):
-            return await runtime.sessions.start(session.session_id, prompt, agent="default",
+            return await runtime.sessions.start_turn(session.session_id, prompt, agent="default",
                                                 principal=principal, idempotency_key=key)
 
         turn = await start(owner)
@@ -239,8 +240,7 @@ async def test_lost_pending_lease_never_executes_effect(tmp_path: Path) -> None:
         entered.set()
         await finish.wait()
         return ModelResponse(parts=[ToolCallPart('effect', {}, tool_call_id='call')])
-    group = RuntimeFeatures('lost-pending')
-    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
+    group = RuntimeFeatures('lost-pending', defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal())
     group.tool(effect, effect_policy='replay_safe')
     group.agent('default', model='default', allow_tools=('effect',))
     storage = PersistenceStorage.sqlite(tmp_path / 'state.db', cache=cache, coordination=cache)
@@ -385,15 +385,15 @@ async def test_mixed_writers_share_live_session_admission(tmp_path: Path, first_
     ):
         session = await first.agents.get().create_session('session')
         principal = first.default_principal
-        turn = await first.sessions.start(session.session_id, "question", agent="default",
+        turn = await first.sessions.start_turn(session.session_id, "question", agent="default",
                                           principal=principal, idempotency_key="request")
         await asyncio.wait_for(entered.wait(), 5)
         try:
-            duplicate = await second.sessions.start(session.session_id, "question", agent="default",
+            duplicate = await second.sessions.start_turn(session.session_id, "question", agent="default",
                                                     principal=principal, idempotency_key="request")
             assert duplicate.key.turn_id == turn.key.turn_id
             with pytest.raises(AIError) as busy:
-                await second.sessions.start(session.session_id, "another", agent="default",
+                await second.sessions.start_turn(session.session_id, "another", agent="default",
                                             principal=principal, idempotency_key="other")
             assert busy.value.code is ErrorCode.SESSION_BUSY
             assert len(calls) == 1

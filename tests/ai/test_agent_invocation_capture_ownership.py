@@ -5,6 +5,7 @@ from linktools.ai.task import Task
 
 from linktools.ai.persistence import Persistence
 """Invocation capture storage failures preserve the graph's execution ownership."""
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import model_features
 
 import asyncio
@@ -17,7 +18,6 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.core import ExecutionStatus, OperationStatus, ResourceKind, TaskStatus, service_principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.inputs import AgentTaskInput, CaptureInputRequest
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.persistence import PersistenceStorage
@@ -544,7 +544,7 @@ async def test_pending_invocation_capture_preserves_complete_replay_input(
 
     features = _agents()
     if session_id is not None:
-        features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+        configure_execution(features, retain_history=True)
     authorization = HostAuthorization() if session_id is not None else None
     async with (
         Persistence.open("capture-ready", storage=storage) as persistence,
@@ -718,7 +718,7 @@ async def test_agent_task_retry_and_fork_capture_their_independent_input(tmp_pat
     principal = service_principal("default", "owner")
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     features = _agents()
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     async with Persistence.open('capture-lineage', storage=storage) as persistence_531, Runtime.open(persistence=persistence_531, features=model_features(models, features)) as runtime, TaskEngine.open(persistence=persistence_531, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         task = Task.from_agent("capture.agent", runtime.agents.get())
         source = await runtime_engine.with_definitions(task).start(TaskGraph("source", (

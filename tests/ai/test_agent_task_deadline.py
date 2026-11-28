@@ -191,12 +191,12 @@ async def test_agent_node_deadline_uses_tighter_limit_without_replacing_shared_b
 
 
 def _recovery_group(
-    subagent: bool, change: str = "none", *, native_database: Path | None = None,
+    subagent: bool, change: str = "none", *, native_database: Path | None = None, auto_recover: bool = False,
 ) -> RuntimeFeatures:
     async def marker(value: str) -> str:
         return value
 
-    group = RuntimeFeatures("deadline-recovery")
+    group = RuntimeFeatures("deadline-recovery", defaults={"execution": {"auto_recover": auto_recover}})
     group.capability(native_checkpoint(database=native_database), scope="runtime")
     group.tool(marker, effect_policy="non_replay_safe" if change == "tool" else "none")
     group.agent("default", model="default", allow_tools=(), allow_skills=(),
@@ -469,9 +469,9 @@ async def test_agent_recovery_relaunches_with_original_binding(tmp_path: Path, s
             return ModelResponse(parts=[ToolCallPart("delegate_task", {"subagent_id": "child", "task": "work"})])
         return ModelResponse(parts=[TextPart("recovered")])
 
-    group = _recovery_group(subagent)
+    group = _recovery_group(subagent, auto_recover=not subagent)
     storage = PersistenceStorage.sqlite(path) if subagent else PersistenceStorage.from_root(path, exclusive_writer=True)
-    async with Persistence.open('deadline-recovery', storage=storage) as persistence_380, Runtime.open(persistence=persistence_380, features=model_features(_Models(_UsageFunctionModel(model)), group), auto_recover=not subagent) as runtime, TaskEngine.open(persistence=persistence_380) as engine:
+    async with Persistence.open('deadline-recovery', storage=storage) as persistence_380, Runtime.open(persistence=persistence_380, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime, TaskEngine.open(persistence=persistence_380) as engine:
         original_binding = (await runtime._state.execution.executions.get(
             execution_id, tenant_id=runtime.default_principal.tenant_id,
         )).binding

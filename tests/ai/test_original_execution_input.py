@@ -16,7 +16,7 @@ from pydantic_ai.models.function import AgentInfo
 from pydantic_ai.tools import RunContext
 
 from linktools.ai.asset import AssetKey, AssetVersionRef
-from linktools.ai.capability import AgentContext, ExecutionCapability, ReferencedInputsCapability, SessionCapability
+from linktools.ai.capability import AgentContext, ReferencedInputsCapability, SessionCapability
 from linktools.ai.core import ApprovalDecision, ExecutionStatus, Principal, TenantAuthorizationPolicy, ToolOperationStatus
 from linktools.ai.execution import ApprovalDecisionRequest, ExecutionInputContext
 from linktools.ai.inputs import ExecutionContextArchive
@@ -134,16 +134,15 @@ async def test_original_input_reopens_while_session_metadata_remains_live(tmp_pa
         return _BODY
 
     def features() -> RuntimeFeatures:
-        value = RuntimeFeatures("original-input-reopen")
+        value = RuntimeFeatures("original-input-reopen", defaults={"execution": {"retain_history": True}})
         value.tool(inspect_input, effect_policy="replay_safe")
-        value.capability(ExecutionCapability(retain_history=True))
         value.capability(SessionCapability(checkpoints=True))
         value.capability(ReferencedInputsCapability(load), id=_SOURCE.id, revision=1, scope="agent")
         value.agent("default", allow_tools=("inspect_input",), allow_skills=(), allow_subagents=())
         return model_features(_Models(_UsageFunctionModel(model)), value)
 
     async def start(runtime):
-        return await runtime.sessions.start(
+        return await runtime.sessions.start_turn(
             "session", ["original request", _reference()], agent="default", principal=principal,
             idempotency_key="inspect-original",
         )
@@ -151,7 +150,7 @@ async def test_original_input_reopens_while_session_metadata_remains_live(tmp_pa
     storage = (PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
                if backend == "local_sqlite" else PersistenceStorage.sqlite(tmp_path / "state.db"))
     async with Persistence.open("original-input-reopen", storage=storage) as persistence:
-        async with Runtime.open(persistence=persistence, features=features(), auto_recover=False,
+        async with Runtime.open(persistence=persistence, features=features(),
                                 authorization=HostAuthorization()) as runtime:
             await runtime.agents.get().create_session(
                 "session", principal=principal, metadata={"selected": ["original"]},
@@ -165,7 +164,7 @@ async def test_original_input_reopens_while_session_metadata_remains_live(tmp_pa
             await runtime.handoff()
 
     async with Persistence.open("original-input-reopen", storage=storage) as persistence:
-        async with Runtime.open(persistence=persistence, features=features(), auto_recover=False,
+        async with Runtime.open(persistence=persistence, features=features(),
                                 authorization=HostAuthorization()) as runtime:
             session = await runtime.sessions.get("session", principal=principal)
             current = await session.inspect()

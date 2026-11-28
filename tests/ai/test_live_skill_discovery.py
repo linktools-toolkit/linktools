@@ -11,7 +11,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolRetu
 from linktools.ai import Runtime
 from linktools.ai.agent import AgentBindingContract, AgentCatalog, AgentCompiler
 from linktools.ai.asset import AssetKey, AssetStore, DirectoryAssetBackend, InMemoryAssetBackend, PrefixAssetPathAdapter
-from linktools.ai.capability import AssetCapability, AssetSkillSource, CapabilityContribution, ExecutionCapability, StepPersistenceCapability, SkillCapability, SkillDefinition, SkillResource, SkillSourceRef, SkillSourceRegistry
+from linktools.ai.capability import AssetCapability, AssetSkillSource, CapabilityContribution, SessionCapability, SkillCapability, SkillDefinition, SkillResource, SkillSourceRef, SkillSourceRegistry
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -86,7 +86,7 @@ async def test_runtime_discovers_and_reloads_skills_in_one_native_run(tmp_path, 
         filter=lambda agent, item: item.kind != "skill" or item.value.spec.metadata.get("audience") == agent.metadata.get("role"),
     )
     features.capability(AssetCapability(store))
-    features.capability(StepPersistenceCapability())
+    features.capability(SessionCapability(checkpoints=True))
     features.model("default", _Models(_UsageFunctionModel(respond)))
     features.agent("default", allow_tools=(), allow_skills=selectors, metadata={"role": "analyst"})
     async with Persistence.open("live", storage=PersistenceStorage.sqlite(tmp_path / "live.db")) as persistence:
@@ -94,7 +94,7 @@ async def test_runtime_discovers_and_reloads_skills_in_one_native_run(tmp_path, 
             assert runtime.agents.get().derive(model="default").compiled.skill_definitions == ()
             agent = runtime.agents.get()
             await agent.create_session("session")
-            turn = await agent.start("Use the new skill", session_id="session", idempotency_key="input")
+            turn = await agent.session("session").start("Use the new skill", idempotency_key="input")
             result = await turn.wait_final(timeout_seconds=10)
             assert result.status is ExecutionStatus.SUCCEEDED, result
     assert stage == 7
@@ -177,7 +177,7 @@ async def test_next_run_materializes_current_local_skill_resources(tmp_path):
     workspace.mkdir()
     features = workspace_features("current-resources", workspace=Workspace.load(workspace))
     features.capability(AssetCapability(store))
-    features.capability(StepPersistenceCapability())
+    features.capability(SessionCapability(checkpoints=True))
     features.model("default", _Models(_UsageFunctionModel(respond)))
     features.agent("default", allow_tools=(), allow_skills=("guide",))
     async with Persistence.open("current-resources", storage=PersistenceStorage.sqlite(tmp_path / "resources.db")) as persistence:
@@ -186,7 +186,7 @@ async def test_next_run_materializes_current_local_skill_resources(tmp_path):
                 resource.write_text(expected)
                 agent = runtime.agents.get()
                 await agent.create_session(expected)
-                turn = await agent.start("Read the skill", session_id=expected, idempotency_key=expected)
+                turn = await agent.session(expected).start("Read the skill", idempotency_key=expected)
                 result = await turn.wait_final(timeout_seconds=10)
                 assert result.status is ExecutionStatus.SUCCEEDED, result
 
@@ -208,16 +208,15 @@ async def test_recovery_keeps_committed_skill_observation_and_reads_current_with
         )))
         features = RuntimeFeatures(
             "skill-recovery", workspace_factory=None,
-            filter=lambda agent, item: item.kind != "skill" or item.value.spec.metadata.get("audience") == agent.metadata.get("role"),
+            filter=lambda agent, item: item.kind != "skill" or item.value.spec.metadata.get("audience") == agent.metadata.get("role"), defaults={"execution": {"retain_history": True}},
         )
         features.capability(AssetCapability(store))
-        features.capability(ExecutionCapability(retain_history=True))
         checkpoints = native_checkpoint(database=tmp_path / "steps.db")
         features.capability(checkpoints)
         features.model("default", _Models(_UsageFunctionModel(model)))
         features.agent("default", allow_tools=(), allow_skills=("*",), metadata={"role": role})
         async with Persistence.open("skill-recovery", storage=PersistenceStorage.sqlite(tmp_path / "recovery.db")) as persistence:
-            async with Runtime.open(persistence=persistence, features=features, auto_recover=False) as runtime:
+            async with Runtime.open(persistence=persistence, features=features) as runtime:
                 yield runtime, persistence, checkpoints.store
 
     async def interrupted(messages, info):

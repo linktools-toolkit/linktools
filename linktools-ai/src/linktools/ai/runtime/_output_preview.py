@@ -9,7 +9,6 @@ from pydantic_ai.messages import FinalResultEvent, PartDeltaEvent, PartStartEven
 from pydantic_core import from_json
 
 from ..agent import OutputBinding
-from ..capability import ExecutionCapability
 from ..core import JsonValue
 
 
@@ -26,8 +25,7 @@ class OutputPreview:
     text: str = ""
 
     @classmethod
-    def from_binding(cls, binding: OutputBinding, capability: ExecutionCapability) -> "OutputPreview | None":
-        name = capability.output_preview_field
+    def from_binding(cls, binding: OutputBinding, name: str | None) -> "OutputPreview | None":
         if name is None:
             return None
         schema = binding.schema_definition

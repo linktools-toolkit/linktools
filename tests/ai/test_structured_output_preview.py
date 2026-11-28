@@ -9,7 +9,9 @@ from pydantic_ai.messages import FinalResultEvent, PartDeltaEvent, PartStartEven
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
 from linktools.ai.agent import bind_output
-from linktools.ai.capability import ExecutionCapability, CapabilityContribution
+from linktools.ai.agent import AgentCompiler
+from linktools.ai.runtime import RuntimeFeatures
+from linktools.ai.spec import AgentSpec
 from linktools.ai.core import ExecutionDeltaType
 from linktools.ai.execution.events import ExecutionDelta, project_event_payload
 from linktools.ai.runtime._agent_executor import _event_stream_capability
@@ -24,13 +26,13 @@ class Answer(BaseModel):
 
 
 def preview():
-    return OutputPreview.from_binding(bind_output(Answer), ExecutionCapability(output_preview_field="message"))
+    return OutputPreview.from_binding(bind_output(Answer), "message")
 
 
 def test_requires_explicit_field_and_output_tool_identity():
-    assert OutputPreview.from_binding(bind_output(Answer), ExecutionCapability()) is None
-    assert OutputPreview.from_binding(bind_output(Answer), ExecutionCapability(output_preview_field="missing")) is None
-    assert OutputPreview.from_binding(bind_output(), ExecutionCapability(output_preview_field="message")) is None
+    assert OutputPreview.from_binding(bind_output(Answer), None) is None
+    assert OutputPreview.from_binding(bind_output(Answer), "missing") is None
+    assert OutputPreview.from_binding(bind_output(), "message") is None
     current = preview()
     assert current.observe(PartStartEvent(index=0, part=ToolCallPart("business", '{"message":"secret"}', "call"))) is None
     assert current.observe(FinalResultEvent(tool_name=None, tool_call_id=None)) is None
@@ -54,7 +56,7 @@ def test_preview_honors_sdk_cap_and_smaller_schema_limit(maximum, expected):
     class Result(BaseModel):
         message: str = Field(max_length=maximum)
 
-    current = OutputPreview.from_binding(bind_output(Result), ExecutionCapability(output_preview_field="message"))
+    current = OutputPreview.from_binding(bind_output(Result), "message")
     current.observe(PartStartEvent(index=0, part=ToolCallPart("output", {"message": "x" * 500}, "call")))
     assert current.observe(FinalResultEvent(tool_name="output", tool_call_id="call"))[0] == "x" * expected
 
@@ -101,10 +103,19 @@ async def test_real_sdk_output_stream_is_visible_before_completion_and_final_val
     assert all("internal" not in value and "not for preview" not in value for value in values)
 
 
-def test_preview_configuration_is_not_durable_capability_identity():
-    plain = ExecutionCapability()
-    opted = ExecutionCapability(output_preview_field="message")
-    assert CapabilityContribution.from_opaque("capability", plain.id, plain).contract == CapabilityContribution.from_opaque("capability", opted.id, opted).contract
+@pytest.mark.asyncio
+async def test_preview_configuration_does_not_change_durable_agent_binding():
+    from linktools.ai.model import create_model_binding
+
+    bindings = []
+    for defaults in ({}, {"stream": {"output_preview_field": "message"}}):
+        configuration = RuntimeFeatures(defaults=defaults)
+        configuration.model("default", create_model_binding(api="openai", model="test-preview"))
+        resolved = await configuration.resolve()
+        compiler = AgentCompiler(models=resolved.models, candidates=resolved.contributions,
+                                 agents={}, defaults=resolved.defaults)
+        bindings.append(compiler.bind(compiler.compile(AgentSpec("agent"))).binding_contract)
+    assert bindings[0] == bindings[1]
 
 
 def test_parallel_tool_proposal_keeps_preview_until_final_result_changes():
@@ -159,11 +170,10 @@ async def test_runtime_watch_preview_opt_in_does_not_change_other_output(structu
         else:
             yield " world"
 
-    features = RuntimeFeatures("preview-test")
+    features = RuntimeFeatures("preview-test", defaults={"stream": {"output_preview_field": "message"}})
     features.agent("default", model="default", allow_tools=(), **({"output_schema": Answer.model_json_schema()} if structured else {}))
     from linktools.ai.capability import TraceCapability
     features.capability(TraceCapability(), scope="runtime")
-    features.capability(ExecutionCapability(output_preview_field="message"), scope="runtime")
     async with Persistence.open("preview-test", storage=PersistenceStorage.in_memory()) as persistence:
         async with Runtime.open(persistence=persistence, features=model_features(_Models(FunctionModel(stream_function=model)), features)) as runtime:
             execution = await runtime.agents.get().start("answer")

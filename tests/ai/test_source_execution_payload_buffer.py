@@ -8,13 +8,14 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 from linktools.ai.core import CommitPolicy, ExecutionEventType, ExecutionStatus, PersistenceDomain, agent_run_id
 from linktools.ai.persistence import Persistence, PersistenceStorage
 
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.storage import InMemoryCacheBackend, StorageRoute
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 from .test_execution_terminal_payload_runtime import _PayloadBuffer
 from .test_runtime_turn_lifecycle import _ObservedCache
@@ -35,9 +36,7 @@ async def test_source_execution_terminal_uses_buffer(tmp_path: Path, promotion: 
         await release.wait()
         return ModelResponse(parts=[TextPart(answer)])
 
-    features = RuntimeFeatures("source-payload-buffer")
-    features.capability(ExecutionCapability(retain_history=promotion,
-        commit=CommitPolicy.terminal(buffer=buffer)), scope="runtime")
+    features = RuntimeFeatures("source-payload-buffer", defaults={"execution": {"retain_history": promotion}}, execution_commit=CommitPolicy.terminal(buffer=buffer))
     features.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.sqlite(tmp_path / "state.db",
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
@@ -96,9 +95,7 @@ async def test_source_execution_known_rejection_settles_failed_without_rejected_
         calls += 1
         return ModelResponse(parts=[TextPart("must not publish rejected success")])
 
-    features = RuntimeFeatures("source-payload-rejection")
-    features.capability(ExecutionCapability(retain_history=split,
-        commit=CommitPolicy.terminal(buffer=buffer)), scope="runtime")
+    features = RuntimeFeatures("source-payload-rejection", defaults={"execution": {"retain_history": split}}, execution_commit=CommitPolicy.terminal(buffer=buffer))
     features.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.sqlite(tmp_path / "state.db")
     if split:
@@ -145,9 +142,7 @@ async def test_agent_task_child_source_result_handoff_uses_buffer(tmp_path: Path
         await release.wait()
         return ModelResponse(parts=[TextPart("task result")])
 
-    features = RuntimeFeatures("source-task-buffer")
-    features.capability(ExecutionCapability(retain_history=True,
-        commit=CommitPolicy.terminal(buffer=buffer)), scope="runtime")
+    features = RuntimeFeatures("source-task-buffer", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal(buffer=buffer))
     features.agent("default", model="default", allow_tools=())
     async with Persistence.open("source-task-buffer",
         storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as persistence:
@@ -204,9 +199,7 @@ async def test_source_control_outcome_survives_its_own_terminal_rejection(tmp_pa
             raise ValueError("provider failed")
         raise asyncio.CancelledError
 
-    features = RuntimeFeatures("source-control-rejection")
-    features.capability(ExecutionCapability(retain_history=False,
-        commit=CommitPolicy.terminal(buffer=buffer)), scope="runtime")
+    features = RuntimeFeatures("source-control-rejection", execution_commit=CommitPolicy.terminal(buffer=buffer))
     features.agent("default", model="default", allow_tools=())
     async with Persistence.open("source-control-rejection",
         storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as persistence:
@@ -242,9 +235,7 @@ async def test_source_terminal_confirmation_and_remote_cancel_preserve_buffer_tr
         calls += 1
         return ModelResponse(parts=[TextPart(answer)])
 
-    features = RuntimeFeatures("source-terminal-race")
-    features.capability(ExecutionCapability(retain_history=False,
-        commit=CommitPolicy.terminal(buffer=buffer)), scope="runtime")
+    features = RuntimeFeatures("source-terminal-race", execution_commit=CommitPolicy.terminal(buffer=buffer))
     features.agent("default", model="default", allow_tools=())
     async with Persistence.open("source-terminal-race",
         storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as persistence:
@@ -319,9 +310,7 @@ async def test_pending_candidate_stops_for_cancel_during_context_prepare(
         calls += 1
         return ModelResponse(parts=[TextPart("candidate")])
 
-    features = RuntimeFeatures("promotion-cancel-buffer")
-    features.capability(ExecutionCapability(retain_history=True,
-        commit=CommitPolicy.terminal(buffer=buffer)), scope="runtime")
+    features = RuntimeFeatures("promotion-cancel-buffer", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal(buffer=buffer))
     if trace:
         features.capability(TraceCapability(commit=CommitPolicy.terminal(
             buffer=TraceBuffer(max_bytes=16 * 1024 * 1024))), scope="runtime")
@@ -432,9 +421,7 @@ async def test_execution_buffer_does_not_recapture_rejected_trace_checkpoint(tmp
         return ModelResponse(parts=[TextPart("rejected trace response")])
 
     buffer = _PayloadBuffer()
-    features = RuntimeFeatures("source-trace-rejection")
-    features.capability(ExecutionCapability(retain_history=False,
-        commit=CommitPolicy.terminal(buffer=buffer)), scope="runtime")
+    features = RuntimeFeatures("source-trace-rejection", execution_commit=CommitPolicy.terminal(buffer=buffer))
     features.capability(TraceCapability(commit=CommitPolicy.batch(
         buffer=TraceBuffer(max_bytes=4 * 1024 * 1024), batch_size=128, flush_interval=60)), scope="runtime")
     features.capability(native_checkpoint(), scope="runtime")
@@ -521,8 +508,7 @@ async def test_deferred_source_boundary_releases_buffer_and_resumes_new_producer
 
     workspace = Workspace.load(tmp_path, policy=WorkspacePolicy(tool_permissions=ToolPermissionPolicy(default="ask")))
     features = workspace_features("source-deferred-buffer", workspace=workspace)
-    features.capability(ExecutionCapability(retain_history=True,
-        commit=CommitPolicy.terminal(buffer=buffer)), scope="runtime")
+    configure_execution(features, retain_history=True, commit=CommitPolicy.terminal(buffer=buffer))
     features.agent("reader", model="default", allow_tools=("read_file",), tool_retries=0, output_retries=0)
     features = model_features(_Models(_UsageFunctionModel(model)), features)
     async with Persistence.open("source-deferred-buffer",
@@ -633,9 +619,7 @@ async def test_zero_prefix_source_failure_retains_control_until_same_execution_c
         calls += 1
         return ModelResponse(parts=[TextPart("not called")])
 
-    features = RuntimeFeatures("zero-prefix-source-failure")
-    features.capability(ExecutionCapability(retain_history=False,
-        commit=CommitPolicy.terminal(buffer=InMemoryCacheBackend(max_bytes=0))), scope="runtime")
+    features = RuntimeFeatures("zero-prefix-source-failure", execution_commit=CommitPolicy.terminal(buffer=InMemoryCacheBackend(max_bytes=0)))
     features.agent("default", model="default", allow_tools=())
     async with Persistence.open("zero-prefix-source-failure",
         storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as persistence:
@@ -685,9 +669,7 @@ async def test_unknown_tool_effect_retires_only_source_confirmed_execution_audit
         effects.append("applied")
         raise RuntimeError("provider outcome unknown")
 
-    features = RuntimeFeatures("source-effect-unknown")
-    features.capability(ExecutionCapability(retain_history=True,
-        commit=CommitPolicy.terminal(buffer=buffer)), scope="runtime")
+    features = RuntimeFeatures("source-effect-unknown", defaults={"execution": {"retain_history": True}}, execution_commit=CommitPolicy.terminal(buffer=buffer))
     features.capability(native_checkpoint(), scope="runtime")
     features.tool(write, effect_policy="non_replay_safe")
     features.agent("default", allow_tools=("write",))

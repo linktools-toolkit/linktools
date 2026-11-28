@@ -39,10 +39,10 @@ That port preserves the Agent producer's execution authority.
 ## Important signatures and semantics
 
 - `Runtime.open(namespace, *, storage, tenant_id="default", context=None,
-  features=None, metrics=None, authorization=None, auto_recover=False)` returns
+  features=None, metrics=None, authorization=None)` returns
   the context-managed Runtime. Omitting features does not start an Agent
-  producer. Pass `auto_recover=True` to opt into startup-wide execution
-  reconciliation. `Runtime.open(persistence=..., ...)` borrows an already-open,
+  producer. Declare `RuntimeFeatures(..., defaults={"execution": {"auto_recover": True}})` to opt into startup-wide
+  Execution reconciliation. This does not control explicit Session or Task Graph recovery. `Runtime.open(persistence=..., ...)` borrows an already-open,
   writable Persistence and inherits its namespace and tenant. Do not pass a
   namespace, tenant, or storage configuration in borrowing mode. Retain the returned Runtime when retrying
   cleanup after partial initialization failure.
@@ -125,8 +125,8 @@ declarations still determine who initializes and closes each dependency:
 | Persistence supplied to `Runtime.open` | Host; it must already be open and writable | Outer Persistence context, inner Runtime context |
 | `AssetCapability(store)` in `RuntimeFeatures` | Runtime, even when borrowing Persistence or using an already initialized store | Pass the declaration directly for ownership transfer |
 | Asset source in `features.borrow()` | Host; initialize before borrowers and close after all borrowers finish | Pass the live borrowed source, not an inspection resolution |
-| Default `StepPersistenceCapability()` adapter | Runtime creates/closes the adapter over Execution storage; its external SQL engine remains host-owned | No extra store context; requires an Execution SQL route |
-| Explicit StepStore in `StepPersistenceCapability(store=...)` or native `StepPersistence(store=...)` | Caller; Runtime does not close it | Keep the store usable through producer cleanup |
+| Runtime-owned Execution checkpoint adapter | Runtime creates/closes the adapter over Execution storage; its external SQL engine remains host-owned | No extra store context; requires an Execution SQL route |
+| Explicit StepStore in native `StepPersistence(store=...)` | Caller; Runtime does not close it | Keep the store usable through producer cleanup |
 
 Runtime releases owned dependencies only after producer cleanup succeeds. A
 producer close failure leaves those dependencies available for retrying

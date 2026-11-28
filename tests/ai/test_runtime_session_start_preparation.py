@@ -10,7 +10,6 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 from sqlalchemy import event
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import AuthorizationAction, CommitPolicy, HmacCursorSigner, Principal, SessionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -19,6 +18,7 @@ from linktools.ai.runtime._session import RuntimeSessionService
 from linktools.ai.session import ResumeSessionRequest, SessionManager
 from linktools.ai.storage import InMemoryCacheBackend
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 
 pytestmark = pytest.mark.asyncio
@@ -73,7 +73,7 @@ async def test_sql_session_start_reads_one_authorized_session_row(tmp_path, entr
                     turn = await agent.session("session").start("question", idempotency_key="request")
                     assert len(selects) == 1
                 else:
-                    turn = await agent.start("question", session_id="session", idempotency_key="request")
+                    turn = await agent.session("session").start("question", idempotency_key="request")
                     assert len(selects) == 1
             finally:
                 event.remove(engine.sync_engine, "before_cursor_execute", capture)
@@ -115,10 +115,10 @@ async def test_canonical_sql_planning_reads_one_authorized_snapshot(tmp_path, bo
                 with TurnObserver(runtime, "session", principal, local_workspace=True) as observer:
                     token = active.set(True)
                     try:
-                        turn_id = await runtime.sessions.start_turn(
+                        turn_id = (await runtime.sessions.start_turn(
                             "session", "question", agent=agent, principal=principal,
                             idempotency_key="request", planning=True,
-                        )
+                        )).key.turn_id
                     finally:
                         active.reset(token)
                     async with asyncio.timeout(5):
@@ -207,8 +207,7 @@ async def test_session_start_rechecks_live_authority_status_and_binding(change, 
 
     features = _features(model)
     if terminal:
-        features.capability(ExecutionCapability(retain_history=True,
-            commit=CommitPolicy.terminal(buffer=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))), scope="runtime")
+        configure_execution(features, retain_history=True, commit=CommitPolicy.terminal(buffer=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)))
     storage = PersistenceStorage.in_memory()
     async with Persistence.open("session-start-preparation", storage=storage) as state:
         async with Runtime.open(persistence=state, features=features, metrics=None, authorization=Policy()) as runtime:
@@ -531,7 +530,7 @@ async def test_session_start_identity_capture_is_call_local_and_invalidated_by_s
     monkeypatch.setattr(DefaultExecutionService, "_load_session", read_fresh_session)
     monkeypatch.setattr(_PendingExecutionTurns, "settle_session", settle)
     features = _features(_answer)
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()), scope="runtime")
+    configure_execution(features, retain_history=True)
     async with Persistence.open("session-start-preparation", storage=PersistenceStorage.in_memory()) as state:
         async with Runtime.open(persistence=state, features=features, metrics=None) as runtime:
             target = await runtime.agents.get().create_session("session")

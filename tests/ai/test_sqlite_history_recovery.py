@@ -11,7 +11,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, UserPromptPart
 from pydantic_ai.models.function import AgentInfo
 
 from linktools.ai.core import CommitPolicy, ExecutionStatus, Principal, TenantAuthorizationPolicy
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 from linktools.ai.history import History
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -24,8 +24,7 @@ class _HostAuthorization(TenantAuthorizationPolicy):
 
 
 def _features(*, trace: bool = False) -> RuntimeFeatures:
-    application = RuntimeFeatures("application")
-    application.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    application = RuntimeFeatures("application", defaults={"execution": {"retain_history": True}})
     if trace:
         application.capability(TraceCapability(commit=CommitPolicy.sync()), scope="runtime")
     application.agent("default", model="default", allow_tools=())
@@ -48,7 +47,7 @@ async def _seed_current_history(path: Path) -> tuple[Principal, str]:
 
 
 async def _run(runtime: Runtime, prompt: str, request_key: str):
-    turn = await runtime.sessions.start(
+    turn = await runtime.sessions.start_turn(
         "session", prompt, agent="default", principal=runtime.default_principal, idempotency_key=request_key,
     )
     result = await turn.wait_final(timeout_seconds=10)

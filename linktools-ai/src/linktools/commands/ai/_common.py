@@ -257,8 +257,8 @@ async def _open_local_runtime(
     status: "Mapping[str, object] | None" = None,
 ) -> "AsyncIterator[LocalRuntime]":
     from linktools.ai.capability import (
-        AssetCapability, ExecutionCapability, FileSystemCapability, MemoryCapability,
-        ShellCapability, StepPersistenceCapability, TraceCapability,
+        AssetCapability, FileSystemCapability, MemoryCapability,
+        SessionCapability, ShellCapability, TraceCapability,
     )
     from linktools.ai.core import PrincipalKind, ResourceKind, TenantAuthorizationPolicy
     from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -273,14 +273,13 @@ async def _open_local_runtime(
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
             await super().authorize(principal, action, resource)
 
-    features = RuntimeFeatures("workspace")
+    features = RuntimeFeatures("workspace", defaults={"execution": {"retain_history": True, "checkpoints": True}})
     features.model("default", model)
     features.capability(AssetCapability(_local_runtime_assets(workspace)))
     features.capability(FileSystemCapability(workspace))
     features.capability(ShellCapability())
     features.capability(MemoryCapability())
-    features.capability(ExecutionCapability(retain_history=True))
-    features.capability(StepPersistenceCapability())
+    features.capability(SessionCapability(checkpoints=True))
     features.capability(TraceCapability())
     metrics = await _local_metrics(workspace)
     async with Runtime.open(

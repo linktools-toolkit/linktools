@@ -3,6 +3,7 @@
 
 from linktools.ai.persistence import Persistence
 """Focused regression coverage for reliable mixed TaskGraph nodes."""
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import model_features
 from linktools.ai.model import create_model_binding
 
@@ -39,7 +40,7 @@ from ._task_test_helpers import (
     task_result,
 )
 from linktools.ai.agent import restore_output
-from linktools.ai.capability import ExecutionCapability, MemoryCapability
+from linktools.ai.capability import MemoryCapability
 from linktools.ai.core import (
     JsonValue,
     OperationKind,
@@ -3876,7 +3877,7 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
     (workspace_root / "context.txt").write_text("context", encoding="utf-8")
     workspace = Workspace.load(workspace_root)
     application = workspace_features("application", workspace=workspace, features_type=RuntimeFeatures)
-    application.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(application, retain_history=True)
     handler = TaskFunction[None]("example.echo", 1, _echo_task)
     application.task(handler, effect_policy="none")
     application.task_expander(_ApplicationGraphExpander(handler))
@@ -4021,7 +4022,7 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
 async def test_task_input_extensions_do_not_override_runtime_memory() -> None:
     features = model_features(_TaskTestModels())
     features.capability(MemoryCapability(scope="host-memory"))
-    features.capability(ExecutionCapability(retain_history=True))
+    configure_execution(features, retain_history=True)
     features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     async with Persistence.open("task-memory-owner", storage=PersistenceStorage.in_memory()) as persistence:
         async with Runtime.open(persistence=persistence, features=features) as runtime, task_engine_scope(runtime, persistence) as runtime_engine:
@@ -4043,7 +4044,7 @@ async def test_task_input_extensions_do_not_override_runtime_memory() -> None:
 async def test_task_execution_port_replay_rejects_changed_runtime_memory_scope() -> None:
     features = model_features(_TaskTestModels())
     features.capability(MemoryCapability(scope="task-memory"))
-    features.capability(ExecutionCapability(retain_history=True))
+    configure_execution(features, retain_history=True)
     features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     async with Persistence.open("task-memory-replay", storage=PersistenceStorage.in_memory()) as persistence:
         async with Runtime.open(persistence=persistence, features=features) as runtime:
@@ -4100,7 +4101,7 @@ async def test_task_execution_scope_survives_unknown_and_bound_recovery(
     def features(scope: str | None) -> RuntimeFeatures:
         result = model_features(_TaskTestModels())
         result.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-        result.capability(ExecutionCapability(retain_history=True))
+        configure_execution(result, retain_history=True)
         if scope is not None:
             result.capability(MemoryCapability(scope=scope))
         return result

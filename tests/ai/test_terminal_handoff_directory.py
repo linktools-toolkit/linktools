@@ -12,7 +12,7 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 from sqlalchemy import select
 
-from linktools.ai.capability import StepPersistenceCapability
+from linktools.ai.capability import SessionCapability
 from linktools.ai.core import Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistencePlan, PersistenceStorage
@@ -43,7 +43,7 @@ def _storage(root: Path) -> PersistenceStorage:
 
 def _features(model=None) -> RuntimeFeatures:
     features = RuntimeFeatures(_NAMESPACE)
-    features.capability(StepPersistenceCapability(), scope="runtime")
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
     if model is None:
         return features
     features.agent("default", model="default", allow_tools=(), allow_subagents=())
@@ -72,7 +72,7 @@ def _crash_sealed_owner(root_dir: str) -> None:
             _NAMESPACE, storage=_storage(root), features=_features(model), authorization=_HostAuthorization(),
         ) as runtime:
             await runtime.sessions.create_turn_session(_SESSION, principal=_OWNER)
-            turn = await runtime.sessions.start(
+            turn = await runtime.sessions.start_turn(
                 _SESSION, "question", agent="default", principal=_OWNER, idempotency_key="original",
             )
             await turn.wait_final(timeout_seconds=12)
@@ -98,7 +98,7 @@ def _crash_active_owner(root_dir: str) -> None:
     async def run() -> None:
         async with runtime:
             await runtime.sessions.create_turn_session(_SESSION, principal=_OWNER)
-            turn = await runtime.sessions.start(
+            turn = await runtime.sessions.start_turn(
                 _SESSION, "question", agent="default", principal=_OWNER, idempotency_key="original",
             )
             await turn.wait_final(timeout_seconds=12)
@@ -146,15 +146,15 @@ async def test_terminal_handoff_survives_removed_model_route(tmp_path, terminal_
     ):
         before = await _expire_and_check_target(state, key)
         with pytest.raises(AIError) as denied:
-            await runtime.sessions.recover_turn(key.session_id, key.turn_id, principal=_OTHER)
+            await runtime.sessions.recover_turn(key.session_id, key.turn_id, mode="resume", principal=_OTHER)
         assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
         assert await state.session_turns.get_turn(key) == before
-        assert await runtime.sessions.recover_turn(key.session_id, key.turn_id, principal=_OWNER)
+        assert await runtime.sessions.recover_turn(key.session_id, key.turn_id, mode="resume", principal=_OWNER)
         row = await state.session_turns.get_turn(key)
         assert row["state"] == "succeeded" and row["generation"] == 1
         assert row["split_source_receipt"] == receipt_id.encode()
         assert row["result_json"]["transcript"] == json.loads((copied / "body-root.json").read_text())
-        assert not await runtime.sessions.recover_turn(key.session_id, key.turn_id, principal=_OWNER)
+        assert not await runtime.sessions.recover_turn(key.session_id, key.turn_id, mode="resume", principal=_OWNER)
         history = await runtime.history.turn_session(key.session_id, principal=_OWNER)
         assert history["session"]["active_turn_id"] is None
         [item] = history["timeline"]["items"]
@@ -199,7 +199,7 @@ async def test_terminal_handoff_rejects_corruption_without_model_route(tmp_path,
                 assert changed.rowcount == 1
         before = await turns.get_turn(key)
         with pytest.raises(AIError) as corrupt:
-            await runtime.sessions.recover_turn(key.session_id, key.turn_id, principal=_OWNER)
+            await runtime.sessions.recover_turn(key.session_id, key.turn_id, mode="resume", principal=_OWNER)
         assert corrupt.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         assert await turns.get_turn(key) == before
         assert (await turns.get_session(key.session_id))["active_turn_id"] == key.turn_id.encode()
@@ -217,7 +217,7 @@ async def test_active_recovery_still_requires_model_route(tmp_path):
     ):
         before = await _expire_and_check_target(state, key)
         with pytest.raises(AIError) as unavailable:
-            await runtime.sessions.recover_turn(key.session_id, key.turn_id, principal=_OWNER)
+            await runtime.sessions.recover_turn(key.session_id, key.turn_id, mode="resume", principal=_OWNER)
         assert unavailable.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
         assert await state.session_turns.get_turn(key) == before
     assert (tmp_path / "model.log").read_text().splitlines() == ["called"]

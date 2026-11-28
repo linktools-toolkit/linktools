@@ -7,7 +7,7 @@ import json
 import pytest
 from pydantic_ai.messages import BinaryContent, ModelResponse, TextPart, UserPromptPart
 
-from linktools.ai.capability import ExecutionCapability, StepPersistenceCapability
+from linktools.ai.capability import SessionCapability
 from linktools.ai.core import TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import StoredUserInput
@@ -56,10 +56,9 @@ async def test_canonical_multipart_prompt_preserves_input_without_exposing_body(
         return ModelResponse(parts=[TextPart("Ready.")])
 
     def features():
-        value = RuntimeFeatures(namespace)
-        value.capability(ExecutionCapability(retain_history=True))
+        value = RuntimeFeatures(namespace, defaults={"execution": {"retain_history": True}})
         if step_enabled:
-            value.capability(StepPersistenceCapability())
+            value.capability(SessionCapability(checkpoints=True))
         value.agent("default", model="default", allow_tools=())
         return model_features(_Models(_UsageFunctionModel(respond)), value)
 
@@ -67,9 +66,9 @@ async def test_canonical_multipart_prompt_preserves_input_without_exposing_body(
         return ("Before attachment", BinaryContent(data, media_type="text/plain"), "After attachment")
 
     async def send(runtime, prompt, key):
-        return await runtime.sessions.start_turn(
+        return (await runtime.sessions.start_turn(
             "chat", prompt, agent="default", principal=runtime.default_principal, idempotency_key=key,
-        )
+        )).key.turn_id
 
     async def send_and_commit(runtime, prompt, key):
         frames = asyncio.Queue()

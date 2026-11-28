@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import ExecutionCapability, StepPersistenceCapability
 from linktools.ai.core import (
     AuthorizationAction, ExecutionStatus, Principal, ResourceKind, ResourceRef,
     TaskStatus, TenantAuthorizationPolicy,
@@ -26,6 +25,7 @@ from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeExecutions, RuntimeSessions, Session
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import RuntimeUsageModels, _Models, model_features
 
 pytestmark = pytest.mark.asyncio
@@ -33,7 +33,7 @@ pytestmark = pytest.mark.asyncio
 
 async def test_session_and_execution_entry_points_return_bound_entities() -> None:
     features = model_features(RuntimeUsageModels())
-    features.capability(ExecutionCapability(retain_history=True))
+    configure_execution(features, retain_history=True)
     actor = Principal("caller", "default", "service")
     async with Runtime.open("entity-handles", storage=PersistenceStorage.in_memory(), features=features) as runtime:
         assert runtime.agents.get().session("lazy").principal is runtime.default_principal
@@ -109,7 +109,7 @@ async def test_recovery_returns_handle_and_preserves_original_admitted_principal
         yield "unreachable"
 
     features = model_features(_Models(FunctionModel(stream_function=blocked)))
-    features.capability(StepPersistenceCapability())
+    features = features.with_defaults({"execution": {**features.defaults.get("execution", {}), "checkpoints": True}})
     storage = PersistenceStorage.from_root(tmp_path)
     original = Principal("caller", "default", "service")
     async with Runtime.open("recover-handle", storage=storage, features=features) as runtime:
@@ -131,7 +131,7 @@ async def test_recovery_returns_handle_and_preserves_original_admitted_principal
             await super().authorize(principal, action, resource)
 
     async with Runtime.open("recover-handle", storage=storage, features=features,
-                            authorization=RecoveryAuthorization(), auto_recover=False) as runtime:
+                            authorization=RecoveryAuthorization()) as runtime:
         recovered = await runtime.executions.recover(execution.execution_id, principal=actor, idempotency_key="recover")
         assert isinstance(recovered, Execution) and recovered.principal is actor
         assert recovered.execution_id == execution.execution_id
@@ -191,7 +191,7 @@ async def test_session_mutation_binds_the_admitted_view_without_another_read(ope
     view = SimpleNamespace(agent_id="default", session_id="accepted")
     service = SimpleNamespace(**{operation: AsyncMock(side_effect=failure if unknown else None, return_value=view)})
     observe = AsyncMock(side_effect=AssertionError("mutation must not start another observation"))
-    facade = RuntimeSessions(service, observe, start_session=None, bind_session=lambda value, principal: Session(
+    facade = RuntimeSessions(service, observe, bind_session=lambda value, principal: Session(
         None, value.agent_id, None, value.session_id, principal,
     ))
     request = facade.create("default", CreateSessionRequest(actor, "accepted", "create")) if operation == "create" else (

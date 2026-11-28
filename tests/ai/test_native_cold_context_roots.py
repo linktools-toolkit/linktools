@@ -34,8 +34,8 @@ async def test_cold_session_hydrates_only_roots_after_successful_reset(tmp_path)
     storage = PersistenceStorage.sqlite(tmp_path / "cold-context.db")
 
     async def send(runtime, prompt, *, selection="all"):
-        turn = await runtime.agents.get("default").start(
-            prompt, session_id="thread", idempotency_key=prompt, session_context=selection,
+        turn = await runtime.agents.get("default").session("thread").start(
+            prompt, idempotency_key=prompt, session_context=selection,
         )
         result = await turn.wait_final(timeout_seconds=10)
         assert result.status is ExecutionStatus.SUCCEEDED, result.view

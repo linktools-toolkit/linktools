@@ -119,7 +119,7 @@ async def test_real_runtime_filesystem_uses_validator_before_tool_result(tmp_pat
     import json
     from pydantic_ai.messages import ToolReturnPart
     from pydantic_ai.models.function import DeltaToolCall, FunctionModel
-    from linktools.ai.capability import ExecutionCapability, FileSystemCapability
+    from linktools.ai.capability import FileSystemCapability
     from linktools.ai.persistence import PersistenceStorage
     from linktools.ai.runtime import Runtime, RuntimeFeatures
     from linktools.ai.workspace import Workspace
@@ -177,8 +177,7 @@ async def test_real_runtime_filesystem_uses_validator_before_tool_result(tmp_pat
                     assert "safe company" in rendered
             yield "checked"
 
-    features = RuntimeFeatures("read-validator", workspace_factory=factory)
-    features.capability(ExecutionCapability(retain_history=True))
+    features = RuntimeFeatures("read-validator", workspace_factory=factory, defaults={"execution": {"retain_history": True}})
     features.capability(FileSystemCapability(Workspace.load(root)))
     features.model("default", _Models(FunctionModel(stream_function=model)))
     features.agent("default", allow_tools=("read_file", "search_files"), allow_skills=(), allow_subagents=())

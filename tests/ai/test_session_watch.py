@@ -9,13 +9,13 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import ExecutionStatus, Principal, SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime import Runtime
 from linktools.ai.storage import InMemoryCacheBackend
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 from .test_pending_session_projection import _runtimes
 
@@ -32,7 +32,7 @@ async def test_watch_shares_reads_and_tracks_real_turn_release(monkeypatch, outc
             raise RuntimeError('provider failed')
         return ModelResponse(parts=[TextPart('answer')])
     features = model_features(_Models(_UsageFunctionModel(model)))
-    features.capability(ExecutionCapability(retain_history=True))
+    configure_execution(features, retain_history=True)
     storage = PersistenceStorage.in_memory()
     async with Runtime.open('watch', storage=storage, features=features) as runtime:
         session = await runtime.agents.get().create_session('session')
@@ -88,7 +88,7 @@ async def test_watch_pending_admission_and_completion(tmp_path):
             assert initial.active_turn_id is None and initial.last_turn_no == 0
             busy = asyncio.create_task(anext(stream))
             block()
-            turn = await runtime.sessions.start(
+            turn = await runtime.sessions.start_turn(
                 "session", "hello", agent="default", principal=principal, idempotency_key="pending",
             )
             await asyncio.wait_for(entered.wait(), 5)
@@ -189,7 +189,7 @@ async def test_watch_observes_execution_reentry_without_session_start(kind):
             await finish.wait()
         return ModelResponse(parts=[TextPart('answer')])
     features = model_features(_Models(_UsageFunctionModel(model)))
-    features.capability(ExecutionCapability(retain_history=True))
+    configure_execution(features, retain_history=True)
     async with Runtime.open('watch-reentry', storage=PersistenceStorage.in_memory(), features=features) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('initial', idempotency_key='initial')
@@ -256,7 +256,7 @@ async def test_host_invalidations_follow_sync_turn_without_reading_state(monkeyp
         return ModelResponse(parts=[TextPart("answer")])
 
     features = model_features(_Models(_UsageFunctionModel(model)))
-    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
+    configure_execution(features, retain_history=True)
     storage = PersistenceStorage.in_memory()
     invalidated, failed = asyncio.Event(), asyncio.Event()
     async with Runtime.open("invalidations", storage=storage, features=features) as runtime:

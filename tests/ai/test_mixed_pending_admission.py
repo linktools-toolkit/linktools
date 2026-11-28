@@ -10,7 +10,7 @@ from dataclasses import replace
 
 import pytest
 from linktools.ai.agent import AgentBinding, AgentCompiler
-from linktools.ai.capability import CapabilityContribution, ExecutionCapability
+from linktools.ai.capability import CapabilityContribution
 from linktools.ai.core import canonical_sha256, CommitPolicy, Principal
 from linktools.ai.model import create_model_binding
 from linktools.ai.spec import AgentSpec
@@ -30,12 +30,12 @@ from .test_session_admission_conformance import _session
 _PRINCIPAL = Principal("owner", "tenant", "service")
 
 
-def _binding(commit: CommitPolicy = CommitPolicy.terminal()) -> AgentBinding:
+def _binding() -> AgentBinding:
     spec = AgentSpec("agent", model="model")
-    execution = ExecutionCapability(commit=commit, retain_history=True)
     compiler = AgentCompiler(
         models={"model": create_model_binding(api="openai", model="gpt-test")},
-        candidates=(CapabilityContribution("capability", execution.id, execution, scope="runtime"),),
+        candidates=(),
+        defaults={"execution": {"retain_history": True}},
         agents={spec.id: spec},
     )
     return compiler.bind(compiler.compile(spec))
@@ -99,8 +99,9 @@ async def _writers():
     for commit in (CommitPolicy.terminal(), CommitPolicy.sync()):
         coordinator = _Coordinator(cache)
         service = _service(
-            state, backend=_Launcher(state.execution.executions), binding=_binding(commit),
+            state, backend=_Launcher(state.execution.executions), binding=_binding(),
         )
+        service._commit = commit
         service._runtime_bridge.pending_turns = _RemotePendingTurns(coordinator)
 
         async def run_turn(reservation, principal, admit, *, service=service, coordinator=coordinator):

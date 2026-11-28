@@ -3,6 +3,7 @@
 
 from linktools.ai.persistence import Persistence
 """End-to-end evidence for current Runtime persistence contracts."""
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import model_features
 
 import asyncio
@@ -28,7 +29,6 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.history import History
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence.codec import (
@@ -280,7 +280,7 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(tmp_path: Path
         return PersistenceStorage.sqlite(database, object_store=FilesystemObjectStore(tmp_path / "objects"))
 
     features = _agent_group()
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     model_features(_Models(_UsageFunctionModel(blocking_model)), features)
 
     async with (
@@ -342,7 +342,7 @@ async def test_session_runtime_persists_and_reads_terminal_result(
         """Use the host policy for canonical session operations."""
 
     features = _agent_group()
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     authorization = HostAuthorization()
     expected = {
         "findings": [{"trace_id": "trace", "labels": [{"name": "priority", "value": "high"}]}],
@@ -356,8 +356,8 @@ async def test_session_runtime_persists_and_reads_terminal_result(
         created = await agent.create_session("session")
         loaded = await runtime.sessions.get(created.session_id, principal=runtime.default_principal)
         assert loaded.session_id == created.session_id
-        result = (await agent.run(
-            "hello", output=_PersistenceNestedOutput, session_id=created.session_id, timeout_seconds=10,
+        result = (await agent.session(created.session_id).run(
+            "hello", output=_PersistenceNestedOutput, timeout_seconds=10,
         )).result
         assert result.status is ExecutionStatus.SUCCEEDED and result.view["output"] == expected
         assert (await loaded.inspect())["active_turn_id"] is None

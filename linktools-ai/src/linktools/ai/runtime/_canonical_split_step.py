@@ -273,14 +273,20 @@ class _CanonicalSplitStep:
         if (source.phase != "waiting" or waiting is None
                 or (source.turn_id, source.session_id, source.generation, waiting.original_generation)
                 != (key.turn_id, key.session_id, generation, generation)):
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"recovery_stage": "split_step", "reason": "split_waiting_source_mismatch"},
+            )
         frontier = CanonicalDeferredFrontier.from_split_waiting(
             key, checkpoint_id=source.pin.checkpoint_id, waiting=waiting,
         )
         if source.pin.receipt_id != frontier.split_receipt_id:
             # No source evidence owns richer approval/replay metadata in this
             # tranche. Do not reconstruct it from a caller or current config.
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"recovery_stage": "split_step", "reason": "split_waiting_receipt_mismatch"},
+            )
         return await self._publish_waiting_target(frontier, source=source, max_bytes=max_bytes, expired=True)
 
     async def _publish_waiting_target(
@@ -487,21 +493,36 @@ class _CanonicalSplitStep:
         from ..persistence.contracts import ApprovalRecord, ExternalCallRecord, deferred_resource_id
 
         if generation < (1 if ready else 2):
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"recovery_stage": "split_step", "reason": "split_waiting_generation_invalid"},
+            )
         source = await self._read_pin(self._identity(key, generation))
         if ready:
             if source is None or source.phase != "ready":
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"recovery_stage": "split_step", "reason": "split_ready_source_missing"},
+                )
         elif source is None:
             # The target grant can commit before the source acknowledges it.
             source = await self._read_pin(self._identity(key, generation - 1))
             if source is None or source.phase not in ("ready", "resume_hold"):
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"recovery_stage": "split_step", "reason": "split_prior_waiting_source_missing"},
+                )
         elif source.phase not in ("resuming", "resume_hold"):
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"recovery_stage": "split_step", "reason": "split_resuming_source_mismatch"},
+            )
         waiting = source.pin.waiting
         if waiting is None:
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"recovery_stage": "split_step", "reason": "split_waiting_pin_missing"},
+            )
 
         tools = checkpoint.tools
         receipts = checkpoint.approvals if waiting.kind == "approval" else checkpoint.external_calls
@@ -517,7 +538,10 @@ class _CanonicalSplitStep:
                     or not waiting.original_generation <= operation.producer_generation <= source.generation
                     or (source.phase == "ready" and waiting.original_generation != source.generation)
                     or operation.arguments_payload is None):
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"recovery_stage": "split_step", "reason": "split_waiting_tool_receipt_unconfirmed"},
+                )
             expected = deferred_resource_id(
                 "approval-v1" if waiting.kind == "approval" else "external-call-v1",
                 tenant_id, key.turn_id, key.turn_id, operation.tool_call_id,
@@ -528,7 +552,10 @@ class _CanonicalSplitStep:
                 transaction.transaction(receipts.state_store), expected, tenant_id=tenant_id,
             )
             if resolution is None or resolution.execution_id != key.turn_id or resolution.idempotency_key is None:
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"recovery_stage": "split_step", "reason": "split_waiting_resolution_missing"},
+                )
             if isinstance(resolution, ApprovalRecord) and waiting.kind == "approval":
                 if resolution.status is ApprovalStatus.APPROVED and resolution.decision is ApprovalDecision.APPROVE:
                     if operation.producer_generation == waiting.original_generation:
@@ -539,24 +566,42 @@ class _CanonicalSplitStep:
                     ):
                         return operation, resolution
                     else:
-                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                        raise AIError(
+                            ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                            safe_details={"recovery_stage": "split_step", "reason": "split_approved_effect_state_mismatch"},
+                        )
                 elif resolution.status is ApprovalStatus.DENIED and resolution.decision is ApprovalDecision.DENY:
                     status = ToolOperationStatus.FAILED
                 else:
-                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    raise AIError(
+                        ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                        safe_details={"recovery_stage": "split_step", "reason": "split_approval_resolution_invalid"},
+                    )
                 if resolution.decided_at is None:
-                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    raise AIError(
+                        ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                        safe_details={"recovery_stage": "split_step", "reason": "split_approval_timestamp_missing"},
+                    )
             elif isinstance(resolution, ExternalCallRecord) and waiting.kind == "external":
                 if (resolution.status is not ExternalCallStatus.SUPPLIED or resolution.supplied_at is None
                         or resolution.result_payload is None or resolution.resolution_kind is None):
-                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    raise AIError(
+                        ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                        safe_details={"recovery_stage": "split_step", "reason": "split_external_resolution_invalid"},
+                    )
                 status = (ToolOperationStatus.COMPLETED if resolution.resolution_kind == "succeeded"
                           else ToolOperationStatus.FAILED)
             else:
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"recovery_stage": "split_step", "reason": "split_waiting_resolution_kind_mismatch"},
+                )
             if (operation.producer_generation != waiting.original_generation
                     or operation.status is not status or operation.owner is not None):
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"recovery_stage": "split_step", "reason": "split_waiting_tool_state_mismatch"},
+                )
             return operation, resolution
 
         operation, resolution = await group.read_many(members, read)
@@ -570,11 +615,17 @@ class _CanonicalSplitStep:
                 or any(frontier.operation_metadata.values())
                 or frontier.approval_operation_ids != ((waiting.operation_id,) if waiting.kind == "approval" else ())
                 or frontier.external_operation_ids != ((waiting.operation_id,) if waiting.kind == "external" else ())):
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"recovery_stage": "split_step", "reason": "split_waiting_frontier_mismatch"},
+            )
         if operation.status in (ToolOperationStatus.CLAIMED, ToolOperationStatus.EFFECT_UNKNOWN):
             # The old worker may have invoked the effect. A regrant is not
             # proof of its outcome, even when the tool advertises replay safety.
-            raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+            raise AIError(
+                ErrorCode.TOOL_EFFECT_UNKNOWN,
+                safe_details={"recovery_stage": "split_step", "reason": "split_approved_effect_unconfirmed"},
+            )
         return _SplitWaitingRecovery(frontier, source, operation, resolution)
 
     async def prepare_waiting_recovery(
@@ -600,34 +651,52 @@ class _CanonicalSplitStep:
         operation, resolution = evidence.operation, evidence.resolution
         call_id = operation.tool_call_id
         if binding_payload is None:
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"recovery_stage": "split_step", "reason": "split_waiting_binding_missing"},
+            )
         binding = await resolver._restore_split_wait_binding(AgentBindingContract.from_payload(binding_payload), operation)
         approved = isinstance(resolution, ApprovalRecord) and resolution.status is ApprovalStatus.APPROVED
         pending_approval = approved and operation.status is ToolOperationStatus.PENDING
         if approved and not pending_approval and (tools is None or tools._repository is not checkpoint.tools
                 or operation.status not in (ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED)):
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"recovery_stage": "split_step", "reason": "split_approved_result_unconfirmed"},
+            )
         occurrence = evidence.frontier.checkpoint_id
         async with self._context.sessions() as session:
             hydrate = await self._step_store.capture_turn_checkpoint(
                 session, run_id=key.turn_id, conversation_id=key.session_id, replay_key=occurrence,
             )
         if hydrate is None:
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"recovery_stage": "split_step", "reason": "split_waiting_checkpoint_missing"},
+            )
         saved = NativeCheckpoint.decode(await hydrate())
         if ((saved.run_id, saved.conversation_id, saved.idempotency_key)
                 != (key.turn_id, key.session_id, occurrence) or saved.state != "interrupted"):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(
+                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                safe_details={"recovery_stage": "split_step", "reason": "split_waiting_checkpoint_identity_mismatch"},
+            )
         messages = tuple(native_checkpoint_messages(saved.messages, restore=True))
         last_response = next((i for i in range(len(messages) - 1, -1, -1)
                               if isinstance(messages[i], ModelResponse)), -1)
         if last_response < 0:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(
+                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                safe_details={"recovery_stage": "split_step", "reason": "split_waiting_checkpoint_response_missing"},
+            )
         pending = {}
         for part in messages[last_response].parts:
             if isinstance(part, ToolCallPart):
                 if part.tool_call_id in pending:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    raise AIError(
+                        ErrorCode.STORAGE_INTEGRITY_ERROR,
+                        safe_details={"recovery_stage": "split_step", "reason": "split_waiting_duplicate_tool_call"},
+                    )
                 pending[part.tool_call_id] = part.tool_name
         for message in messages[last_response + 1:]:
             if isinstance(message, ModelRequest):
@@ -635,14 +704,20 @@ class _CanonicalSplitStep:
                     if isinstance(part, (ToolReturnPart, RetryPromptPart)):
                         pending.pop(part.tool_call_id, None)
         if pending != {call_id: operation.tool_name}:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(
+                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                safe_details={"recovery_stage": "split_step", "reason": "split_waiting_checkpoint_call_mismatch"},
+            )
 
         results = DeferredToolResults()
         approval = None
         if pending_approval:
             arguments = await read_payload(operation.arguments_payload)
             if not isinstance(arguments, dict) or canonical_sha256(arguments) != operation.arguments_digest:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(
+                    ErrorCode.STORAGE_INTEGRITY_ERROR,
+                    safe_details={"recovery_stage": "split_step", "reason": "split_waiting_approval_arguments_invalid"},
+                )
             results.approvals[call_id] = ToolApproved(override_args=arguments)
             approval = checkpoint, resolution, operation
         elif approved:
@@ -660,7 +735,10 @@ class _CanonicalSplitStep:
             elif resolution.resolution_kind == "failed" and isinstance(result, str):
                 results.calls[call_id] = PydanticToolControlCapability.build_tool_failed(result)
             else:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(
+                    ErrorCode.STORAGE_INTEGRITY_ERROR,
+                    safe_details={"recovery_stage": "split_step", "reason": "split_waiting_external_result_invalid"},
+                )
         results.metadata[call_id] = dict(resolution.resolution_metadata)
         retries = saved.output_retries_used if isinstance(saved, NativeCheckpoint) else 0
         return _PreparedSplitWaitingRecovery(
@@ -851,7 +929,10 @@ class _CanonicalSplitStep:
 
         terminal = source.pin.terminal_state
         if terminal not in ("succeeded", "failed", "cancelled"):
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"recovery_stage": "split_step", "reason": "split_terminal_state_unconfirmed"},
+            )
         if await self.publish_terminal(
             key, turn_no=turn_no, state=cast("TerminalState", terminal), source=source, _expired=True,
         ):
@@ -864,7 +945,10 @@ class _CanonicalSplitStep:
     async def require_no_effects(self, source: SplitStepSourceObservation) -> None:
         """Only the bounded, configured no-tool topology supports cold takeover."""
         if self._read_effects is None or await self._read_effects(source.turn_id):
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"recovery_stage": "split_step", "reason": "split_effect_absence_unconfirmed"},
+            )
 
     async def _stop_waiting_source(
         self, key: SessionTurnKey, *, target: _SplitTargetObservation, source: SplitStepSourceObservation,
@@ -879,7 +963,10 @@ class _CanonicalSplitStep:
         )
         if (self._stop_effects is None or target.state != "cancelling"
                 or (not unacknowledged and target.receipt_id != source.pin.receipt_id)):
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"recovery_stage": "split_step", "reason": "split_waiting_cancel_source_mismatch"},
+            )
         tools, tenant_id = self._stop_effects
         group = self._store.storage_group
         if tools.state_store.storage_group is not group:
@@ -908,12 +995,18 @@ class _CanonicalSplitStep:
             if (operation is None or operation.execution_id != key.turn_id or operation.agent_run_id != key.turn_id
                     or operation.producer_generation is None
                     or not waiting.original_generation <= operation.producer_generation <= source.generation):
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"recovery_stage": "split_step", "reason": "split_waiting_cancel_tool_receipt_unconfirmed"},
+                )
             if unacknowledged and (
                 operation.producer_generation != waiting.original_generation
                 or operation.status is not ToolOperationStatus.PENDING or operation.owner is not None
             ):
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"recovery_stage": "split_step", "reason": "split_unacknowledged_waiting_tool_state_mismatch"},
+                )
             outcome = ({"error_code": ErrorCode.TOOL_EFFECT_UNKNOWN.value}
                        if operation.status in (ToolOperationStatus.CLAIMED, ToolOperationStatus.EFFECT_UNKNOWN)
                        else result)
@@ -931,7 +1024,10 @@ class _CanonicalSplitStep:
                 raise
         if (sealed is None or sealed.pin.receipt_id != source.pin.receipt_id
                 or sealed.pin.checkpoint_id != source.pin.checkpoint_id):
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"recovery_stage": "split_step", "reason": "split_waiting_cancellation_unconfirmed"},
+            )
         return sealed
 
     async def recover_open_turn(
@@ -988,12 +1084,18 @@ class _CanonicalSplitStep:
                     source = await self._read_pin(identity)
                     if source is None:
                         if error.code is not ErrorCode.STORAGE_CONFLICT or not cancelling:
-                            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+                            raise AIError(
+                                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                                safe_details={"recovery_stage": "split_step", "reason": "split_source_seal_unconfirmed"},
+                            ) from error
                         source = await self._claim_unregistered_stop(key, target=target, result=cancel_result)
 
         if source.pin.waiting is not None:
             if not cancelling:
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"recovery_stage": "split_step", "reason": "split_source_waiting_not_resumable"},
+                )
             source = await self._stop_waiting_source(key, target=target, source=source, result=cancel_result)
         if source.pin.terminal_state is not None:
             if not await self.recover_terminal(
@@ -1015,12 +1117,18 @@ class _CanonicalSplitStep:
             if (cancelled is None or cancelled.pin.receipt_id != source.pin.receipt_id
                     or cancelled.pin.terminal_state != "cancelled"
                     or cancelled.pin.result != cancel_result):
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"recovery_stage": "split_step", "reason": "split_cancellation_unconfirmed"},
+                )
             if await self.recover_terminal(key, turn_no=turn_no, source=cancelled, cancel_result=cancel_result):
                 return "settled", None, None
             return "not_acquired", None, None
         if source.phase != "sealed" or source.pin.checkpoint_id is None:
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"recovery_stage": "split_step", "reason": "split_resume_checkpoint_not_pinned"},
+            )
         await read_effects(source)
         async with self._context.sessions() as session:
             checkpoint = await self._step_store.capture_turn_checkpoint(
@@ -1028,7 +1136,10 @@ class _CanonicalSplitStep:
                 replay_key=source.pin.checkpoint_id,
             )
         if checkpoint is None:
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"recovery_stage": "split_step", "reason": "split_resume_checkpoint_missing"},
+            )
         snapshot = await checkpoint()
         if snapshot.state != "complete" or snapshot.idempotency_key != source.pin.checkpoint_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1049,13 +1160,19 @@ class _CanonicalSplitStep:
         last = messages[-1] if messages else None
         if (not isinstance(last, ModelResponse) or last.text is None
                 or any(isinstance(part, ToolCallPart) for part in last.parts)):
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"recovery_stage": "split_step", "reason": "split_resume_checkpoint_has_no_final_response"},
+            )
         events = await self._step_store.list_events(run_id=key.turn_id)
         terminal = next((event for event in reversed(events)
                          if event.kind in ("run_completed", "run_failed", "run_cancelled")), None)
         if terminal is None or terminal.kind != "run_completed":
             # A checkpoint preceding a provider result is never replayed.
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"recovery_stage": "split_step", "reason": "split_resume_completion_unconfirmed"},
+            )
         retries = checkpoint.output_retries_used if isinstance(checkpoint, NativeCheckpoint) else 0
         return _SplitResume(checkpoint, messages, retries)
 
@@ -1068,7 +1185,10 @@ class _CanonicalSplitStep:
 
         if (target.state != "cancelling" or target.generation != 1
                 or target.receipt_id is not None or target.admitted_at is None):
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"recovery_stage": "split_step", "reason": "split_unregistered_stop_target_mismatch"},
+            )
         pin = SplitStepPin(
             deterministic_id("canonical-split-unregistered-stop", key.turn_id, target.generation),
             terminal_state="cancelled", result=result,
@@ -1104,7 +1224,10 @@ class _CanonicalSplitStep:
             if observed is None or observed.pin != pin:
                 # An original registration can win the unique insert and may
                 # have reached the provider. Missing proof cannot settle it.
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"recovery_stage": "split_step", "reason": "split_unregistered_stop_unconfirmed"},
+                )
             source = observed
         return source
 
@@ -1112,7 +1235,10 @@ class _CanonicalSplitStep:
         self, key: SessionTurnKey, *, source: SplitStepSourceObservation, lease_seconds: int,
     ) -> tuple[bool, SessionInstructionFrontier | None]:
         if source.phase != "sealed" or source.pin.waiting is not None:
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"recovery_stage": "split_step", "reason": "split_resume_source_not_sealed"},
+            )
         generation = source.generation + 1
 
         async def confirm():

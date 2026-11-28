@@ -5,7 +5,7 @@ from linktools.ai.persistence import Persistence
 """Retry preserves imported pre-input context and its memory isolation."""
 from ._runtime_test_helpers import model_features
 
-from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 from pathlib import Path
 
 import pytest
@@ -84,11 +84,10 @@ async def test_retry_preserves_imported_history_and_metadata(tmp_path: Path, met
 @pytest.mark.asyncio
 @pytest.mark.parametrize("trace", (False, True), ids=("ordinary", "durable-trace"))
 async def test_retry_imported_context_matches_native_fork_history(tmp_path: Path, trace: bool) -> None:
-    group = RuntimeFeatures("retry-parity")
+    group = RuntimeFeatures("retry-parity", defaults={"execution": {"retain_history": True}})
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     if trace:
         group.capability(TraceCapability(), scope="runtime")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Persistence.open('retry-parity', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_83, Runtime.open(persistence=persistence_83, features=model_features(_NoToolsModels(), group)) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         agent = runtime.agents.get()

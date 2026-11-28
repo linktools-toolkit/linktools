@@ -11,7 +11,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCall
 
 from pydantic_ai.models.function import AgentInfo
 
-from linktools.ai.capability import AgentContext, ExecutionCapability
+from linktools.ai.capability import AgentContext
 from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.core import ApprovalDecision, ExecutionStatus, Principal
@@ -35,8 +35,7 @@ class _Scenario:
         self.child_requests = 0
         self.parent_requests = 0
         self.parent_returns: list[object] = []
-        self.features = RuntimeFeatures("child-continuation")
-        self.features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+        self.features = RuntimeFeatures("child-continuation", defaults={"execution": {"retain_history": True}})
         self.features.capability(native_checkpoint(), scope="runtime")
         self.features.model("parent", _Models(_UsageFunctionModel(self.parent)))
         self.features.model("child", _Models(_UsageFunctionModel(self.child)))
@@ -149,7 +148,7 @@ async def test_cold_runtime_does_not_infer_child_continuation_authority(tmp_path
             child_id = await scenario.paused_child(runtime, parent.execution_id)
             await asyncio.wait_for(runtime.handoff(), 10)
         before = await persistence.execution.executions.get(child_id, tenant_id=runtime.tenant_id)
-        async with Runtime.open(persistence=persistence, features=scenario.features, auto_recover=False) as cold:
+        async with Runtime.open(persistence=persistence, features=scenario.features) as cold:
             with pytest.raises(AIError) as unavailable:
                 await scenario.resolve(cold, child_id)
             assert unavailable.value.code is ErrorCode.STORAGE_CONFLICT
@@ -168,7 +167,7 @@ async def test_explicit_parent_recovery_reattaches_original_paused_child(tmp_pat
             parent = await runtime.agents.get().start("delegate", idempotency_key="parent")
             child_id = await scenario.paused_child(runtime, parent.execution_id)
             await asyncio.wait_for(runtime.handoff(), 10)
-        async with Runtime.open(persistence=persistence, features=scenario.features, auto_recover=False) as recovered:
+        async with Runtime.open(persistence=persistence, features=scenario.features) as recovered:
             with pytest.raises(AIError) as unavailable:
                 await scenario.resolve(recovered, child_id)
             assert unavailable.value.safe_details.get("phase") == "subagent_parent_unavailable"

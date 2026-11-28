@@ -9,7 +9,7 @@ import pytest
 from pydantic_ai.exceptions import ApprovalRequired
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 
-from linktools.ai.capability import AgentContext, ExecutionCapability, StepPersistenceCapability
+from linktools.ai.capability import AgentContext, SessionCapability
 from linktools.ai.core import ApprovalDecision, ApprovalStatus, ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ApprovalDecisionRequest
@@ -18,6 +18,7 @@ from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._native_subagent import NativeSubagentAdmission
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import _wait_for_committed
 from .test_canonical_turn_subagents import _HostAuthorization, _model
 
@@ -56,23 +57,23 @@ async def test_native_parent_approves_exact_child_without_shadow_execution(
             "delegate_task", {"subagent_id": "child", "task": "Inspect test fixture"}, tool_call_id="delegate",
         )])
 
-    features = RuntimeFeatures("native-child-approval")
+    features = RuntimeFeatures("native-child-approval", defaults={"execution": {"retain_history": True}})
     features.model("parent", _model("parent", parent))
     features.model("child", _model("child", child))
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    features.capability(StepPersistenceCapability(), scope="runtime")
+    configure_execution(features, retain_history=True)
+    features.capability(SessionCapability(checkpoints=True), scope="runtime")
     features.tool(inspect_fixture, effect_policy="replay_safe")
     features.agent("default", model="parent", allow_subagents=("child",), allow_tools=(), allow_skills=())
     features.agent("child", model="child", allow_subagents=(), allow_tools=("inspect_fixture",), allow_skills=())
     storage = PersistenceStorage.from_root(tmp_path)
     async with (
         Persistence.open("native-child-approval", storage=storage) as state,
-        Runtime.open(persistence=state, features=features, authorization=_HostAuthorization(), auto_recover=False) as runtime,
+        Runtime.open(persistence=state, features=features, authorization=_HostAuthorization()) as runtime,
     ):
         actor = Principal("owner", runtime.tenant_id)
         await runtime.sessions.create_turn_session("chat", principal=actor)
-        turn = await runtime.agents.get().start(
-            "Delegate once", session_id="chat", principal=actor, idempotency_key="once",
+        turn = await runtime.agents.get().session("chat").start(
+            "Delegate once", principal=actor, idempotency_key="once",
         )
 
         async def child_parked():

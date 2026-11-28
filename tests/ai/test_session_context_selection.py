@@ -8,19 +8,19 @@ from contextlib import AsyncExitStack
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, UserPromptPart
 
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import ExecutionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._session_turn_sql import SessionTurnKey, SqlSessionTurnReader
 from linktools.ai.runtime import Runtime
 
+from ._runtime_test_helpers import configure_execution
 from .test_runtime_session_start_preparation import _features as _base_features
 
 
 def _features(model):
     features = _base_features(model)
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     return features
 
 pytestmark = pytest.mark.asyncio
@@ -60,7 +60,7 @@ async def test_interrupted_turn_retains_the_request_for_continue(tmp_path, state
         runtime = await open_runtime(stack)
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=principal)
-        first = await runtime.sessions.start(
+        first = await runtime.sessions.start_turn(
             "session", "Inspect my files", agent="default", principal=principal, idempotency_key="inspect",
         )
         if state == "cancelled":
@@ -73,7 +73,7 @@ async def test_interrupted_turn_retains_the_request_for_continue(tmp_path, state
             await stack.aclose()
             runtime = await open_runtime(stack)
             principal = runtime.default_principal
-        second = await runtime.sessions.start(
+        second = await runtime.sessions.start_turn(
             "session", "Continue", agent="default", principal=principal, idempotency_key="continue",
         )
         result = await second.wait_final(timeout_seconds=5)
@@ -109,15 +109,15 @@ async def test_session_selects_context_before_prior_body_read_and_preserves_time
     async with Persistence.open("session-start-preparation", storage=storage) as state, open_runtime(state) as runtime:
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=principal)
-        first = await runtime.agents.get().start("old question", session_id="session", idempotency_key="old")
+        first = await runtime.agents.get().session("session").start("old question", idempotency_key="old")
         assert (await first.wait_final(timeout_seconds=5)).view["output"] == {"text": "answer"}
 
     ranges.clear()
     async with Persistence.open("session-start-preparation", storage=storage) as state, open_runtime(state) as runtime:
         agent = runtime.agents.get()
         principal = runtime.default_principal
-        second = await agent.start(
-            "new question", session_id="session", session_context=selection, idempotency_key="new",
+        second = await agent.session("session").start(
+            "new question", session_context=selection, idempotency_key="new",
         )
         assert (await second.wait_final(timeout_seconds=5)).view["output"] == {"text": "answer"}
         assert len(seen[-1]) == expected_messages
@@ -126,13 +126,13 @@ async def test_session_selects_context_before_prior_body_read_and_preserves_time
         turns = page["timeline"]["items"]
         assert {turn["turn_id"] for turn in turns} == {first.key.turn_id, second.key.turn_id}
         assert {turn["user_input"]["prompt"] for turn in turns} == {"old question", "new question"}
-        again = await agent.start(
-            "new question", session_id="session", session_context=selection, idempotency_key="new",
+        again = await agent.session("session").start(
+            "new question", session_context=selection, idempotency_key="new",
         )
         assert again.key == second.key
         with pytest.raises(AIError) as error:
-            await agent.start(
-                "new question", session_id="session", idempotency_key="new",
+            await agent.session("session").start(
+                "new question", idempotency_key="new",
                 session_context="current_turn" if selection == "all" else "all",
             )
         assert error.value.code == ErrorCode.IDEMPOTENCY_CONFLICT

@@ -60,9 +60,9 @@ Enable this only for session turns with
 `features.capability(SessionCapability(checkpoints=True), scope="runtime")`.
 The host still supplies its explicit session authorization policy; this flag
 does not grant access to sessions.
-This selects the Runtime-owned Step adapter for ordinary sessions. An explicit
-`StepPersistenceCapability` remains available to independent Execution and Task;
-its optional custom store and hook settings are not used by these session turns.
+This selects the Runtime-owned Step adapter for ordinary sessions. Independent
+Execution and Task use `defaults["execution"]["checkpoints"]` or an explicit native
+Harness adapter; those settings do not affect ordinary Session turns.
 The session owns the turn lifecycle. Step checkpoints and tool receipts join
 the session's existing transaction boundaries: an external tool runs outside
 the database transaction, and each receipt write shares its transaction with

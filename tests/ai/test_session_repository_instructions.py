@@ -15,7 +15,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolRetu
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
-from linktools.ai.capability import ExecutionCapability, SessionCapability, StepPersistenceCapability
+from linktools.ai.capability import SessionCapability
 from linktools.ai.core import ApprovalDecision, ApprovalStatus, CommitPolicy, ExecutionStatus, Principal, SessionStatus, WorkspaceFileInput
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
@@ -29,6 +29,7 @@ from linktools.ai.storage import InMemoryCacheBackend, StorageOverlay, StorageRo
 from linktools.ai.session import SessionRecord
 from linktools.ai.workspace import ToolPermissionPolicy, ToolPermissionRule, Workspace, WorkspacePolicy
 
+from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import (
     _Models,
     _UsageFunctionModel,
@@ -107,7 +108,7 @@ async def test_native_session_reads_new_scope_on_first_call_and_loads_rules(tmp_
         agent = runtime.agents.get("reader")
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=principal, idempotency_key="create")
-        turn = await runtime.sessions.start(
+        turn = await runtime.sessions.start_turn(
             "session", "Read the file", agent=agent, principal=principal, idempotency_key="once",
         )
         assert (await turn.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
@@ -160,7 +161,7 @@ async def test_native_workspace_approval_resumes_after_sibling_discovers_rules(t
         principal = Principal("operator", runtime.tenant_id)
         agent = runtime.agents.get("reader")
         await agent.create_session("session", principal=principal)
-        turn = await runtime.sessions.start(
+        turn = await runtime.sessions.start_turn(
             "session", "Read the file", agent=agent, principal=principal, idempotency_key="once",
         )
         assert (await asyncio.wait_for(turn.wait(), timeout=10)).status is ExecutionStatus.WAITING_DEFERRED
@@ -224,7 +225,7 @@ async def test_session_reloads_known_scopes_before_first_model_request(
     if native:
         features.capability(SessionCapability(checkpoints=capture_frontier and not split_selects_step_only), scope="runtime")
     else:
-        features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+        configure_execution(features, retain_history=True)
     features.agent("reader", model="default", allow_tools=("read_file",), allow_subagents=())
     features = model_features(_Models(_UsageFunctionModel(model)), features)
 
@@ -235,7 +236,7 @@ async def test_session_reloads_known_scopes_before_first_model_request(
         initial_rule, discovery_rule, forbidden_rules = initial, discover, absent
         if native:
             try:
-                handle = await runtime.sessions.start(
+                handle = await runtime.sessions.start_turn(
                     session_id, name, agent="reader", principal=runtime.default_principal, idempotency_key=name,
                 )
             except AIError as error:
@@ -309,12 +310,12 @@ async def test_session_reloads_known_scopes_before_first_model_request(
                         pytest.fail("Unsupported split Step workspace reached the provider")
 
                     configured = workspace_features("scope-memory", workspace=Workspace.load(workspace_root))
-                    configured.capability(StepPersistenceCapability(), scope="runtime")
+                    configured.capability(SessionCapability(checkpoints=True), scope="runtime")
                     configured.agent("reader", model="default", allow_tools=(), allow_subagents=())
                     model_features(_Models(_UsageFunctionModel(model_without_tools)), configured)
                     async with Runtime.open(persistence=reopened, features=configured, **auth) as runtime:
                         with pytest.raises(AIError) as rejected:
-                            await runtime.sessions.start(
+                            await runtime.sessions.start_turn(
                                 "session", "split Step reopen", agent="reader", principal=runtime.default_principal,
                                 idempotency_key="split-step-reopen",
                             )
@@ -337,7 +338,7 @@ async def test_session_remembers_initial_cwd_scopes_and_refresh_failure_is_not_c
         return ModelResponse(parts=[TextPart("done")])
 
     features = workspace_features("cwd-scopes", workspace=Workspace.load(tmp_path))
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     features.agent("reader", model="default", allow_tools=())
     async with Persistence.open("cwd-scopes", storage=PersistenceStorage.in_memory()) as persistence:
         async with Runtime.open(persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
@@ -500,7 +501,7 @@ async def test_session_execution_recovery_keeps_pinned_instructions_and_permissi
             persistence=persistence, features=features, authorization=_HostAuthorization(),
         ) as runtime:
             await runtime.agents.get("reader").create_session("session", principal=principal)
-            turn = await runtime.sessions.start(
+            turn = await runtime.sessions.start_turn(
                 "session", "read", agent="reader", principal=principal, idempotency_key="read-once",
             )
             assert (await asyncio.wait_for(turn.wait(), timeout=10)).status is ExecutionStatus.WAITING_DEFERRED
@@ -513,7 +514,7 @@ async def test_session_execution_recovery_keeps_pinned_instructions_and_permissi
             [approval] = await recovered.approvals.list(turn.key, principal=principal)
             assert approval.approval_id == waiting.approval_id
             assert requests == pause_requests
-            attached = await recovered.sessions.start(
+            attached = await recovered.sessions.start_turn(
                 "session", "read", agent="reader", principal=principal, idempotency_key="read-once",
             )
             assert attached.key == turn.key
@@ -604,7 +605,7 @@ async def test_attachment_scopes_are_in_first_request_and_sources_are_deduplicat
             tmp_path, policy=WorkspacePolicy(max_repository_instruction_documents=2),
         ))
         if not native:
-            features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+            configure_execution(features, retain_history=True)
         features.agent("reader", model="default", allow_tools=(), allow_subagents=())
         features = model_features(_Models(_UsageFunctionModel(model)), features)
         storage = PersistenceStorage.from_root(tmp_path / "state") if native else PersistenceStorage.in_memory()
@@ -616,7 +617,7 @@ async def test_attachment_scopes_are_in_first_request_and_sources_are_deduplicat
                 prompt = ("inspect", WorkspaceFileInput("pkg/file.txt")) if entry != "files" else "inspect"
                 files = ("pkg/file.txt",) if entry != "inline" else ()
                 if native:
-                    handle = await runtime.sessions.start(
+                    handle = await runtime.sessions.start_turn(
                         "session", prompt, agent=agent, principal=runtime.default_principal,
                         idempotency_key="attachment", files=files,
                     )
@@ -653,7 +654,7 @@ async def test_initial_scope_union_is_validated_before_session_scope_write(
     features = workspace_features("initial-limits", workspace=Workspace.load(
         tmp_path, policy=WorkspacePolicy(max_repository_instruction_documents=2),
     ))
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     features.agent("reader", model="default", allow_tools=())
     features = model_features(_Models(_UsageFunctionModel(model)), features)
     async with Persistence.open("initial-limits", storage=PersistenceStorage.in_memory()) as persistence:
@@ -707,7 +708,7 @@ async def test_subagent_attachments_extend_but_do_not_refresh_parent_pin_or_sess
         return ModelResponse(parts=[TextPart("child done")])
 
     features = workspace_features("child-attachment", workspace=Workspace.load(tmp_path))
-    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    configure_execution(features, retain_history=True)
     features.agent("reader", model="default", allow_tools=(), allow_subagents=("child",))
     features.agent("child", model="default", allow_tools=(), allow_subagents=())
     features = model_features(_Models(_UsageFunctionModel(model)), features)
@@ -756,7 +757,7 @@ async def test_native_and_custom_approvals_restore_validated_arguments(
         assert not any(is_tool_retry(part) for part in messages[-1].parts)
         return ModelResponse(parts=[TextPart("done")])
 
-    features = workspace_features("native-approval", workspace=Workspace.load(tmp_path))
+    features = workspace_features("native-approval", workspace=Workspace.load(tmp_path), defaults={"execution": {"auto_recover": True}})
     source = features.tool(checked, effect_policy="none")
     source.requires_approval = kind == "native"
     features.agent("reader", model="default", allow_tools=("checked",), tool_retries=0, output_retries=0)
@@ -787,7 +788,7 @@ async def test_native_and_custom_approvals_restore_validated_arguments(
             decided_at=datetime.now(timezone.utc),
             resolution_metadata={"operator_note": "approved exact tool call"},
         )
-        async with Runtime.open(persistence=persistence, features=features, auto_recover=True) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             finished = await runtime.executions.wait(
                 execution.execution_id, principal=runtime.default_principal, timeout_seconds=10,
             )
@@ -843,7 +844,7 @@ async def test_concurrent_runtime_initial_scope_discovery_preserves_same_request
         principal = runtimes[0].default_principal
         await runtimes[0].agents.get("reader").create_session("session", principal=principal)
         handles = await asyncio.gather(*(
-            runtime.sessions.start("session", "same", agent="reader", principal=principal, idempotency_key="same-key")
+            runtime.sessions.start_turn("session", "same", agent="reader", principal=principal, idempotency_key="same-key")
             for runtime in runtimes
         ))
         assert handles[0].key == handles[1].key
@@ -900,9 +901,7 @@ async def test_accepted_context_owns_instruction_pin_before_model_dispatch(
         return ModelResponse(parts=[TextPart("done")])
 
     features = workspace_features("instruction-owner", workspace=Workspace.load(tmp_path))
-    features.capability(ExecutionCapability(
-        retain_history=True, commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync(),
-    ), scope="runtime")
+    configure_execution(features, retain_history=True, commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync())
     features.agent("reader", model="default", allow_tools=())
     storage = PersistenceStorage.in_memory(
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if terminal else None,

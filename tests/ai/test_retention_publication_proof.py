@@ -117,7 +117,7 @@ async def test_closed_public_results_reuse_proof_across_runtime(tmp_path, monkey
         principal = runtime.default_principal
         execution_id = result.execution_id
         await runtime.sessions.create_turn_session("s", principal=principal)
-        turn = await runtime.sessions.start("s", "canonical input", agent="default",
+        turn = await runtime.sessions.start_turn("s", "canonical input", agent="default",
                                             principal=principal, idempotency_key="turn")
         assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
 

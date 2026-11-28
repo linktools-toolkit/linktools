@@ -14,7 +14,6 @@ from pydantic_ai.messages import ModelResponse, TextPart
 import linktools.ai.runtime._session as session_module
 from linktools.ai.core import ExecutionContext, ExecutionLineageKind, ExecutionStatus, HmacCursorSigner, Principal, TenantAuthorizationPolicy, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ExecutionCapability
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage, PersistencePlan
 from linktools.ai.runtime import Runtime, RuntimeFeatures, RuntimeSessions
 from linktools.ai.storage import StorageRoute
@@ -178,8 +177,7 @@ def _native_features():
     async def answer(_messages, _info):
         return ModelResponse(parts=[TextPart("answer")])
 
-    group = RuntimeFeatures("display")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group = RuntimeFeatures("display", defaults={"execution": {"retain_history": True}})
     group.agent("default", model="default", allow_tools=())
     return model_features(_Models(_UsageFunctionModel(answer)), group)
 
@@ -193,7 +191,7 @@ async def test_native_session_inspect_skips_body_sql_and_refresh_is_authoritativ
     ) as runtime:
         await runtime.sessions.create_turn_session("session", principal=_PRINCIPAL)
         if body:
-            turn = await runtime.sessions.start(
+            turn = await runtime.sessions.start_turn(
                 "session", "first", principal=_PRINCIPAL, agent="default", idempotency_key="turn-1",
             )
             assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
@@ -419,7 +417,7 @@ async def test_display_cache_facade_passes_max_age_to_custom_service():
         async def refresh(self, session_id, *, principal, cursor, limit, max_age):
             calls.append((session_id, principal, cursor, limit, max_age))
             return "custom"
-    facade = RuntimeSessions(Custom(), object(), start_session=None, bind_session=None, ensure_open=lambda: None)
+    facade = RuntimeSessions(Custom(), object(), bind_session=None, ensure_open=lambda: None)
     assert await facade.refresh("session", principal=_PRINCIPAL, max_age=0) == "custom"
     assert await facade.refresh("session", principal=_PRINCIPAL, max_age=3) == "custom"
     assert calls == [("session", _PRINCIPAL, None, 100, 0), ("session", _PRINCIPAL, None, 100, 3)]
@@ -870,8 +868,7 @@ async def test_runtime_factory_does_not_stale_native_or_nondurable_display(tmp_p
         storage = PersistenceStorage.in_memory(cache=cache)
     else:
         storage = PersistenceStorage.from_plan(PersistencePlan(execution=StorageRoute.transient(cache=cache)))
-    group = RuntimeFeatures[None]("display")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group = RuntimeFeatures[None]("display", defaults={"execution": {"retain_history": True}})
     group.agent("agent", model="default", allow_tools=())
     async with Persistence.open('display', storage=storage, tenant_id='tenant') as persistence_824, Runtime.open(persistence=persistence_824, features=model_features(_Models(TestModel()), group), context=ExecutionContext(None), authorization=_HostAuthorization()) as runtime:
         if retention == "durable":
@@ -970,8 +967,7 @@ async def test_runtime_close_drains_display_io_after_close_waiter_cancellation(m
 
     cache = _Cache()
     storage = PersistenceStorage.in_memory(cache=cache)
-    group = RuntimeFeatures[None]("display")
-    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group = RuntimeFeatures[None]("display", defaults={"execution": {"retain_history": True}})
     group.agent("agent", model="default", allow_tools=())
     entered, release, exited = asyncio.Event(), asyncio.Event(), asyncio.Event()
     method = getattr(cache, phase)
@@ -1168,7 +1164,7 @@ async def test_persistence_owns_record_cache_publication_beyond_runtime_close(tm
     cache = BlockingRecordCache()
     async with Persistence.open("display", storage=PersistenceStorage.sqlite(tmp_path / "record.db", cache=cache),
                                 tenant_id="tenant") as persistence:
-        async with Runtime.open(features=RuntimeFeatures(), persistence=persistence, auto_recover=False):
+        async with Runtime.open(features=RuntimeFeatures(), persistence=persistence):
             await persistence.execution.executions.create_execution(replace(
                 _execution("independent", status=ExecutionStatus.PENDING_START, prompt="record cache owner"),
                 session_id=None, lineage_kind=ExecutionLineageKind.RUN,

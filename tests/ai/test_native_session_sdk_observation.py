@@ -74,8 +74,8 @@ async def test_native_sdk_callback_captures_fast_tool_and_terminal_before_wait(
             return await wait_observed(turn, observer, **options)
 
         monkeypatch.setattr(_NativeSessionTurn, "_wait_observed", wait_after_terminal)
-        run = runtime.agents.get().run
-        options = dict(session_id="chat", principal=principal, idempotency_key="one", on_event=observe)
+        run = runtime.agents.get().session("chat").run
+        options = dict(principal=principal, idempotency_key="one", on_event=observe)
         result = await run("private prompt", **options)
         assert result.result.status is ExecutionStatus.SUCCEEDED
         key = result.result.key
@@ -117,10 +117,10 @@ async def test_native_sdk_callback_exception_does_not_cancel_turn(tmp_path: Path
         principal = await _open_chat(runtime)
         agent = runtime.agents.get()
         with pytest.raises(ObservationError) as error:
-            await agent.run("question", session_id="chat", principal=principal, idempotency_key="one",
+            await agent.session("chat").run("question", principal=principal, idempotency_key="one",
                             on_event=observer, raise_on_stream_error=strict, close_timeout_seconds=1.0)
         assert error.value.origin == "callback" and isinstance(error.value.__cause__, RuntimeError)
-        resumed = await agent.start("question", session_id="chat", principal=principal, idempotency_key="one")
+        resumed = await agent.session("chat").start("question", principal=principal, idempotency_key="one")
         assert (await resumed.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
     assert len(calls) == 2
 
@@ -152,8 +152,8 @@ async def test_native_sdk_callback_gap_obeys_stream_error_policy(
                         authorization=_SessionAuthorization()) as (runtime, _persistence, _steps):
         principal = await _open_chat(runtime)
         agent = runtime.agents.get()
-        running = asyncio.create_task(agent.run(
-            "question", session_id="chat", principal=principal, idempotency_key="one", on_event=observer,
+        running = asyncio.create_task(agent.session("chat").run(
+            "question", principal=principal, idempotency_key="one", on_event=observer,
             raise_on_stream_error=strict, timeout_seconds=10,
         ))
         try:
@@ -172,7 +172,7 @@ async def test_native_sdk_callback_gap_obeys_stream_error_policy(
             if not running.done():
                 running.cancel()
                 await asyncio.gather(running, return_exceptions=True)
-        turn = await agent.start("question", session_id="chat", principal=principal, idempotency_key="one")
+        turn = await agent.session("chat").start("question", principal=principal, idempotency_key="one")
         assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
     assert len(calls) == 2
 
@@ -194,7 +194,7 @@ async def test_native_raw_content_is_rejected_before_admission_without_changing_
         principal = await _open_chat(runtime)
         agent = runtime.agents.get()
         with pytest.raises(AIError) as error:
-            await agent.run("question", session_id="chat", principal=principal, idempotency_key="one",
+            await agent.session("chat").run("question", principal=principal, idempotency_key="one",
                             on_event=observer, include_event_content=True)
         assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
         assert error.value.safe_details["field"] == "include_event_content"
@@ -233,8 +233,8 @@ async def test_native_callback_emits_authoritative_terminal_once_without_live_no
     async with _runtime(tmp_path / "missed-notice.db", _model_with_tool(calls), checked,
                         authorization=_SessionAuthorization()) as (runtime, _persistence, _steps):
         principal = await _open_chat(runtime)
-        result = await runtime.agents.get().run(
-            "question", session_id="chat", principal=principal, idempotency_key="one",
+        result = await runtime.agents.get().session("chat").run(
+            "question", principal=principal, idempotency_key="one",
             on_event=observe, raise_on_stream_error=strict, timeout_seconds=10,
         )
         assert result.result.status is ExecutionStatus.SUCCEEDED

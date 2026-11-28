@@ -55,7 +55,6 @@ async def test_hard_killed_native_attempt_marks_its_original_request_interrupted
         ) as state, Runtime.open(
             persistence=state,
             features=model_features(_Models(FunctionModel(stream_function=unused_model)), _capabilities(conversation=False)),
-            auto_recover=False,
         ) as admitted:
             current = await state.execution.executions.get(execution_id, tenant_id="default")
             pending = await admitted._execution_service.runtime_backend()._commit_recovery_resume(current)
