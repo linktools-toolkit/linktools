@@ -526,7 +526,7 @@ must not mutate or restore historical derived ACL/OIDC settings.
 ## Request body limits
 
 Template variable declarations are not mutated; ConfigValue values are resolved
-only when the template reads their key. The shared `nginx/params.conf` template uses an
+only when the template reads their key. The business server template uses an
 explicit `client_max_body_size` key when present, otherwise `1m`, matching
 nginx's native default. The common proxy snippet does not silently raise that
 limit. Configure an individual site's server policy using the existing endpoint
@@ -537,8 +537,9 @@ endpoint(self, domain=domain, proxy="http://app:8080",
          template_vars={"client_max_body_size": "10m"})
 ```
 
-The value applies to the public server and its WAF origin server; the WAF
-forwarding location inherits it. Sites sharing a hostname merge their explicitly
+Without WAF, the public server applies this value. With WAF, the origin applies
+it for both ordinary traffic and explicit bypass routes; the forwarding ingress
+does not enforce a second Nginx body-size limit. Sites sharing a hostname merge their explicitly
 provided template variables by key for the server template. The same key must
 have equal values; different keys coexist and omitted keys do not participate.
 For example, an omitted limit and `10m` produce a shared `10m` server limit,
@@ -554,19 +555,20 @@ not mutated. A present key is passed through, so invalid values remain subject
 to native nginx validation. Native location directives still override it, including an
 explicit `0` (no nginx body-size limit). The former proxy-snippet default was
 `10240m`; hostname groups with no explicit limit now use `1m`. Other existing explicit
-location directives remain unchanged. For a larger native location behind WAF,
-the site limit must also admit that request on the forwarding hop; retain lower
-limits explicitly on other locations when raising the site limit. SafeLine and
-the application can impose their own limits; this setting does not disable or
-bypass WAF inspection.
+location directives remain unchanged. Raising a single business location's
+limit does not require raising another Nginx limit on the forwarding ingress.
+SafeLine and the application can impose their own limits; this setting does not
+change how much of a request body SafeLine inspects.
 
 ## Shared server defaults
 
-`nginx/params.conf` defines request-body limits, request/response buffering,
-cache policy, body-buffer size, and proxy/client timeouts with ordinary
-`template_vars.get(...)` defaults. Each business server and WAF origin includes
-it once. Override a shared default through the existing template variables;
-keep path-specific native directives inside their locations.
+`nginx/params.conf` defines request/response buffering, cache policy, body-buffer
+size, and proxy/client timeouts with ordinary `template_vars.get(...)` defaults.
+A site without WAF uses it once; a site with WAF shares the same site defaults
+between the forwarding ingress and the business origin. Override a shared
+default through the existing template variables; keep path-specific native
+directives inside business locations. A location override at the origin does not
+change the forwarding ingress's timeout, buffering, or cache policy.
 
 Custom templates must remove location-level includes of `nginx/params.conf`.
 Otherwise their local defaults can override the hostname's merged settings,
