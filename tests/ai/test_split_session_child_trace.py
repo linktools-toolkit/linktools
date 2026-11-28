@@ -60,7 +60,7 @@ async def test_cold_split_trace_drops_locked_archive_initialization(tmp_path: Pa
                     agent = runtime.agents.get()
                     principal = runtime.default_principal
                     await agent.create_session("chat", principal=principal)
-                    turn = await runtime.sessions.start(
+                    turn = await runtime.sessions.start_turn(
                         "chat", "Reply", agent=agent, principal=principal, idempotency_key="reply",
                     )
                     assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
@@ -121,7 +121,7 @@ async def test_split_session_trace_preserves_native_leaf_without_enabling_execut
 
         principal = runtime.default_principal
         await agent.create_session("chat", principal=principal)
-        turn = await runtime.sessions.start(
+        turn = await runtime.sessions.start_turn(
             "chat", "Review the entry", agent=agent, principal=principal, idempotency_key="review",
         )
         result = await turn.wait_final(timeout_seconds=10)

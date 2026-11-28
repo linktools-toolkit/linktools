@@ -25,12 +25,12 @@ async def test_lost_response_returns_frozen_input_without_rebuilding_context(tmp
         principal = runtime.default_principal
         await agent.create_session("conversation", principal=principal)
         prompt = '{"question":"q","context_revision":1}'
-        execution = await runtime.sessions.start(
+        execution = await runtime.sessions.start_turn(
             "conversation", prompt, agent=agent, principal=principal, idempotency_key="request-1",
         )
         assert (await execution.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
         with pytest.raises(AIError) as conflict:
-            await runtime.sessions.start(
+            await runtime.sessions.start_turn(
                 "conversation", '{"question":"q","context_revision":2}', agent=agent,
                 principal=principal, idempotency_key="request-1",
             )
@@ -113,7 +113,7 @@ async def test_lookup_survives_persistence_reopen(tmp_path):
         agent = runtime.agents.get()
         principal = runtime.default_principal
         await agent.create_session("conversation", principal=principal)
-        execution = await runtime.sessions.start(
+        execution = await runtime.sessions.start_turn(
             "conversation", "frozen input", agent=agent, principal=principal, idempotency_key="request",
         )
         assert (await execution.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
@@ -201,7 +201,7 @@ async def test_unavailable_native_admission_read_does_not_settle_or_report_absen
         principal = runtime.default_principal
         await runtime.agents.get().create_session("conversation", principal=principal)
         block()
-        turn = await runtime.sessions.start(
+        turn = await runtime.sessions.start_turn(
             "conversation", "input", agent="default", principal=principal, idempotency_key="request",
         )
         await asyncio.wait_for(entered.wait(), 5)
@@ -284,7 +284,7 @@ async def test_receipt_wins_when_remote_turn_finishes_during_lookup(tmp_path, mo
         reader, state = runtimes[1]
         await owner.agents.get().create_session("conversation", principal=owner.default_principal)
         block()
-        turn = await owner.sessions.start(
+        turn = await owner.sessions.start_turn(
             "conversation", "frozen input", agent="default", principal=owner.default_principal,
             idempotency_key="request",
         )
@@ -429,7 +429,7 @@ async def test_remote_pending_refresh_does_not_materialize_an_absent_execution(t
         reader, storage = runtimes[1]
         session = await owner.agents.get().create_session("pending-refresh", principal=owner.default_principal)
         block()
-        turn = await owner.sessions.start(
+        turn = await owner.sessions.start_turn(
             session.session_id, "pending input", agent="default", principal=owner.default_principal,
             idempotency_key="request",
         )

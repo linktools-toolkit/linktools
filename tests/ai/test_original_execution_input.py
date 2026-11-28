@@ -142,7 +142,7 @@ async def test_original_input_reopens_while_session_metadata_remains_live(tmp_pa
         return model_features(_Models(_UsageFunctionModel(model)), value)
 
     async def start(runtime):
-        return await runtime.sessions.start(
+        return await runtime.sessions.start_turn(
             "session", ["original request", _reference()], agent="default", principal=principal,
             idempotency_key="inspect-original",
         )

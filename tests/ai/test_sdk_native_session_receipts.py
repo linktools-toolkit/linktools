@@ -157,7 +157,7 @@ async def test_native_inactivity_rechecks_remote_sqlite_without_notice_bridge(tm
     ):
         caller = producer.default_principal
         await producer.sessions.create_turn_session("chat", principal=caller)
-        turn = await producer.sessions.start(
+        turn = await producer.sessions.start_turn(
             "chat", "remote", agent="default", principal=caller, idempotency_key="send",
         )
         await entered.wait()

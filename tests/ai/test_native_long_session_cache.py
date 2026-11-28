@@ -64,7 +64,7 @@ async def test_adjacent_long_turns_do_not_reload_warm_sql_history(tmp_path, monk
         for turn_no in range(1, 7):
             captures.clear()
             prompt = f"turn-{turn_no}"
-            turn = await runtime.sessions.start("chat", prompt, agent="default", principal=owner,
+            turn = await runtime.sessions.start_turn("chat", prompt, agent="default", principal=owner,
                                                idempotency_key=prompt)
             assert (await turn.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
         assert [value for value, _ in offered] == [

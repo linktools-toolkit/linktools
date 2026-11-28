@@ -92,7 +92,7 @@ async def test_handoff_recovers_same_execution_and_next_session_turn(handoff_sto
     ):
         principal = owner.default_principal
         await owner.sessions.create_turn_session("session", principal=principal)
-        turn = await owner.sessions.start(
+        turn = await owner.sessions.start_turn(
             "session", "Remember blue", agent="default", principal=principal, idempotency_key="first",
         )
         await asyncio.wait_for(entered.wait(), 10)
@@ -126,11 +126,11 @@ async def test_handoff_recovers_same_execution_and_next_session_turn(handoff_sto
         assert await successor.sessions.recover_turn("session", turn.key.turn_id, mode="resume", principal=principal)
         after = await successor.history.turn_result("session", turn.key.turn_id, principal=principal)
         assert after["status"] == "SUCCEEDED" and after["output"] == {"text": "blue"}
-        replay = await successor.sessions.start(
+        replay = await successor.sessions.start_turn(
             "session", "Remember blue", agent="default", principal=principal, idempotency_key="first",
         )
         assert replay.key == turn.key and len(observed) == 1
-        following = await successor.sessions.start(
+        following = await successor.sessions.start_turn(
             "session", "What colour?", agent="default", principal=principal, idempotency_key="next",
         )
         assert (await following.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED

@@ -54,9 +54,9 @@ async def test_canonical_deferred_outcome_uses_original_turn_and_pending_leaf(
     async with _runtime(database, model, checked, authorization=policy) as (runtime, persistence, steps):
         principal = Principal("deferred-operator", runtime.tenant_id)
         await runtime.sessions.create_turn_session("chat", principal=principal)
-        turn_id = await runtime.sessions.start_turn(
+        turn_id = (await runtime.sessions.start_turn(
             "chat", "question", agent="default", principal=principal, idempotency_key="original",
-        )
+        )).key.turn_id
         key = SessionTurnKey("chat", turn_id)
         turns = persistence.session_turns
         async def read_pause():
@@ -108,7 +108,7 @@ async def test_canonical_deferred_outcome_uses_original_turn_and_pending_leaf(
             )
             settle = runtime.external_calls.supply
             conflict = ErrorCode.EXTERNAL_RESULT_CONFLICT
-        turn = await runtime.sessions.start(
+        turn = await runtime.sessions.start_turn(
             "chat", "question", agent="default", principal=principal, idempotency_key="original",
         )
         assert turn.key == key
@@ -183,7 +183,7 @@ async def test_stop_parked_canonical_turn_withdraws_original_pending_effect(
     async with _runtime(database, model, checked, authorization=policy) as (runtime, persistence, steps):
         principal = Principal("deferred-operator", runtime.tenant_id)
         await runtime.sessions.create_turn_session("chat", principal=principal)
-        turn = await runtime.sessions.start(
+        turn = await runtime.sessions.start_turn(
             "chat", "question", agent="default", principal=principal, idempotency_key="parked",
         )
         key = turn.key

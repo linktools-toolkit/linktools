@@ -65,9 +65,9 @@ async def test_split_declarative_approval_requires_a_trusted_resolution(tmp_path
             frames: asyncio.Queue[dict] = asyncio.Queue()
             detach = runtime.sessions.observe_turn_session("chat", frames.put_nowait)
             try:
-                turn_id = await runtime.sessions.start_turn(
+                turn_id = (await runtime.sessions.start_turn(
                     "chat", "look up a fixture", agent="default", principal=principal, idempotency_key="first",
-                )
+                )).key.turn_id
                 async with asyncio.timeout(10):
                     while (frame := await frames.get())["type"] not in ("waiting", "terminal"):
                         pass

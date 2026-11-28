@@ -56,13 +56,13 @@ async def _window_host(tmp_path):
 async def test_window_matches_counter_and_page(tmp_path, count, pending):
     async with _window_host(tmp_path) as (state, runtime, principal, waiting, proceed):
         for index in range(count):
-            turn = await runtime.sessions.start(
+            turn = await runtime.sessions.start_turn(
                 "session", f"turn-{index}", agent="default", principal=principal, idempotency_key=f"key-{index}",
             )
             assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
         active = None
         if pending:
-            active = await runtime.sessions.start(
+            active = await runtime.sessions.start_turn(
                 "session", "pending", agent="default", principal=principal, idempotency_key="key-pending",
             )
             await asyncio.wait_for(waiting.wait(), 5)
@@ -109,7 +109,7 @@ async def test_window_matches_counter_and_page(tmp_path, count, pending):
 @pytest.mark.parametrize("damage", ("missing-transcript", "wrong-root", "bad-binding-ref", "bad-output-position"))
 async def test_window_keeps_corruption_checks(tmp_path, damage):
     async with _window_host(tmp_path) as (state, runtime, principal, _waiting, _proceed):
-        turn = await runtime.sessions.start(
+        turn = await runtime.sessions.start_turn(
             "session", "turn", agent="default", principal=principal, idempotency_key="key",
         )
         assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED

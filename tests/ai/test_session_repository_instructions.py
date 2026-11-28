@@ -108,7 +108,7 @@ async def test_native_session_reads_new_scope_on_first_call_and_loads_rules(tmp_
         agent = runtime.agents.get("reader")
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=principal, idempotency_key="create")
-        turn = await runtime.sessions.start(
+        turn = await runtime.sessions.start_turn(
             "session", "Read the file", agent=agent, principal=principal, idempotency_key="once",
         )
         assert (await turn.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
@@ -161,7 +161,7 @@ async def test_native_workspace_approval_resumes_after_sibling_discovers_rules(t
         principal = Principal("operator", runtime.tenant_id)
         agent = runtime.agents.get("reader")
         await agent.create_session("session", principal=principal)
-        turn = await runtime.sessions.start(
+        turn = await runtime.sessions.start_turn(
             "session", "Read the file", agent=agent, principal=principal, idempotency_key="once",
         )
         assert (await asyncio.wait_for(turn.wait(), timeout=10)).status is ExecutionStatus.WAITING_DEFERRED
@@ -236,7 +236,7 @@ async def test_session_reloads_known_scopes_before_first_model_request(
         initial_rule, discovery_rule, forbidden_rules = initial, discover, absent
         if native:
             try:
-                handle = await runtime.sessions.start(
+                handle = await runtime.sessions.start_turn(
                     session_id, name, agent="reader", principal=runtime.default_principal, idempotency_key=name,
                 )
             except AIError as error:
@@ -315,7 +315,7 @@ async def test_session_reloads_known_scopes_before_first_model_request(
                     model_features(_Models(_UsageFunctionModel(model_without_tools)), configured)
                     async with Runtime.open(persistence=reopened, features=configured, **auth) as runtime:
                         with pytest.raises(AIError) as rejected:
-                            await runtime.sessions.start(
+                            await runtime.sessions.start_turn(
                                 "session", "split Step reopen", agent="reader", principal=runtime.default_principal,
                                 idempotency_key="split-step-reopen",
                             )
@@ -501,7 +501,7 @@ async def test_session_execution_recovery_keeps_pinned_instructions_and_permissi
             persistence=persistence, features=features, authorization=_HostAuthorization(),
         ) as runtime:
             await runtime.agents.get("reader").create_session("session", principal=principal)
-            turn = await runtime.sessions.start(
+            turn = await runtime.sessions.start_turn(
                 "session", "read", agent="reader", principal=principal, idempotency_key="read-once",
             )
             assert (await asyncio.wait_for(turn.wait(), timeout=10)).status is ExecutionStatus.WAITING_DEFERRED
@@ -514,7 +514,7 @@ async def test_session_execution_recovery_keeps_pinned_instructions_and_permissi
             [approval] = await recovered.approvals.list(turn.key, principal=principal)
             assert approval.approval_id == waiting.approval_id
             assert requests == pause_requests
-            attached = await recovered.sessions.start(
+            attached = await recovered.sessions.start_turn(
                 "session", "read", agent="reader", principal=principal, idempotency_key="read-once",
             )
             assert attached.key == turn.key
@@ -617,7 +617,7 @@ async def test_attachment_scopes_are_in_first_request_and_sources_are_deduplicat
                 prompt = ("inspect", WorkspaceFileInput("pkg/file.txt")) if entry != "files" else "inspect"
                 files = ("pkg/file.txt",) if entry != "inline" else ()
                 if native:
-                    handle = await runtime.sessions.start(
+                    handle = await runtime.sessions.start_turn(
                         "session", prompt, agent=agent, principal=runtime.default_principal,
                         idempotency_key="attachment", files=files,
                     )
@@ -844,7 +844,7 @@ async def test_concurrent_runtime_initial_scope_discovery_preserves_same_request
         principal = runtimes[0].default_principal
         await runtimes[0].agents.get("reader").create_session("session", principal=principal)
         handles = await asyncio.gather(*(
-            runtime.sessions.start("session", "same", agent="reader", principal=principal, idempotency_key="same-key")
+            runtime.sessions.start_turn("session", "same", agent="reader", principal=principal, idempotency_key="same-key")
             for runtime in runtimes
         ))
         assert handles[0].key == handles[1].key

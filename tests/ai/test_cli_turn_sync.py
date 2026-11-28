@@ -68,9 +68,9 @@ async def _produce(project: Path, mode: str) -> None:
 
                 principal = local.runtime.default_principal
                 with TurnObserver(local.runtime, "session", principal, local_workspace=True) as observer:
-                    turn_id = await local.runtime.sessions.start_turn(
+                    turn_id = (await local.runtime.sessions.start_turn(
                         "session", prompt, agent="default", principal=principal, idempotency_key="produce",
-                    )
+                    )).key.turn_id
                     async with asyncio.timeout(15):
                         async for result in observer.events(turn_id):
                             if result["type"] == "terminal":

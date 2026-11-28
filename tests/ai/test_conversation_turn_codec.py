@@ -132,7 +132,7 @@ async def test_snapshot_roundtrips_turn_references_and_native_payload_owners(
     ):
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=principal)
-        turn = await runtime.sessions.start(
+        turn = await runtime.sessions.start_turn(
             "session", ("original input", BinaryContent(attachment, media_type="text/plain")),
             agent="default", principal=principal, idempotency_key="capture", output=_CanonicalOutput,
         )

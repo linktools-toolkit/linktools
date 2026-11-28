@@ -316,7 +316,7 @@ async def test_native_session_terminal_archive_retains_ordered_tool_history_with
     ):
         actor = Principal("fixture-owner", runtime.tenant_id)
         await runtime.sessions.create_turn_session("session", principal=actor)
-        turn = await runtime.sessions.start("session", "inspect", principal=actor, agent="default",
+        turn = await runtime.sessions.start_turn("session", "inspect", principal=actor, agent="default",
                                             idempotency_key="turn")
         assert (await turn.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
         assert await state.execution.executions.get(turn.key.turn_id, tenant_id=actor.tenant_id) is None
@@ -335,7 +335,7 @@ async def test_native_session_terminal_archive_retains_ordered_tool_history_with
         )
         assert (tool_return["tool_name"], tool_return["value"]) == ("lookup", "tool-result")
         assert result["conversation_committed"]
-        replay = await runtime.sessions.start("session", "inspect", principal=actor, agent="default",
+        replay = await runtime.sessions.start_turn("session", "inspect", principal=actor, agent="default",
                                               idempotency_key="turn")
         assert replay.key == turn.key
         assert (await replay.wait_final(timeout_seconds=5)).view == result

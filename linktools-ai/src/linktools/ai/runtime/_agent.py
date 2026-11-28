@@ -380,15 +380,13 @@ class Agent(Generic[AppT]):
                 if input_context is not None:
                     raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "input_context"})
                 actor = self._runtime._resolve_principal(principal)
-                session = sessions._bind_native_session(session_id, principal=actor, local_workspace=False)
-                receipt = await sessions._start_turn_receipt(
+                return await sessions.start_turn(
                     session_id, user_prompt, agent=self, principal=actor,
                     idempotency_key=secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
                     files=files, session_context=session_context, budget=budget, output=output,
                     mode=mode, planning=planning,
                     thinking=thinking, correlation=correlation,
                 )
-                return replace(session._turn(receipt.turn_id, actor), _replayed=receipt.replayed)
         return await self.execution_port.start(
             validate_user_input(user_prompt), files=files, session_context=session_context,
             budget=budget, output=output, principal=principal, session_id=session_id,

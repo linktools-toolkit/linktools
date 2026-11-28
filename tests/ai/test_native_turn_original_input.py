@@ -53,12 +53,12 @@ async def test_native_same_store_tool_sees_original_admitted_scalar(tmp_path, mo
         await runtime.sessions.create_turn_session("chat", principal=principal)
         if not scalar:
             with pytest.raises(AIError) as rejected:
-                await runtime.sessions.start("chat", scalar, agent="default", principal=principal,
+                await runtime.sessions.start_turn("chat", scalar, agent="default", principal=principal,
                                              idempotency_key="admit")
             assert rejected.value.code is ErrorCode.REQUEST_FIELD_INVALID
             assert not contexts
             return
-        turn = await runtime.sessions.start("chat", scalar, agent="default", principal=principal,
+        turn = await runtime.sessions.start_turn("chat", scalar, agent="default", principal=principal,
                                             idempotency_key="admit")
         if mode == "reopen":
             assert (await turn.wait()).status is ExecutionStatus.WAITING_DEFERRED
@@ -71,7 +71,7 @@ async def test_native_same_store_tool_sees_original_admitted_scalar(tmp_path, mo
             await runtime.approvals.decide(turn.key, ApprovalDecisionRequest(
                 principal, approval.approval_id, "approve", ApprovalDecision.APPROVE,
             ))
-            recovered = await runtime.sessions.start("chat", scalar, agent="default", principal=principal,
+            recovered = await runtime.sessions.start_turn("chat", scalar, agent="default", principal=principal,
                                                      idempotency_key="admit")
             assert recovered.key == turn.key
             assert (await recovered.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED

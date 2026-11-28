@@ -173,7 +173,7 @@ async def test_runtime_history_session_reader_live_and_readonly_share_bounded_sq
         runtime, _ = runtimes[0]
         principal = runtime.default_principal
         await runtime.agents.get().create_session("session", principal=principal)
-        turn = await runtime.sessions.start(
+        turn = await runtime.sessions.start_turn(
             "session", "question", agent="default", principal=principal, idempotency_key="request",
         )
         result = await turn.wait_final(timeout_seconds=5)
@@ -236,7 +236,7 @@ async def test_runtime_history_session_reader_observes_native_occupancy_and_term
         async with reader_context as reader:
             assert (await reader.turn_session("session", principal=principal))["timeline"]["items"] == []
             block()
-            turn = await owner.sessions.start(
+            turn = await owner.sessions.start_turn(
                 "session", "pending question", agent="default", principal=principal, idempotency_key="pending",
             )
             await asyncio.wait_for(entered.wait(), 5)
@@ -360,7 +360,7 @@ async def test_runtime_history_session_reader_independent_terminal_commit_is_aut
         principal = runtime.default_principal
         await runtime.agents.get().create_session("session", principal=principal)
         block()
-        turn = await runtime.sessions.start(
+        turn = await runtime.sessions.start_turn(
             "session", "question", agent="default", principal=principal, idempotency_key="request",
         )
         await asyncio.wait_for(entered.wait(), 5)

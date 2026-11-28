@@ -60,7 +60,7 @@ async def test_interrupted_turn_retains_the_request_for_continue(tmp_path, state
         runtime = await open_runtime(stack)
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=principal)
-        first = await runtime.sessions.start(
+        first = await runtime.sessions.start_turn(
             "session", "Inspect my files", agent="default", principal=principal, idempotency_key="inspect",
         )
         if state == "cancelled":
@@ -73,7 +73,7 @@ async def test_interrupted_turn_retains_the_request_for_continue(tmp_path, state
             await stack.aclose()
             runtime = await open_runtime(stack)
             principal = runtime.default_principal
-        second = await runtime.sessions.start(
+        second = await runtime.sessions.start_turn(
             "session", "Continue", agent="default", principal=principal, idempotency_key="continue",
         )
         result = await second.wait_final(timeout_seconds=5)

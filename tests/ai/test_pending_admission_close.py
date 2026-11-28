@@ -68,7 +68,7 @@ async def test_native_close_drains_committed_admission_after_caller_cancellation
         with monkeypatch.context() as patch:
             patch.setattr(turns, "accept", hold_committed_admission)
             principal = runtime.default_principal
-            sending = asyncio.create_task(runtime.sessions.start(
+            sending = asyncio.create_task(runtime.sessions.start_turn(
                 "session", "question", agent=runtime.agents.get(),
                 principal=principal, idempotency_key="request",
             ))
@@ -107,7 +107,7 @@ async def test_native_close_drains_committed_admission_after_caller_cancellation
 
     async with Persistence.open(name, storage=storage) as state, open_runtime(state) as reopened:
         principal = reopened.default_principal
-        duplicate = await reopened.sessions.start(
+        duplicate = await reopened.sessions.start_turn(
             "session", "question", agent=reopened.agents.get(), principal=principal, idempotency_key="request",
         )
         assert duplicate.key == key and calls == 0

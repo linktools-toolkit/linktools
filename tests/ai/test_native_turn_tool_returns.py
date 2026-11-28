@@ -63,7 +63,7 @@ async def test_native_tool_returns_require_exact_grant_and_owner(tmp_path, monke
             await runtime.sessions.create_turn_session(session, principal=owner)
         turns = []
         for key in ("first", "next"):
-            turn = await runtime.sessions.start("chat", key, agent="default", principal=owner, idempotency_key=key)
+            turn = await runtime.sessions.start_turn("chat", key, agent="default", principal=owner, idempotency_key=key)
             assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
             turns.append(turn.key.turn_id)
         policy.allowed_turn, excluded_turn = turns

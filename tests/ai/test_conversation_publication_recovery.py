@@ -66,7 +66,7 @@ async def _host(storage, calls, effects):
 
 
 async def _send(runtime, prompt, request_id):
-    return await runtime.sessions.start(
+    return await runtime.sessions.start_turn(
         _SESSION, prompt, principal=runtime.default_principal,
         agent=runtime.agents.get(), idempotency_key=request_id,
     )

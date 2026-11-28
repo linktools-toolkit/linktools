@@ -53,7 +53,7 @@ async def _open(path, model, *, retain=False, backend="sqlite", cache=None, comm
 
 
 async def _start(runtime, prompt, key, *, session_id="session"):
-    return await runtime.sessions.start(
+    return await runtime.sessions.start_turn(
         session_id, prompt, principal=_OWNER, agent=runtime.agents.get(), idempotency_key=key,
     )
 

@@ -564,9 +564,9 @@ async def test_reopened_console_preserves_history_and_hides_unavailable_resource
 
             unsubscribe = runtime.sessions.observe_turn_session("visible", observe)
             try:
-                visible_turn = await runtime.sessions.start_turn(
+                visible_turn = (await runtime.sessions.start_turn(
                     "visible", "visible message", agent="default", principal=principal, idempotency_key="visible",
-                )
+                )).key.turn_id
                 await asyncio.wait_for(terminal.wait(), 5)
             finally:
                 unsubscribe()
@@ -773,9 +773,9 @@ async def test_read_only_history_requires_no_model_and_never_opens_runtime(tmp_p
 
         unsubscribe = runtime.sessions.observe_turn_session("session", observe)
         try:
-            turn_id = await runtime.sessions.start_turn(
+            turn_id = (await runtime.sessions.start_turn(
                 "session", "saved", agent="default", principal=principal, idempotency_key="send",
-            )
+            )).key.turn_id
             await asyncio.wait_for(terminal.wait(), 5)
         finally:
             unsubscribe()
@@ -1871,9 +1871,9 @@ async def test_chat_tool_failure_uses_exact_model_response_without_durable_audit
             "failures", local_frames.append, local_tool_feedback=True,
         )
         with TurnObserver(runtime, "failures", principal, local_workspace=True) as observer:
-            turn_id = await runtime.sessions.start_turn(
+            turn_id = (await runtime.sessions.start_turn(
                 "failures", "lookup", principal=principal, agent="default", idempotency_key="turn",
-            )
+            )).key.turn_id
             try:
                 async with asyncio.timeout(10):
                     async for frame in observer.events(turn_id):

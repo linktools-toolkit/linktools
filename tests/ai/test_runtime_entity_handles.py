@@ -191,7 +191,7 @@ async def test_session_mutation_binds_the_admitted_view_without_another_read(ope
     view = SimpleNamespace(agent_id="default", session_id="accepted")
     service = SimpleNamespace(**{operation: AsyncMock(side_effect=failure if unknown else None, return_value=view)})
     observe = AsyncMock(side_effect=AssertionError("mutation must not start another observation"))
-    facade = RuntimeSessions(service, observe, start_session=None, bind_session=lambda value, principal: Session(
+    facade = RuntimeSessions(service, observe, bind_session=lambda value, principal: Session(
         None, value.agent_id, None, value.session_id, principal,
     ))
     request = facade.create("default", CreateSessionRequest(actor, "accepted", "create")) if operation == "create" else (

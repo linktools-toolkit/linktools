@@ -128,7 +128,7 @@ async def test_sql_runtime_session_admission_remains_independent(
     features = model_features(_Models(FunctionModel(stream_function=model)), features)
 
     async def start(runtime, session_id, prompt, key):
-        return await runtime.sessions.start(
+        return await runtime.sessions.start_turn(
             session_id, prompt, agent=runtime.agents.get("default"),
             principal=runtime.default_principal, idempotency_key=key,
         )

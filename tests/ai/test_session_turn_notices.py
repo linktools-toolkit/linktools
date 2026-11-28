@@ -71,10 +71,10 @@ async def test_observe_turns_follows_owned_boundaries(tmp_path: Path, backend: s
             unsubscribe_lifecycle = sessions.observe_turn_lifecycle(lifecycle.append)
             unsubscribe_frames = sessions.observe_turn_session("session", frames.append)
             try:
-                turn = await sessions.start("session", "ask", agent="default", principal=principal, idempotency_key="turn")
+                turn = await sessions.start_turn("session", "ask", agent="default", principal=principal, idempotency_key="turn")
                 result = await turn.wait_final(timeout_seconds=10)
                 assert result.view["output"] == {"text": "answer"}
-                replay = await sessions.start("session", "ask", agent="default", principal=principal, idempotency_key="turn")
+                replay = await sessions.start_turn("session", "ask", agent="default", principal=principal, idempotency_key="turn")
                 assert replay.key == turn.key
                 assert [item["phase"] for item in lifecycle] == ["admitted", "terminal"]
                 assert {item["turn_id"] for item in lifecycle} == {turn.key.turn_id}
@@ -106,9 +106,9 @@ async def test_observe_turns_follows_owned_boundaries(tmp_path: Path, backend: s
         unsubscribe_failed = runtime.sessions.observe_turns(fail)
         notices: list[SessionTurnNotice] = []
         unsubscribe = runtime.sessions.observe_turns(handler=notices.append)
-        turn = await runtime.sessions.start("session", "ask", principal=principal, idempotency_key="turn")
+        turn = await runtime.executions.start_in_session("session", "ask", principal=principal, idempotency_key="turn")
         assert (await turn.wait(timeout_seconds=10)).result.output == {"text": "answer"}
-        replay = await runtime.sessions.start("session", "ask", principal=principal, idempotency_key="turn")
+        replay = await runtime.executions.start_in_session("session", "ask", principal=principal, idempotency_key="turn")
         assert replay.execution_id == turn.execution_id
         assert [notice.kind for notice in notices] == ["admitted", "tool", "tool", "terminal"]
         assert {(notice.session_id, notice.execution_id) for notice in notices} == {("session", turn.execution_id)}
@@ -144,7 +144,7 @@ async def test_explicit_same_id_recovery_notifies_terminal_once_without_new_admi
         actor = runtime.default_principal
         sessions = runtime.sessions
         await sessions.create_turn_session("session", principal=actor)
-        turn = await sessions.start("session", "ask", agent="default", principal=actor, idempotency_key="turn")
+        turn = await sessions.start_turn("session", "ask", agent="default", principal=actor, idempotency_key="turn")
         await asyncio.wait_for(entered.wait(), 10)
         rejected_notices = []
         unsubscribe = sessions.observe_turn_lifecycle(rejected_notices.append)
@@ -166,7 +166,7 @@ async def test_explicit_same_id_recovery_notifies_terminal_once_without_new_admi
         unsubscribe_frames = sessions.observe_turn_session("session", frames.append)
         try:
             assert await sessions.recover_turn("session", turn.key.turn_id, mode="resume", principal=actor)
-            replay = await sessions.start("session", "ask", agent="default", principal=actor, idempotency_key="turn")
+            replay = await sessions.start_turn("session", "ask", agent="default", principal=actor, idempotency_key="turn")
             assert replay.key == turn.key
             result = await replay.wait_final(timeout_seconds=10)
             assert result.view["output"] == {"text": "recovered answer"}

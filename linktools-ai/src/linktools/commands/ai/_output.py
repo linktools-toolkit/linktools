@@ -75,10 +75,11 @@ async def _emit_session_result(
     turn_id = None
     try:
         with TurnObserver(runtime, session_id, principal, local_workspace=True, preview=not as_json) as observer:
-            turn_id = await runtime.sessions.start_turn(
+            turn = await runtime.sessions.start_turn(
                 session_id, prompt, agent="default", principal=principal,
                 idempotency_key=token_urlsafe(9), thinking=thinking,
             )
+            turn_id = turn.key.turn_id
             async for frame in observer.events(turn_id):
                 kind = frame["type"]
                 if kind == "terminal":

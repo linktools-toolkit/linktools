@@ -95,10 +95,10 @@ async def test_web_structured_turn_replays_the_validated_output_item(tmp_path, c
         )
         assert duplicate.status_code == 202 and duplicate.json() == {"turn_id": turn_id}
         with pytest.raises(AIError) as conflict:
-            await runtime.sessions.start_turn(
+            (await runtime.sessions.start_turn(
                 "session", "count", agent="default", principal=runtime.default_principal,
                 idempotency_key="run", output=DifferentOutput,
-            )
+            )).key.turn_id
         assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
         assert output_requests == [(1, True)]
 
@@ -157,7 +157,7 @@ async def test_native_structured_preview_is_live_selected_and_replaced_on_valida
         await runtime.sessions.create_turn_session("session", principal=actor)
         frames = []
         with TurnObserver(runtime, "session", actor, local_workspace=False) as observer:
-            turn = await runtime.sessions.start("session", "answer", agent="default", principal=actor,
+            turn = await runtime.sessions.start_turn("session", "answer", agent="default", principal=actor,
                                                 idempotency_key="run", output=Answer)
             try:
                 async with asyncio.timeout(10):

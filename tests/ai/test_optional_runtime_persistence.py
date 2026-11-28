@@ -461,7 +461,7 @@ async def test_remote_native_stop_fences_late_tool_and_releases_session(tmp_path
     ):
         actor = owner.default_principal
         await owner.sessions.create_turn_session("session", principal=actor)
-        held = await owner.sessions.start("session", "held", principal=actor, agent="default", idempotency_key="held")
+        held = await owner.sessions.start_turn("session", "held", principal=actor, agent="default", idempotency_key="held")
         try:
             await asyncio.wait_for(entered.wait(), 5)
             async with (
@@ -470,7 +470,7 @@ async def test_remote_native_stop_fences_late_tool_and_releases_session(tmp_path
             ):
                 assert await observer.sessions.cancel_turn("session", held.key.turn_id, principal=actor)
                 with pytest.raises(AIError) as busy:
-                    await observer.sessions.start("session", "busy", principal=actor, agent="default",
+                    await observer.sessions.start_turn("session", "busy", principal=actor, agent="default",
                                                   idempotency_key="busy")
                 assert busy.value.code is ErrorCode.SESSION_BUSY
                 release.set()
@@ -478,7 +478,7 @@ async def test_remote_native_stop_fences_late_tool_and_releases_session(tmp_path
                 result = await observer.history.turn_result("session", held.key.turn_id, principal=actor)
                 assert result["status"] == "CANCELLED" and result.get("output") is None
                 assert not await remote_state.checkpoint.tools.list_by_execution(held.key.turn_id, tenant_id=actor.tenant_id)
-                next_turn = await observer.sessions.start("session", "next", principal=actor, agent="default",
+                next_turn = await observer.sessions.start_turn("session", "next", principal=actor, agent="default",
                                                           idempotency_key="next")
                 assert (await next_turn.wait_final(timeout_seconds=10)).view["output"] == {"text": "next answer"}
         finally:

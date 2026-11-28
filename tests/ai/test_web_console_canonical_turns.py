@@ -336,7 +336,7 @@ async def test_native_preview_supplies_only_real_positions_and_resets_retried_st
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=principal)
         with TurnObserver(runtime, "session", principal, local_workspace=False) as observer:
-            turn = await runtime.sessions.start(
+            turn = await runtime.sessions.start_turn(
                 "session", "question", agent="default", principal=principal, idempotency_key="one",
             )
             async with asyncio.timeout(5):

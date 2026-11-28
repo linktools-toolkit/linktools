@@ -96,7 +96,7 @@ async def test_pending_unsuccessful_session_commits_actual_result_once_and_reope
     status = ExecutionStatus.CANCELLED if cancelled else ExecutionStatus.FAILED
 
     async def start(runtime, prompt, key):
-        return await runtime.sessions.start(
+        return await runtime.sessions.start_turn(
             "session", prompt, agent=runtime.agents.get(), principal=runtime.default_principal,
             idempotency_key=key,
         )

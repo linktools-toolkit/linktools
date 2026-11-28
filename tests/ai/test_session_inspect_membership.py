@@ -83,7 +83,7 @@ async def test_native_inspection_reads_authoritative_occupancy_without_loading_t
         await sessions.create_turn_session("session", principal=principal)
         turns = runtime._state.session_turns
         if case in {"active", "terminal"}:
-            turn = await sessions.start("session", "private input", agent="default", principal=principal,
+            turn = await sessions.start_turn("session", "private input", agent="default", principal=principal,
                                         idempotency_key="first")
             await asyncio.wait_for(entered.wait(), 5)
             expected_id = turn.key.turn_id
@@ -95,7 +95,7 @@ async def test_native_inspection_reads_authoritative_occupancy_without_loading_t
             if case == "other-session":
                 release.set()
                 await sessions.create_turn_session("other", principal=principal)
-                turn = await sessions.start("other", "private input", agent="default", principal=principal,
+                turn = await sessions.start_turn("other", "private input", agent="default", principal=principal,
                                             idempotency_key="other")
                 assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
                 expected_id = turn.key.turn_id
@@ -154,7 +154,7 @@ async def test_native_inspection_reads_authoritative_occupancy_without_loading_t
                 # must never let a different turn claim the session.
                 before = len(calls)
                 with pytest.raises(AIError) as busy:
-                    await sessions.start("session", "do not dispatch", principal=principal, agent="default",
+                    await sessions.start_turn("session", "do not dispatch", principal=principal, agent="default",
                                          idempotency_key="competing")
                 assert busy.value.code is ErrorCode.SESSION_BUSY and len(calls) == before
                 with pytest.raises(AIError) as missing:

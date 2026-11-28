@@ -61,7 +61,7 @@ class _HostAuthorization(TenantAuthorizationPolicy):
 
 
 async def _start_native(runtime, key):
-    turn = await runtime.sessions.start(
+    turn = await runtime.sessions.start_turn(
         "session", key, agent="default", principal=_PRINCIPAL, idempotency_key=key,
     )
     assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED

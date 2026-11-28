@@ -47,7 +47,7 @@ async def _seed_current_history(path: Path) -> tuple[Principal, str]:
 
 
 async def _run(runtime: Runtime, prompt: str, request_key: str):
-    turn = await runtime.sessions.start(
+    turn = await runtime.sessions.start_turn(
         "session", prompt, agent="default", principal=runtime.default_principal, idempotency_key=request_key,
     )
     result = await turn.wait_final(timeout_seconds=10)

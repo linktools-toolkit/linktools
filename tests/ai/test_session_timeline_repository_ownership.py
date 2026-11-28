@@ -185,11 +185,11 @@ async def test_native_session_metadata_reads_one_snapshot_without_history_bodies
     tmp_path: Path,
 ) -> None:
     async with _window_host(tmp_path) as (state, runtime, principal, waiting, proceed):
-        finished = await runtime.sessions.start(
+        finished = await runtime.sessions.start_turn(
             "session", "finished", agent="default", principal=principal, idempotency_key="finished",
         )
         assert (await finished.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
-        active = await runtime.sessions.start(
+        active = await runtime.sessions.start_turn(
             "session", "pending", agent="default", principal=principal, idempotency_key="pending",
         )
         await asyncio.wait_for(waiting.wait(), 5)

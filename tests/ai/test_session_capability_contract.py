@@ -194,7 +194,7 @@ async def test_session_checkpoints_use_the_configured_split_sql_for_plain_chat(t
                             authorization=_HostAuthorization()) as runtime:
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session('session', principal=principal)
-        turn = await runtime.sessions.start(
+        turn = await runtime.sessions.start_turn(
             'session', 'question', agent='default', principal=principal, idempotency_key='send',
         )
         assert (await turn.wait_final(timeout_seconds=5)).view["output"] == {"text": "answer"}

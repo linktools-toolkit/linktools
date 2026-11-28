@@ -88,7 +88,7 @@ async def test_watch_pending_admission_and_completion(tmp_path):
             assert initial.active_turn_id is None and initial.last_turn_no == 0
             busy = asyncio.create_task(anext(stream))
             block()
-            turn = await runtime.sessions.start(
+            turn = await runtime.sessions.start_turn(
                 "session", "hello", agent="default", principal=principal, idempotency_key="pending",
             )
             await asyncio.wait_for(entered.wait(), 5)

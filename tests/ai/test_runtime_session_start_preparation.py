@@ -115,10 +115,10 @@ async def test_canonical_sql_planning_reads_one_authorized_snapshot(tmp_path, bo
                 with TurnObserver(runtime, "session", principal, local_workspace=True) as observer:
                     token = active.set(True)
                     try:
-                        turn_id = await runtime.sessions.start_turn(
+                        turn_id = (await runtime.sessions.start_turn(
                             "session", "question", agent=agent, principal=principal,
                             idempotency_key="request", planning=True,
-                        )
+                        )).key.turn_id
                     finally:
                         active.reset(token)
                     async with asyncio.timeout(5):

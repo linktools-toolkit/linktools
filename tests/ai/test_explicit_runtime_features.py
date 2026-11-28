@@ -95,7 +95,7 @@ async def test_minimal_runtime_supports_sessions_without_retained_model_context(
                 agent = runtime.agents.get()
                 principal = runtime.default_principal
                 await agent.create_session("session", principal=principal)
-                turn = await runtime.sessions.start(
+                turn = await runtime.sessions.start_turn(
                     "session", "question", principal=principal, agent=agent, idempotency_key="question",
                 )
                 result = await turn.wait_final(timeout_seconds=5)

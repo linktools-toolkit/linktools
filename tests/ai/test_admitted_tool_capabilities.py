@@ -76,14 +76,14 @@ async def test_native_tool_context_omits_registered_but_unselected_capability(tm
     ) as runtime:
         actor = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=actor)
-        handle = await runtime.sessions.start("session", "inspect", agent="disabled", principal=actor,
+        handle = await runtime.sessions.start_turn("session", "inspect", agent="disabled", principal=actor,
                                               idempotency_key="allowed")
         assert (await handle.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
         [context] = seen
         assert context.selected_capabilities == ()
 
         with pytest.raises(AIError) as unsupported:
-            await runtime.sessions.start("session", "inspect", agent="enabled", principal=actor,
+            await runtime.sessions.start_turn("session", "inspect", agent="enabled", principal=actor,
                                          idempotency_key="unsupported")
         assert unsupported.value.code is ErrorCode.REQUEST_FIELD_INVALID
         assert unsupported.value.safe_details["features"] == ["agent_capabilities"]
@@ -144,7 +144,7 @@ async def test_native_step_only_loads_exact_selected_reference_and_replay_is_ine
     async with Runtime.open(namespace, storage=storage, features=features, authorization=_HostAuthorization()) as runtime:
         actor = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=actor)
-        first = await runtime.sessions.start("session", "Read evidence", principal=actor, agent="default",
+        first = await runtime.sessions.start_turn("session", "Read evidence", principal=actor, agent="default",
                                              idempotency_key="first")
         final = await first.wait_final(timeout_seconds=10)
         if mode == "wrong_revision":
@@ -153,7 +153,7 @@ async def test_native_step_only_loads_exact_selected_reference_and_replay_is_ine
         else:
             assert final.status is ExecutionStatus.SUCCEEDED and final.view["output"] == {"text": "done"}
     async with Runtime.open(namespace, storage=storage, features=features, authorization=_HostAuthorization()) as runtime:
-        replay = await runtime.sessions.start("session", "Read evidence", principal=actor, agent="default",
+        replay = await runtime.sessions.start_turn("session", "Read evidence", principal=actor, agent="default",
                                               idempotency_key="first")
         assert replay.key == first.key
         assert (await replay.wait_final(timeout_seconds=5)).view == final.view
@@ -188,7 +188,7 @@ async def test_referenced_input_capability_remains_unavailable_without_same_stor
         await runtime.sessions.create_turn_session("session", principal=actor)
         before = await runtime.history.turn_session("session", principal=actor)
         with pytest.raises(AIError) as rejected:
-            await runtime.sessions.start("session", "Do not dispatch", agent="default", principal=actor,
+            await runtime.sessions.start_turn("session", "Do not dispatch", agent="default", principal=actor,
                                          idempotency_key="forbidden")
         assert rejected.value.code is (ErrorCode.STORAGE_CAPABILITY_MISSING if split else ErrorCode.REQUEST_FIELD_INVALID)
         assert await runtime.history.turn_session("session", principal=actor) == before

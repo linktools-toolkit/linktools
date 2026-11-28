@@ -39,7 +39,7 @@ async def _native_runtime(path, model, *, tool=None):
 
 
 async def _native_start(runtime, *, prompt="question", request_id="request"):
-    return await runtime.sessions.start(
+    return await runtime.sessions.start_turn(
         "session", prompt, principal=runtime.default_principal,
         agent=runtime.agents.get(), idempotency_key=request_id,
     )

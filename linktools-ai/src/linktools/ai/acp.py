@@ -364,10 +364,11 @@ class ACPAgent:
                 with TurnObserver(
                     self._runtime, session_id, self._principal, local_workspace=self._local_workspace,
                 ) as observer:
-                    execution_id = await self._runtime.sessions.start_turn(
+                    turn = await self._runtime.sessions.start_turn(
                         session_id, "".join(parts), agent="default",
                         principal=self._principal, idempotency_key=request_id,
                     )
+                    execution_id = turn.key.turn_id
                     admitted.set_result(execution_id)
                     sent_text = False
                     async for frame in observer.events(execution_id):
@@ -396,7 +397,7 @@ class ACPAgent:
                         # complete answer would duplicate a partial one.
                         raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
             else:
-                execution = await self._runtime.sessions.start(
+                execution = await self._runtime.executions.start_in_session(
                     session_id, "".join(parts), principal=self._principal, idempotency_key=request_id,
                 )
                 execution_id = execution.execution_id

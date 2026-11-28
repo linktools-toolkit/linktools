@@ -72,7 +72,7 @@ def _crash_sealed_owner(root_dir: str) -> None:
             _NAMESPACE, storage=_storage(root), features=_features(model), authorization=_HostAuthorization(),
         ) as runtime:
             await runtime.sessions.create_turn_session(_SESSION, principal=_OWNER)
-            turn = await runtime.sessions.start(
+            turn = await runtime.sessions.start_turn(
                 _SESSION, "question", agent="default", principal=_OWNER, idempotency_key="original",
             )
             await turn.wait_final(timeout_seconds=12)
@@ -98,7 +98,7 @@ def _crash_active_owner(root_dir: str) -> None:
     async def run() -> None:
         async with runtime:
             await runtime.sessions.create_turn_session(_SESSION, principal=_OWNER)
-            turn = await runtime.sessions.start(
+            turn = await runtime.sessions.start_turn(
                 _SESSION, "question", agent="default", principal=_OWNER, idempotency_key="original",
             )
             await turn.wait_final(timeout_seconds=12)

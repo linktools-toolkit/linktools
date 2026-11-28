@@ -74,7 +74,7 @@ async def test_captured_session_context_ignores_later_turns_and_metadata(tmp_pat
         session = await runtime.sessions.create(CreateSessionRequest(
             principal, "source-session", "create-session", metadata={"note": "accepted metadata"},
         ))
-        first = await runtime.sessions.start(session.session_id, "first historical turn", agent=agent, principal=principal, idempotency_key="first")
+        first = await runtime.sessions.start_turn(session.session_id, "first historical turn", agent=agent, principal=principal, idempotency_key="first")
         assert (await first.wait_final()).status is ExecutionStatus.SUCCEEDED
         task = Task.from_agent("context.agent", agent)
         run = await runtime_engine.with_definitions(task).start(TaskGraph("context-source", (
@@ -87,7 +87,7 @@ async def test_captured_session_context_ignores_later_turns_and_metadata(tmp_pat
         assert value.input_context is not None
         assert "first historical turn" in value.input_context.history.decode()
         assert "second input" not in value.input_context.history.decode()
-        third = await runtime.sessions.start(session.session_id, "later production turn", agent=agent, principal=principal, idempotency_key="third")
+        third = await runtime.sessions.start_turn(session.session_id, "later production turn", agent=agent, principal=principal, idempotency_key="third")
         assert (await third.wait_final()).status is ExecutionStatus.SUCCEEDED
         replay_principal = Principal("new-owner", runtime.tenant_id)
         replay = await runtime.agents.get("candidate").start(value.prompt, input_context=value.input_context, principal=replay_principal)
@@ -159,7 +159,7 @@ async def test_captured_agent_task_and_graph_restore_context_after_restart(tmp_p
     async with Persistence.open('captured-graph-context', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_109, _open_native_runtime(persistence_109, group) as runtime, TaskEngine.open(persistence=persistence_109, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         agent = runtime.agents.get()
         session = await runtime.sessions.create(CreateSessionRequest(principal, "graph-session", "create-session"))
-        previous = await runtime.sessions.start(session.session_id, "remember the earlier turn", agent=agent, principal=principal, idempotency_key="previous")
+        previous = await runtime.sessions.start_turn(session.session_id, "remember the earlier turn", agent=agent, principal=principal, idempotency_key="previous")
         assert (await previous.wait_final()).status is ExecutionStatus.SUCCEEDED
         task = Task.from_agent("context.agent", agent)
         run = await runtime_engine.with_definitions(task).start(TaskGraph("context-source", (TaskNode("agent", task=task,
@@ -170,7 +170,7 @@ async def test_captured_agent_task_and_graph_restore_context_after_restart(tmp_p
         assert template.context_policy == "captured"
         captured_history = template.nodes[0].input["capture_context"]["history"]
         assert "remember the earlier turn" in str(captured_history)
-        latest = await runtime.sessions.start(session.session_id, "this later turn must not leak", agent=agent, principal=principal, idempotency_key="latest")
+        latest = await runtime.sessions.start_turn(session.session_id, "this later turn must not leak", agent=agent, principal=principal, idempotency_key="latest")
         assert (await latest.wait_final()).status is ExecutionStatus.SUCCEEDED
     async with Persistence.open('captured-graph-context', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_124, _open_native_runtime(persistence_124, group) as runtime, TaskEngine.open(persistence=persistence_124, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         task = Task.from_agent("context.agent", runtime.agents.get())
@@ -331,7 +331,7 @@ async def test_reprojection_uses_captured_history_without_reopening_source_sessi
         principal = Principal("owner", runtime.tenant_id)
         agent = runtime.agents.get()
         session = await runtime.sessions.create(CreateSessionRequest(principal, "context-session", "create-session"))
-        first = await runtime.sessions.start(session.session_id, "immutable earlier history", agent=agent, principal=principal, idempotency_key="first")
+        first = await runtime.sessions.start_turn(session.session_id, "immutable earlier history", agent=agent, principal=principal, idempotency_key="first")
         assert (await first.wait_final()).status is ExecutionStatus.SUCCEEDED
         original = Task.from_agent("context.original", runtime.agents.get(), build_input=first_builder)
         candidate = Task.from_agent("context.candidate", runtime.agents.get(), build_input=replacement_builder)

@@ -48,7 +48,7 @@ async def test_native_terminal_unknown_keeps_slot_until_exact_late_commit(tmp_pa
         agent = runtime.agents.get()
 
         async def start(prompt="question", request_id="request"):
-            return await runtime.sessions.start("session", prompt, agent=agent,
+            return await runtime.sessions.start_turn("session", prompt, agent=agent,
                                                 principal=principal, idempotency_key=request_id)
 
         async def lose_ack(key, **kwargs):
@@ -159,7 +159,7 @@ async def test_native_tool_unknown_ack_does_not_dispatch_before_or_after_late_cl
             return original(bridge, admission=lose_ack, terminal=terminal, unknown=unknown)
 
         async def start(prompt, request_id):
-            return await runtime.sessions.start("session", prompt, agent=runtime.agents.get(),
+            return await runtime.sessions.start_turn("session", prompt, agent=runtime.agents.get(),
                                                 principal=principal, idempotency_key=request_id)
 
         monkeypatch.setattr(RuntimeToolOperationBridge, "prepare_boundaries", expose_unknown)

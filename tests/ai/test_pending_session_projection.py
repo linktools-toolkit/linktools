@@ -102,9 +102,9 @@ async def test_pending_session_projection_paging_and_completion(
         await owner.sessions.create_turn_session("session", principal=principal)
 
         async def start(prompt, key):
-            return await owner.sessions.start_turn(
+            return (await owner.sessions.start_turn(
                 "session", prompt, agent="default", principal=principal, idempotency_key=key,
-            )
+            )).key.turn_id
 
         async def committed(turn_id):
             return await _wait_for_committed(

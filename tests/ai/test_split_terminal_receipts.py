@@ -97,7 +97,7 @@ async def test_split_handoff_unknown_requires_source_confirmation(
             fault.setattr(turns, "publish_split_terminal", commit)
             fault.setattr(turns, "observe_split_target", observe)
             await runtime.sessions.create_turn_session("session", principal=principal)
-            turn = await runtime.sessions.start(
+            turn = await runtime.sessions.start_turn(
                 "session", "question", agent="default", principal=principal, idempotency_key="question",
             )
             await asyncio.wait_for(finished.wait(), timeout=10)

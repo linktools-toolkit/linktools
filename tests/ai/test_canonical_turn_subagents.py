@@ -426,7 +426,7 @@ async def test_approved_parent_tool_continues_to_native_subagent(tmp_path: Path,
     ):
         principal = service_principal(runtime.tenant_id, "approval-fixture")
         await runtime.sessions.create_turn_session(_SESSION, principal=principal)
-        turn = await runtime.sessions.start(
+        turn = await runtime.sessions.start_turn(
             _SESSION, "Confirm fixture A first", agent="default", principal=principal, idempotency_key="original",
         )
         paused_result = await asyncio.wait_for(turn.wait(), timeout=10)
@@ -472,7 +472,7 @@ async def test_approved_parent_tool_continues_to_native_subagent(tmp_path: Path,
         assert child_id != turn.key.turn_id
         assert await state.execution.executions.get(turn.key.turn_id, tenant_id=runtime.tenant_id) is None
         assert state.conversation.sessions is None
-        replay = await runtime.sessions.start(
+        replay = await runtime.sessions.start_turn(
             _SESSION, "Confirm fixture A first", agent="default", principal=principal, idempotency_key="original",
         )
         assert replay.key == turn.key

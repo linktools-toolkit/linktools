@@ -667,11 +667,12 @@ class _Console:
                 if upload is None:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                 prompt, names = _uploaded_prompt(_text(payload, "prompt"), payload.get("attachments", []), upload)
-                turn_id = await runtime.sessions.start_turn(
+                turn = await runtime.sessions.start_turn(
                     session_id, prompt, agent="default",
                     principal=self.principal, idempotency_key=request_id, thinking=payload.get("thinking"),
                     planning=planning, attachment_display_names=names,
                 )
+                turn_id = turn.key.turn_id
                 return _json({"turn_id": turn_id}, 202)
             if action == "recover":
                 accepted = await runtime.sessions.recover_turn(
@@ -725,7 +726,7 @@ class _Console:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={
                     "field": "attachments", "reason": "sql_turn_required",
                 })
-            execution = await runtime.sessions.start(
+            execution = await runtime.executions.start_in_session(
                 session_id, _text(payload, "prompt"), principal=self.principal,
                 idempotency_key=request_id,
                 planning=payload.get("planning", False), thinking=payload.get("thinking"),

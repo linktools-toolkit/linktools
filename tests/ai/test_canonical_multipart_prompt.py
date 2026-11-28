@@ -66,9 +66,9 @@ async def test_canonical_multipart_prompt_preserves_input_without_exposing_body(
         return ("Before attachment", BinaryContent(data, media_type="text/plain"), "After attachment")
 
     async def send(runtime, prompt, key):
-        return await runtime.sessions.start_turn(
+        return (await runtime.sessions.start_turn(
             "chat", prompt, agent="default", principal=runtime.default_principal, idempotency_key=key,
-        )
+        )).key.turn_id
 
     async def send_and_commit(runtime, prompt, key):
         frames = asyncio.Queue()

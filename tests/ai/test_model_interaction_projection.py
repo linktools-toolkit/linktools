@@ -100,7 +100,7 @@ async def test_session_projections_do_not_copy_previous_response_bodies(
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=principal)
         for index in range(8):
-            turn = await runtime.sessions.start(
+            turn = await runtime.sessions.start_turn(
                 "session", f"turn-{index}:" + "user-" * 400, agent="default",
                 principal=principal, idempotency_key=f"turn-{index}",
             )

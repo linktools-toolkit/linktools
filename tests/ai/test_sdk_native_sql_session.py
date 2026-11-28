@@ -82,7 +82,7 @@ async def test_public_sql_sdk_session_creates_and_replays_native_turn(tmp_path):
             assert same.key == turn.key
             [terminal] = [frame async for frame in frames]
             assert terminal["type"] == "terminal" and terminal["state"] == "succeeded"
-        direct = await runtime.sessions.start("chat", "Hello", principal=principal, agent=agent, idempotency_key="send")
+        direct = await runtime.sessions.start_turn("chat", "Hello", principal=principal, agent=agent, idempotency_key="send")
         assert direct.key == turn.key
         async with asyncio.timeout(10):
             waited = await direct.wait()
@@ -181,7 +181,7 @@ async def test_native_sdk_freezes_effective_agent_planning_and_thinking(tmp_path
         selected = agent if role == "bound-sdk-agent" else "default"
 
         async def send(key, **options):
-            return await runtime.sessions.start(
+            return await runtime.sessions.start_turn(
                 "session", "question", agent=selected, principal=principal, idempotency_key=key, **options,
             )
 
@@ -215,7 +215,7 @@ async def test_native_sdk_freezes_effective_agent_planning_and_thinking(tmp_path
             Runtime.open(persistence=state, authorization=HostAuthorization(),
                          features=features(revision=2, planning=False, thinking="low")) as runtime,
         ):
-            same = await runtime.sessions.start(
+            same = await runtime.sessions.start_turn(
                 "session", "question", agent="default", principal=runtime.default_principal, idempotency_key="turn",
             )
             assert same.key == admitted.key

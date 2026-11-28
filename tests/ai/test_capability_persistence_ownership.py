@@ -114,7 +114,7 @@ async def test_sql_conversation_owner_reads_committed_state_without_changing_cur
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=principal)
         for index in (1, 2):
-            turn = await runtime.sessions.start(
+            turn = await runtime.sessions.start_turn(
                 "session", f"question-{index}", agent="default", principal=principal, idempotency_key=f"turn-{index}",
             )
             assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED

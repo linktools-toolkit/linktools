@@ -114,7 +114,7 @@ async def test_local_runtime_retains_terminal_model_history(
         agent = runtime.agents.get('default')
         if session_bound:
             session = await agent.create_session('session')
-            turn = await runtime.sessions.start(session.session_id, 'hello', agent=agent,
+            turn = await runtime.sessions.start_turn(session.session_id, 'hello', agent=agent,
                                                 principal=runtime.default_principal, idempotency_key='turn')
             result = await turn.wait_final()
             assert result.view['output'] == {'text': 'done'}

@@ -216,7 +216,7 @@ async def test_split_conversation_route_uses_durable_admission_with_shared_cache
                      features=model_features(_FeatureModels(FunctionModel(stream_function=model)), features)) as runtime,
     ):
         session = await runtime.agents.get().create_session("session")
-        turn = await runtime.sessions.start(session.session_id, "question", agent="default", principal=runtime.default_principal, idempotency_key="turn")
+        turn = await runtime.sessions.start_turn(session.session_id, "question", agent="default", principal=runtime.default_principal, idempotency_key="turn")
         try:
             await asyncio.wait_for(entered.wait(), 5)
             view = await runtime.history.turn_result(session.session_id, turn.key.turn_id, principal=runtime.default_principal)
@@ -227,5 +227,5 @@ async def test_split_conversation_route_uses_durable_admission_with_shared_cache
         terminal = await turn.wait_final(timeout_seconds=5)
         assert terminal.status is ExecutionStatus.SUCCEEDED
         assert terminal.view["output"] == {"text": "done"}
-        replay = await runtime.sessions.start(session.session_id, "question", agent="default", principal=runtime.default_principal, idempotency_key="turn")
+        replay = await runtime.sessions.start_turn(session.session_id, "question", agent="default", principal=runtime.default_principal, idempotency_key="turn")
         assert replay.key.turn_id == turn.key.turn_id

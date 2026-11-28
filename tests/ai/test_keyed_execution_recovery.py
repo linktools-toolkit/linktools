@@ -479,7 +479,7 @@ async def test_native_session_stale_recovery_and_close_cannot_displace_current_o
         await runtime.sessions.create_turn_session("session", principal=principal)
 
         async def start(host, key):
-            return await host.sessions.start(
+            return await host.sessions.start_turn(
                 "session", key, principal=principal, agent=host.agents.get(), idempotency_key=key,
             )
 

@@ -68,7 +68,7 @@ async def test_shared_session_start_authorizes_the_execution_identity(tmp_path: 
         session = await agent.create_session("shared", principal=owner)
 
         async def start(prompt: str, key: str):
-            return await runtime.sessions.start(session.session_id, prompt, principal=peer, agent=agent,
+            return await runtime.sessions.start_turn(session.session_id, prompt, principal=peer, agent=agent,
                                                 idempotency_key=key)
         pristine = await runtime.history.turn_session(session.session_id, principal=owner)
         assert pristine["session"]["active_turn_id"] is None

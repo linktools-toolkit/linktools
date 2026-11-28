@@ -45,7 +45,7 @@ async def test_pending_session_commits_once_and_retains_canonical_replay(
     database = tmp_path / "state.db"
 
     async def start(runtime, prompt, key):
-        return await runtime.sessions.start(
+        return await runtime.sessions.start_turn(
             "session", prompt, agent=runtime.agents.get(), principal=runtime.default_principal,
             idempotency_key=key,
         )

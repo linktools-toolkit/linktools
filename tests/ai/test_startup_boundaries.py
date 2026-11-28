@@ -189,7 +189,7 @@ async def test_two_runtimes_share_one_first_attempt_after_parallel_preparation(
     ):
         principal = first.default_principal
         await first.sessions.create_turn_session("session", principal=principal)
-        starts = asyncio.gather(*(runtime.sessions.start(
+        starts = asyncio.gather(*(runtime.sessions.start_turn(
             "session", "question", agent="default", principal=principal, idempotency_key="same",
         ) for runtime in (first, second)))
         try:
@@ -232,12 +232,12 @@ async def test_busy_native_session_rejects_without_admitting_another_turn(tmp_pa
     ):
         principal = first.default_principal
         await first.sessions.create_turn_session("session", principal=principal)
-        one = await first.sessions.start("session", "question", agent="default", principal=principal,
+        one = await first.sessions.start_turn("session", "question", agent="default", principal=principal,
                                          idempotency_key="owner")
         try:
             await asyncio.wait_for(entered.wait(), 5)
             with pytest.raises(AIError) as busy:
-                await second.sessions.start("session", "other", agent="default", principal=principal,
+                await second.sessions.start_turn("session", "other", agent="default", principal=principal,
                                             idempotency_key="rejected")
             assert busy.value.code is ErrorCode.SESSION_BUSY
             observed = await second.history.turn_session_state("session", principal=principal)
@@ -245,7 +245,7 @@ async def test_busy_native_session_rejects_without_admitting_another_turn(tmp_pa
         finally:
             release.set()
         assert (await one.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
-        two = await second.sessions.start("session", "other", agent="default", principal=principal,
+        two = await second.sessions.start_turn("session", "other", agent="default", principal=principal,
                                           idempotency_key="rejected")
         assert (await two.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
         page = await second.history.turn_session("session", principal=principal)
@@ -290,7 +290,7 @@ async def test_native_cancel_before_provider_never_dispatches(
     ):
         principal = first.default_principal
         await first.sessions.create_turn_session("session", principal=principal)
-        turn = await first.sessions.start("session", "question", agent="default", principal=principal,
+        turn = await first.sessions.start_turn("session", "question", agent="default", principal=principal,
                                           idempotency_key="same")
         try:
             await asyncio.wait_for(preparing.wait(), 5)
@@ -660,7 +660,7 @@ async def test_native_admission_rollback_does_not_dispatch_or_hold_session(
         with monkeypatch.context() as patch:
             patch.setattr(SqlSessionTurns, "_accept_in_group", rollback_after_write)
             with pytest.raises(AIError) as rejected_start:
-                await runtime.sessions.start(
+                await runtime.sessions.start_turn(
                     "session", "question", agent="default", principal=principal, idempotency_key="same",
                 )
 
@@ -669,7 +669,7 @@ async def test_native_admission_rollback_does_not_dispatch_or_hold_session(
         assert await state.session_turns.get_turn(rejected_key) is None
         assert await runtime.history.turn_session_state("session", principal=principal) == before
         assert calls == []
-        turn = await runtime.sessions.start(
+        turn = await runtime.sessions.start_turn(
             "session", "question", agent="default", principal=principal, idempotency_key="same",
         )
         assert turn.key != rejected_key

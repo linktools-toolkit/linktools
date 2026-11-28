@@ -61,9 +61,9 @@ async def test_expired_ordinary_turn_can_be_released_without_replay(tmp_path, mo
     ):
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=principal)
-        turn_id = await runtime.sessions.start_turn(
+        turn_id = (await runtime.sessions.start_turn(
             "session", "discard this prompt", agent="default", principal=principal, idempotency_key="old",
-        )
+        )).key.turn_id
         await asyncio.wait_for(stopped.wait(), timeout=5)
         key = SessionTurnKey("session", turn_id)
         turns = state.session_turns
@@ -175,9 +175,9 @@ async def test_expired_ordinary_turn_can_be_released_without_replay(tmp_path, mo
         assert await repository.list_children(turn_id, tenant_id=principal.tenant_id) == children_before
         assert (await turns.get_session("session"))["active_turn_id"] is None
 
-        next_id = await runtime.sessions.start_turn(
+        next_id = (await runtime.sessions.start_turn(
             "session", "new prompt", agent="default", principal=principal, idempotency_key="new",
-        )
+        )).key.turn_id
         new_key = SessionTurnKey("session", next_id)
         row = await _wait_for_committed(lambda: turns.get_turn(new_key), lambda value: value["state"] != "accepted")
         assert row["state"] == "succeeded", row["result_json"]
@@ -186,9 +186,9 @@ async def test_expired_ordinary_turn_can_be_released_without_replay(tmp_path, mo
         assert len(instructions) == 1 and notice in instructions[0]
         assert (await turns.get_turn(key)) == old
         if boundary == "no-child":
-            later = await runtime.sessions.start_turn(
+            later = (await runtime.sessions.start_turn(
                 "session", "one more prompt", agent="default", principal=principal, idempotency_key="later",
-            )
+            )).key.turn_id
             later_key = SessionTurnKey("session", later)
             row = await _wait_for_committed(lambda: turns.get_turn(later_key), lambda value: value["state"] != "accepted")
             assert row["state"] == "succeeded", row["result_json"]

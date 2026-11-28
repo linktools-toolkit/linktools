@@ -53,7 +53,7 @@ async def test_structured_turns_continue_after_reopen(tmp_path, checkpoints):
             yield runtime
 
     async def send(runtime, index):
-        turn = await runtime.sessions.start(
+        turn = await runtime.sessions.start_turn(
             "session", f"question-{index}", agent="default",
             principal=runtime.default_principal, idempotency_key=f"send-{index}",
         )

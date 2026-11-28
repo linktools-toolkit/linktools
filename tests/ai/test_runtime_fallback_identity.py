@@ -91,7 +91,7 @@ async def test_successful_model_identity_survives_sqlite_reopen(tmp_path, select
     ) as runtime:
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=principal)
-        turn = await runtime.sessions.start(
+        turn = await runtime.sessions.start_turn(
             "session", "hello", agent="default", principal=principal, idempotency_key="start",
         )
         assert (await turn.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
@@ -128,7 +128,7 @@ async def test_parallel_fallback_and_primary_keep_distinct_response_identities(t
 
         async def run(agent, expected):
             await runtime.sessions.create_turn_session(agent, principal=principal)
-            turn = await runtime.sessions.start(
+            turn = await runtime.sessions.start_turn(
                 agent, "hello", agent=agent, principal=principal, idempotency_key="start",
             )
             assert (await turn.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED

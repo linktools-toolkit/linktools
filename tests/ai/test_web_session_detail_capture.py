@@ -57,9 +57,9 @@ async def test_web_session_detail_uses_one_capture_for_pending_and_durable_turns
         )
 
         async def start(prompt, key):
-            return await runtime.sessions.start_turn(
+            return (await runtime.sessions.start_turn(
                 "session", prompt, agent="default", principal=runtime.default_principal, idempotency_key=key,
-            )
+            )).key.turn_id
 
         first = await start("earlier", "first")
         assert await asyncio.wait_for(done.get(), 5) == first
@@ -146,9 +146,9 @@ async def test_web_session_detail_still_authorizes_and_retains_metadata_only_fal
             "session", lambda frame: done.set() if frame["type"] == "terminal" else None,
         )
         try:
-            await runtime.sessions.start_turn(
+            (await runtime.sessions.start_turn(
                 "session", "secret", agent="default", principal=runtime.default_principal, idempotency_key="turn",
-            )
+            )).key.turn_id
             await asyncio.wait_for(done.wait(), 5)
         finally:
             unsubscribe()

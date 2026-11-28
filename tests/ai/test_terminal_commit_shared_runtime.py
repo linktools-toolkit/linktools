@@ -90,7 +90,7 @@ async def test_shared_pending_duplicate_wait_publishes_one_turn(tmp_path: Path) 
         principal = owner.default_principal
 
         async def start(runtime, prompt="question", key="request"):
-            return await runtime.sessions.start(session.session_id, prompt, agent="default",
+            return await runtime.sessions.start_turn(session.session_id, prompt, agent="default",
                                                 principal=principal, idempotency_key=key)
 
         turn = await start(owner)
@@ -385,15 +385,15 @@ async def test_mixed_writers_share_live_session_admission(tmp_path: Path, first_
     ):
         session = await first.agents.get().create_session('session')
         principal = first.default_principal
-        turn = await first.sessions.start(session.session_id, "question", agent="default",
+        turn = await first.sessions.start_turn(session.session_id, "question", agent="default",
                                           principal=principal, idempotency_key="request")
         await asyncio.wait_for(entered.wait(), 5)
         try:
-            duplicate = await second.sessions.start(session.session_id, "question", agent="default",
+            duplicate = await second.sessions.start_turn(session.session_id, "question", agent="default",
                                                     principal=principal, idempotency_key="request")
             assert duplicate.key.turn_id == turn.key.turn_id
             with pytest.raises(AIError) as busy:
-                await second.sessions.start(session.session_id, "another", agent="default",
+                await second.sessions.start_turn(session.session_id, "another", agent="default",
                                             principal=principal, idempotency_key="other")
             assert busy.value.code is ErrorCode.SESSION_BUSY
             assert len(calls) == 1

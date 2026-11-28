@@ -348,14 +348,14 @@ async def _runtime_deferred_session(
             await sessions.create_turn_session("session", principal=principal)
         if unmanaged:
             with pytest.raises(AIError) as rejected:
-                await sessions.start("session", "Load capability.", agent="default", principal=principal,
+                await sessions.start_turn("session", "Load capability.", agent="default", principal=principal,
                                      idempotency_key="unmanaged")
             assert rejected.value.code is ErrorCode.REQUEST_FIELD_INVALID
             assert rejected.value.safe_details["reason"] == "turn_agent_features_unsupported"
             assert not requests and not calls
             assert (await runtime.history.turn_session_state("session", principal=principal))["active_turn_id"] is None
             return
-        turn = await sessions.start("session", "Continue." if resumed else "Load capability.",
+        turn = await sessions.start_turn("session", "Continue." if resumed else "Load capability.",
                                     agent="default", principal=principal, idempotency_key="resume" if resumed else "load")
         if requires_approval and (resumed or eager):
             waiting = await asyncio.wait_for(turn.wait(), 10)
@@ -385,7 +385,7 @@ async def _runtime_deferred_session(
             [completed] = [entry for entry in settled if entry.tool_name == "activated"]
             assert completed.tool_operation_id == operation_id and completed.status is ToolOperationStatus.COMPLETED
             assert completed.capability_ref == operation.capability_ref
-            repeated = await sessions.start("session", "Continue." if resumed else "Load capability.",
+            repeated = await sessions.start_turn("session", "Continue." if resumed else "Load capability.",
                                             agent="default", principal=principal,
                                             idempotency_key="resume" if resumed else "load")
             assert repeated.key == turn.key and (await repeated.result()).view == result.view

@@ -723,7 +723,7 @@ async def test_native_wait_rechecks_authorization_after_active_turn_and_does_not
                                 storage=PersistenceStorage.sqlite(tmp_path / "native.db")) as state:
         async with Runtime.open(persistence=state, features=features, authorization=Authorization()) as runtime:
             await runtime.sessions.create_turn_session("session", principal=producer)
-            turn = await runtime.sessions.start(
+            turn = await runtime.sessions.start_turn(
                 "session", "question", principal=producer, agent="default", idempotency_key="first",
             )
             await asyncio.wait_for(entered.wait(), 5)

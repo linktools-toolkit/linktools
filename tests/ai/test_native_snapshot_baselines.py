@@ -126,7 +126,7 @@ async def test_session_new_runs_reuse_history_beyond_cache_and_after_reopen(
                         event.listen(native.storage_context.engine.sync_engine, "before_cursor_execute", writes.capture)
                         try:
                             question = f"question-{phase}-{turn}"
-                            turn_handle = await runtime.sessions.start(
+                            turn_handle = await runtime.sessions.start_turn(
                                 session.session_id, question, agent="default", principal=runtime.default_principal,
                                 idempotency_key=question,
                             )

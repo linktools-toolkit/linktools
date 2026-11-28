@@ -147,7 +147,7 @@ async def test_cold_session_recovers_settled_tool_using_original_step_receipt(tm
     async with _runtime(database, interrupted, work, authorization=authorization) as (runtime, state, steps):
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=principal)
-        turn = await runtime.sessions.start(
+        turn = await runtime.sessions.start_turn(
             "session", "question", agent="default", principal=principal, idempotency_key="start",
         )
         await asyncio.wait_for(blocked.wait(), 5)
@@ -169,7 +169,7 @@ async def test_cold_session_recovers_settled_tool_using_original_step_receipt(tm
     async with _runtime(database, recovered, work, authorization=authorization) as (runtime, state, steps):
         await _expire(state.session_turns, turn.key, generation=1)
         assert await runtime.sessions.recover_turn("session", turn.key.turn_id, mode="resume", principal=principal)
-        replay = await runtime.sessions.start(
+        replay = await runtime.sessions.start_turn(
             "session", "question", agent="default", principal=principal, idempotency_key="start",
         )
         assert replay.key == turn.key

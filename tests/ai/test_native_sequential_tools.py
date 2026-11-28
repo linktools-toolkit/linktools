@@ -61,7 +61,7 @@ async def test_native_step_tools_honor_frozen_sequential_declaration(tmp_path, s
         ) as runtime, asyncio.timeout(10):
             actor = runtime.default_principal
             await runtime.sessions.create_turn_session("session", principal=actor)
-            turn = await runtime.sessions.start(
+            turn = await runtime.sessions.start_turn(
                 "session", "write", agent="default", principal=actor, idempotency_key="one",
             )
             try:

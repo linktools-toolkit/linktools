@@ -130,7 +130,7 @@ async def test_native_snapshot_rejects_a_turn_without_its_session_owner(tmp_path
             return await reader.export_snapshot(object_store=archive, limits=limits)
 
     async with _window_host(tmp_path) as (state, runtime, principal, _, _):
-        turn = await runtime.sessions.start(
+        turn = await runtime.sessions.start_turn(
             "session", "original", agent="default", principal=principal, idempotency_key="capture",
         )
         assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED

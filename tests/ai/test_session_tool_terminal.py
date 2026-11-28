@@ -380,7 +380,7 @@ async def test_rejected_session_start_cleans_only_its_admission(
         try:
             with monkeypatch.context() as fault:
                 if rejection == "busy":
-                    owner = await sessions.start("session", "owner", agent="default", principal=principal,
+                    owner = await sessions.start_turn("session", "owner", agent="default", principal=principal,
                                                  idempotency_key="turn-owner")
                     await asyncio.wait_for(entered.wait(), timeout=10)
                     before = await runtime.history.turn_session_state("session", principal=principal)
@@ -397,7 +397,7 @@ async def test_rejected_session_start_cleans_only_its_admission(
 
                     fault.setattr(store, "accept", change_revision)
                 with pytest.raises(AIError) as raised:
-                    await sessions.start("session", "rejected", agent="default", principal=principal,
+                    await sessions.start_turn("session", "rejected", agent="default", principal=principal,
                                          idempotency_key="turn-rejected")
             assert raised.value.code is expected_code
             current = await runtime.history.turn_session_state("session", principal=principal)
@@ -454,12 +454,12 @@ async def test_split_admission_unknown_preserves_only_committed_turn_after_resta
         with monkeypatch.context() as fault:
             fault.setattr(store, "accept", lose_ack)
             if committed:
-                replay = await sessions.start("session", "inspect", agent="default", principal=principal,
+                replay = await sessions.start_turn("session", "inspect", agent="default", principal=principal,
                                               idempotency_key="turn-cleanup-restart")
                 assert replay.key == attempted[0]
             else:
                 with pytest.raises(AIError) as rejected:
-                    await sessions.start("session", "inspect", agent="default", principal=principal,
+                    await sessions.start_turn("session", "inspect", agent="default", principal=principal,
                                          idempotency_key="turn-cleanup-restart")
                 assert rejected.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
 
@@ -529,7 +529,7 @@ async def test_session_start_cancel_before_worker_run_commits_cancelled_terminal
         sessions = runtime.sessions
         await sessions.create_turn_session("session", principal=principal)
         before = await runtime.history.turn_session_state("session", principal=principal)
-        turn = await sessions.start("session", "inspect", agent="default", principal=principal, idempotency_key="turn-1")
+        turn = await sessions.start_turn("session", "inspect", agent="default", principal=principal, idempotency_key="turn-1")
         await asyncio.wait_for(worker_entered.wait(), timeout=10)
         admitted = await runtime.history.turn_session_state("session", principal=principal)
         assert admitted["active_turn_id"] == turn.key.turn_id
@@ -543,7 +543,7 @@ async def test_session_start_cancel_before_worker_run_commits_cancelled_terminal
         assert after["status"] == before["status"] and after["active_turn_id"] is None
         assert after["last_turn_no"] == before["last_turn_no"] + 1
         assert await turn.cancel()
-        replay = await sessions.start("session", "inspect", agent="default", principal=principal, idempotency_key="turn-1")
+        replay = await sessions.start_turn("session", "inspect", agent="default", principal=principal, idempotency_key="turn-1")
         assert replay.key == turn.key
         assert (await replay.result()).view == result.view and not calls
 
@@ -585,7 +585,7 @@ async def test_native_pending_start_cannot_publish_after_session_closes(
             return await accept(key, **kwargs)
 
         monkeypatch.setattr(store, "accept", pause_accept)
-        request = asyncio.create_task(sessions.start(
+        request = asyncio.create_task(sessions.start_turn(
             "session", "inspect", agent="default", principal=principal, idempotency_key="turn-pending-start",
         ))
         try:
@@ -1381,7 +1381,7 @@ async def test_cancel_at_unknown_effect_boundaries_stays_nonterminal(
         monkeypatch.setattr(repository, "mark_effect_unknown", pause_unknown_write)
         monkeypatch.setattr(repository, "list_by_execution", pause_recovery_projection)
         await runtime.sessions.create_turn_session("session", principal=principal)
-        turn = await runtime.sessions.start("session", "inspect", agent="default", principal=principal,
+        turn = await runtime.sessions.start_turn("session", "inspect", agent="default", principal=principal,
                                             idempotency_key="turn-1")
         try:
             await asyncio.wait_for(tool_started.wait(), timeout=10)
@@ -1458,7 +1458,7 @@ async def test_unverified_unknown_effect_write_does_not_terminalize_execution(
             return await get_operation(operation_id, tenant_id=tenant_id)
 
         await runtime.sessions.create_turn_session("session", principal=principal)
-        turn = await runtime.sessions.start("session", "inspect", agent="default", principal=principal,
+        turn = await runtime.sessions.start_turn("session", "inspect", agent="default", principal=principal,
                                             idempotency_key="turn-1")
         try:
             await asyncio.wait_for(tool_started.wait(), timeout=10)
@@ -1891,7 +1891,7 @@ def _split_terminal_setup(root):
 
 
 async def _send_split_terminal(runtime):
-    return await runtime.sessions.start(
+    return await runtime.sessions.start_turn(
         "session", "question", agent="default", principal=runtime.default_principal, idempotency_key="first",
     )
 
@@ -2438,7 +2438,7 @@ async def test_terminal_transaction_rollback_keeps_session_cursor_unchanged(
             with monkeypatch.context() as fault:
                 fault.setattr(store, "_finish_in_group", rollback)
                 fault.setattr(_RegenerableTurnRunner, "_producer_stopped", producer_stopped)
-                turn = await sessions.start("session", "inspect", agent="default", principal=principal,
+                turn = await sessions.start_turn("session", "inspect", agent="default", principal=principal,
                                             idempotency_key="turn-1")
                 await asyncio.wait_for(stopped.wait(), timeout=10)
 
@@ -2450,7 +2450,7 @@ async def test_terminal_transaction_rollback_keeps_session_cursor_unchanged(
             row = await store.get_turn(turn.key)
             assert row["state"] == "accepted" and row["result_json"] is None
 
-            replay = await sessions.start("session", "inspect", agent="default", principal=principal,
+            replay = await sessions.start_turn("session", "inspect", agent="default", principal=principal,
                                           idempotency_key="turn-1")
             assert replay.key == turn.key and calls == ["lookup"]
             async with store._context.engine.begin() as connection:
@@ -2464,7 +2464,7 @@ async def test_terminal_transaction_rollback_keeps_session_cursor_unchanged(
             assert failed.status is ExecutionStatus.FAILED
             assert failed.view["conversation_committed"] and failed.view["items"] == []
             assert calls == ["lookup"]
-            following = await sessions.start("session", "next", agent="default", principal=principal,
+            following = await sessions.start_turn("session", "next", agent="default", principal=principal,
                                              idempotency_key="turn-2")
             assert (await following.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
             assert calls == ["lookup", "lookup"]

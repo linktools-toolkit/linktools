@@ -69,9 +69,9 @@ async def test_read_only_structured_tool_result_survives_cold_context_not_public
         frames = asyncio.Queue()
         detach = runtime.sessions.observe_turn_session("chat", frames.put_nowait)
         try:
-            turn_id = await runtime.sessions.start_turn(
+            turn_id = (await runtime.sessions.start_turn(
                 "chat", prompt, agent="default", principal=runtime.default_principal, idempotency_key=request_id,
-            )
+            )).key.turn_id
             async with asyncio.timeout(10):
                 while True:
                     frame = await frames.get()

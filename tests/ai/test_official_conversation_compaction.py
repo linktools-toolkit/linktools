@@ -81,7 +81,7 @@ async def test_native_checkpoint_does_not_replace_conversation_compaction(tmp_pa
 
         async def start(prompt, request):
             if sql:
-                return await runtime.sessions.start(
+                return await runtime.sessions.start_turn(
                     session.session_id, prompt, agent="default", principal=runtime.default_principal,
                     idempotency_key=request,
                 )
@@ -209,7 +209,7 @@ async def test_recovered_sql_turn_that_executes_model_retains_new_summary(tmp_pa
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=principal)
         for i in range(12):
-            first = await runtime.sessions.start("session", f"seed {i}", agent="default", principal=principal,
+            first = await runtime.sessions.start_turn("session", f"seed {i}", agent="default", principal=principal,
                                                  idempotency_key=f"seed-{i}")
             assert (await first.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
         assert not summaries
@@ -221,7 +221,7 @@ async def test_recovered_sql_turn_that_executes_model_retains_new_summary(tmp_pa
 
         with monkeypatch.context() as fault:
             fault.setattr(_RegenerableTurnRunner, "settle", stop_before_model)
-            second = await runtime.sessions.start("session", "large new question " * 3500, agent="default", principal=principal,
+            second = await runtime.sessions.start_turn("session", "large new question " * 3500, agent="default", principal=principal,
                                                   idempotency_key="second")
             await asyncio.wait_for(stopped.wait(), 5)
         assert _RegenerableTurnRunner.settle is settle and len(provider_calls) == 12

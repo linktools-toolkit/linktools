@@ -5,6 +5,7 @@
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import replace
 from typing import TYPE_CHECKING, Generic, Literal, TypeVar, cast, overload
 
 from ..session import SessionTurnNotice, SessionAdmission, SessionTurnAdmission, PublishedSessionTurn, SessionService, SessionContext, normalize_session_context
@@ -75,11 +76,13 @@ class RuntimeExecutions(Generic[AppT]):
         input_captures: InputCaptures | None = None,
         *,
         bind_execution: Callable[[str, Principal], "Execution[AppT]"],
+        start_in_session: Callable[..., Awaitable["Execution[AppT]"]] | None = None,
         ensure_open: Callable[[], None] = lambda: None,
     ) -> None:
         self._service = service
         self._get_execution = get_execution
         self._bind_execution = bind_execution
+        self._start_in_session = start_in_session
         self._input_captures = input_captures
         self._ensure_open = ensure_open
 
@@ -90,6 +93,21 @@ class RuntimeExecutions(Generic[AppT]):
         principal: Principal | None = None,
     ) -> "Execution[AppT]":
         return await self._get_execution(execution_id, principal)
+
+    async def start_in_session(
+        self, session_id: str, prompt: "UserPromptInput", *, principal: Principal,
+        idempotency_key: str | None = None, output: "type[BaseModel] | None" = None,
+        correlation: "Mapping[str, object] | None" = None, files: "Sequence[str]" = (),
+        planning: bool | None = None, thinking: "ThinkingValue | None" = None,
+    ) -> "Execution[AppT]":
+        """Start an execution in an existing Agent-bound session, not a SQL turn."""
+        self._ensure_open()
+        if self._start_in_session is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return await self._start_in_session(
+            session_id, prompt, principal=principal, idempotency_key=idempotency_key,
+            output=output, correlation=correlation, files=files, planning=planning, thinking=thinking,
+        )
 
     async def capture_input(self, execution_id: str, request: CaptureInputRequest) -> ExecutionInputCaptureRef:
         self._ensure_open()
@@ -289,7 +307,6 @@ class RuntimeSessions(Generic[AppT]):
         service: SessionService | None,
         get_session: Callable[[str, Principal | None], Awaitable["Session[AppT]"]],
         *,
-        start_session: Callable[..., Awaitable["Execution[AppT]"]],
         bind_session: Callable[[SessionView, Principal], "Session[AppT]"],
         ensure_open: Callable[[], None] = lambda: None,
         turn_runner: "_RegenerableTurnRunner | None" = None,
@@ -297,7 +314,6 @@ class RuntimeSessions(Generic[AppT]):
         native_turn_read: "_NativeTurnRead | None" = None,
         require_session_available: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
-        self._start_session = start_session
         self._service = service
         self._get_session = get_session
         self._bind_session = bind_session
@@ -444,19 +460,20 @@ class RuntimeSessions(Generic[AppT]):
         output: "type[BaseModel] | None" = None,
         correlation: "Mapping[str, object] | None" = None,
         attachment_display_names: tuple[str, ...] = (),
-    ) -> str:
+    ) -> "_NativeSessionTurn[AppT, _NativeTurnResult]":
         """Admit a turn; plan mode selects plan-safe execution, not a dry run.
 
         Optional attachment display names are public conversation labels in
         attachment order; they are not provider identifiers.
         """
+        session = self._bind_native_session(session_id, principal=principal, local_workspace=False)
         receipt = await self._start_turn_receipt(
             session_id, prompt, agent=agent, principal=principal, idempotency_key=idempotency_key,
             thinking=thinking, files=files, session_context=session_context, mode=mode, planning=planning,
             budget=budget, output=output, correlation=correlation,
             attachment_display_names=attachment_display_names,
         )
-        return receipt.turn_id
+        return replace(session._turn(receipt.turn_id, principal), _replayed=receipt.replayed)
 
     async def _start_turn_receipt(
         self, session_id: str, prompt: "UserPromptInput", *, agent: "str | Agent[AppT]", principal: Principal,
@@ -632,45 +649,6 @@ class RuntimeSessions(Generic[AppT]):
             actor, _ = await self._inspect_native_session(session_id, principal)
             return self._bind_native_session(session_id, principal=actor, local_workspace=False)
         return await self._get_session(session_id, principal)
-
-    @overload
-    async def start(
-        self, session_id: str, user_prompt: "UserPromptInput", *, principal: Principal,
-        agent: "str | Agent[AppT]",
-        idempotency_key: str, output: "type[BaseModel] | None" = None,
-        correlation: "Mapping[str, object] | None" = None, files: "Sequence[str]" = (),
-        planning: bool | None = None, thinking: "ThinkingValue | None" = None,
-    ) -> "_NativeSessionTurn[AppT, _NativeTurnResult]": ...
-
-    @overload
-    async def start(
-        self, session_id: str, user_prompt: "UserPromptInput", *, principal: Principal,
-        idempotency_key: str | None = None, output: "type[BaseModel] | None" = None,
-        correlation: "Mapping[str, object] | None" = None, files: "Sequence[str]" = (),
-        planning: bool | None = None, thinking: "ThinkingValue | None" = None, agent: None = None,
-    ) -> "Execution[AppT]": ...
-
-    async def start(
-        self, session_id: str, user_prompt: "UserPromptInput", *, principal: Principal,
-        idempotency_key: str | None = None, output: "type[BaseModel] | None" = None,
-        correlation: "Mapping[str, object] | None" = None, files: "Sequence[str]" = (),
-        planning: bool | None = None, thinking: "ThinkingValue | None" = None, agent: "str | Agent[AppT] | None" = None,
-    ) -> "Execution[AppT] | _NativeSessionTurn[AppT, _NativeTurnResult]":
-        """Start a native turn with an explicit agent, or an agent-bound execution."""
-        if agent is not None:
-            if idempotency_key is None:
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "idempotency_key"})
-            session = self._bind_native_session(session_id, principal=principal, local_workspace=False)
-            receipt = await self._start_turn_receipt(
-                session_id, user_prompt, agent=agent, principal=principal, idempotency_key=idempotency_key,
-                output=output, correlation=correlation, files=files,
-                planning=planning, thinking=thinking,
-            )
-            return session._turn(receipt.turn_id, principal)
-        self._agent_session_service()
-        return await self._start_session(session_id, user_prompt, principal=principal,
-            idempotency_key=idempotency_key, output=output, correlation=correlation,
-            files=files, planning=planning, thinking=thinking)
 
     async def inspect(
         self, session_id: str, *, principal: Principal,

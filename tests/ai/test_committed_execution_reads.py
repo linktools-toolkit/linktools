@@ -117,7 +117,7 @@ async def test_native_next_turn_uses_canonical_continuation_across_runtimes(tmp_
         owner, reader = runtimes
         principal = owner.default_principal
         await owner.sessions.create_turn_session("session", principal=principal)
-        first = await owner.sessions.start(
+        first = await owner.sessions.start_turn(
             "session", "first", principal=principal, agent="default", idempotency_key="first",
         )
         try:
@@ -129,7 +129,7 @@ async def test_native_next_turn_uses_canonical_continuation_across_runtimes(tmp_
             release.set()
             expected = ExecutionStatus.CANCELLED if cancel else ExecutionStatus.SUCCEEDED
             assert (await asyncio.wait_for(first.wait_final(), 10)).status is expected
-            second = await reader.sessions.start(
+            second = await reader.sessions.start_turn(
                 "session", "second", principal=principal, agent="default", idempotency_key="second",
             )
             assert (await asyncio.wait_for(second.wait_final(), 10)).status is ExecutionStatus.SUCCEEDED

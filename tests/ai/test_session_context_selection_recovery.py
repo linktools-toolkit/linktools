@@ -56,7 +56,7 @@ async def test_current_turn_keeps_tool_results_across_runtime_recovery(tmp_path:
     async with open_host() as runtime:
         principal = Principal("owner", runtime.tenant_id)
         await runtime.sessions.create_turn_session("session", principal=principal)
-        old = await runtime.sessions.start(
+        old = await runtime.sessions.start_turn(
             "session", "old question", agent="reader", principal=principal, idempotency_key="old",
         )
         assert (await old.wait_final(timeout_seconds=5)).view["output"] == {"text": "old answer"}

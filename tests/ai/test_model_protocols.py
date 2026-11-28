@@ -367,7 +367,7 @@ async def test_web_protocol_diagnostics_and_native_history_after_agent_removal(m
         agent = runtime.agents.get("old")
         actor = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=actor)
-        turn = await runtime.sessions.start("session", "Hello", principal=actor, agent=agent,
+        turn = await runtime.sessions.start_turn("session", "Hello", principal=actor, agent=agent,
                                             idempotency_key="hello", thinking=False)
         assert (await turn.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
         # Raw client request diagnostics belong to independent Execution, not Session Trace.

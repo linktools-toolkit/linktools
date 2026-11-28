@@ -44,7 +44,7 @@ async def test_graph_trace_settles_without_copying_accepted_session_prefix(tmp_p
             ):
                 principal = runtime.default_principal
                 await runtime.sessions.create_turn_session("chat", principal=principal)
-                first = await runtime.sessions.start("chat", "accepted prefix", agent="default", principal=principal,
+                first = await runtime.sessions.start_turn("chat", "accepted prefix", agent="default", principal=principal,
                                                      idempotency_key="first")
                 assert (await first.wait_final()).status is ExecutionStatus.SUCCEEDED
                 task = Task.from_agent("trace.agent", runtime.agents.get())

@@ -102,7 +102,7 @@ async def test_graph_step_reopens_exact_session_result_without_trace(
             principal, "graph-session", "create-session", cwd="package" if attachment == "cwd" else None,
         ))
         if attachment == "cwd":
-            prior = await runtime.sessions.start(
+            prior = await runtime.sessions.start_turn(
                 created.session_id, "learn from a file", agent="default", principal=principal,
                 idempotency_key="learn-scope", files=("remembered/source.txt",),
             )

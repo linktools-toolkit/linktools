@@ -25,7 +25,7 @@ _PRINCIPAL = Principal("reader", "default")
 
 
 async def _send(runtime: Runtime):
-    return await runtime.sessions.start(
+    return await runtime.sessions.start_turn(
         _SESSION, "inspect", agent=runtime.agents.get(), principal=_PRINCIPAL, idempotency_key="original",
     )
 

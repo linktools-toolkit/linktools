@@ -119,9 +119,9 @@ async def _assert_split_step_text_roundtrip(storage: PersistenceStorage) -> None
             frames = asyncio.Queue()
             detach = runtime.sessions.observe_turn_session("chat", frames.put_nowait)
             try:
-                turn_id = await runtime.sessions.start_turn(
+                turn_id = (await runtime.sessions.start_turn(
                     "chat", "question", agent="default", principal=principal, idempotency_key="first",
-                )
+                )).key.turn_id
                 async with asyncio.timeout(10):
                     while (frame := await frames.get())["type"] != "terminal":
                         pass

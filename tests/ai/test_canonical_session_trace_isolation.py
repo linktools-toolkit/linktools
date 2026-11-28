@@ -96,7 +96,7 @@ async def test_session_trace_sink_cannot_hold_or_fail_authoritative_turn(
                     await blocker.exec_driver_sql("BEGIN IMMEDIATE")
                 event.listen(trace_engine.sync_engine, "before_cursor_execute", observe_trace_write)
                 try:
-                    turn = await runtime.sessions.start(
+                    turn = await runtime.sessions.start_turn(
                         session.session_id, "question", agent=runtime.agents.get(), principal=principal,
                         idempotency_key="request",
                     )
@@ -233,7 +233,7 @@ async def test_session_starts_with_unreachable_separate_trace(tmp_path: Path) ->
             ):
                 assert not attempts.is_set()
                 session = await runtime.agents.get().create_session("chat")
-                turn = await runtime.sessions.start(
+                turn = await runtime.sessions.start_turn(
                     session.session_id, "question", agent=runtime.agents.get(), principal=runtime.default_principal,
                     idempotency_key="request",
                 )
@@ -337,7 +337,7 @@ async def test_model_messages_select_earlier_turns_after_sqlite_reopen(
             principal = runtime.default_principal
             session = await runtime.agents.get().create_session("chat", principal=principal)
             for number in range(1, 4):
-                turn = await runtime.sessions.start(
+                turn = await runtime.sessions.start_turn(
                     session.session_id, f"question-{number}", agent=runtime.agents.get(), principal=principal,
                     idempotency_key=f"request-{number}",
                 )
@@ -407,7 +407,7 @@ async def test_session_trace_does_not_change_authoritative_sql_writes(tmp_path: 
                 session = await runtime.agents.get().create_session("chat")
                 event.listen(primary.sync_engine, "before_cursor_execute", observe_primary)
                 event.listen(trace.sync_engine, "before_cursor_execute", observe_trace)
-                turn = await runtime.sessions.start(
+                turn = await runtime.sessions.start_turn(
                     session.session_id, "question", agent=runtime.agents.get(), principal=runtime.default_principal,
                     idempotency_key="request",
                 )

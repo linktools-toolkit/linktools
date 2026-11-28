@@ -191,7 +191,7 @@ async def test_native_session_inspect_skips_body_sql_and_refresh_is_authoritativ
     ) as runtime:
         await runtime.sessions.create_turn_session("session", principal=_PRINCIPAL)
         if body:
-            turn = await runtime.sessions.start(
+            turn = await runtime.sessions.start_turn(
                 "session", "first", principal=_PRINCIPAL, agent="default", idempotency_key="turn-1",
             )
             assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
@@ -417,7 +417,7 @@ async def test_display_cache_facade_passes_max_age_to_custom_service():
         async def refresh(self, session_id, *, principal, cursor, limit, max_age):
             calls.append((session_id, principal, cursor, limit, max_age))
             return "custom"
-    facade = RuntimeSessions(Custom(), object(), start_session=None, bind_session=None, ensure_open=lambda: None)
+    facade = RuntimeSessions(Custom(), object(), bind_session=None, ensure_open=lambda: None)
     assert await facade.refresh("session", principal=_PRINCIPAL, max_age=0) == "custom"
     assert await facade.refresh("session", principal=_PRINCIPAL, max_age=3) == "custom"
     assert calls == [("session", _PRINCIPAL, None, 100, 0), ("session", _PRINCIPAL, None, 100, 3)]

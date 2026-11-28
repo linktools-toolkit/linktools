@@ -16,7 +16,7 @@ async def test_committed_history_rejects_missing_turn(tmp_path, damage):
     async with _window_host(tmp_path) as (state, runtime, principal, _, _):
         turns = []
         for number in range(1, 5):
-            turn = await runtime.sessions.start(
+            turn = await runtime.sessions.start_turn(
                 "session", f"turn-{number}", agent="default",
                 principal=principal, idempotency_key=f"key-{number}",
             )
@@ -30,7 +30,7 @@ async def test_committed_history_rejects_missing_turn(tmp_path, damage):
                 "session", "fork", principal=principal,
                 expected_revision=source["revision"], idempotency_key="fork",
             )
-            turn = await runtime.sessions.start(
+            turn = await runtime.sessions.start_turn(
                 "fork", "new branch turn", agent="default",
                 principal=principal, idempotency_key="fork-turn",
             )

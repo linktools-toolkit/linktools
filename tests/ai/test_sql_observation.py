@@ -193,7 +193,7 @@ async def test_native_sqlite_turn_statement_budgets(tmp_path: Path, observers: i
         (runtime, state), (reader, reader_state) = runtimes
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("debug-session", principal=principal)
-        warm = await runtime.sessions.start(
+        warm = await runtime.sessions.start_turn(
             session.session_id, "previous", agent="default", principal=principal, idempotency_key="first",
         )
         assert (await warm.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
@@ -221,7 +221,7 @@ async def test_native_sqlite_turn_statement_budgets(tmp_path: Path, observers: i
 
             phase = "admission"
             block()
-            turn = await runtime.sessions.start(
+            turn = await runtime.sessions.start_turn(
                 session.session_id, "current", agent="default", principal=principal, idempotency_key="second",
             )
             await asyncio.wait_for(entered.wait(), 5)

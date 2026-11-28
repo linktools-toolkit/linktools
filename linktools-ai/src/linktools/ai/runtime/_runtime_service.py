@@ -408,10 +408,11 @@ class Runtime(Generic[AppT]):
         self._executions = RuntimeExecutions(
             execution, self._get_execution, input_captures,
             bind_execution=self._execution_handle, ensure_open=self._ensure_open,
+            start_in_session=self._start_existing_session,
         )
         self._session_service = session
         self._sessions = RuntimeSessions(
-            session, self._get_session, start_session=self._start_existing_session,
+            session, self._get_session,
             bind_session=self._session_handle, ensure_open=self._ensure_open,
             turn_runner=turn_runner,
             runtime=self,

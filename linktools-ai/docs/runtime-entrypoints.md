@@ -25,7 +25,8 @@ manager for ordinary Agent calls.
 | `agent.run(...)`, `session.run(...)` | `WaitResult[ExecutionResult]` | Unchanged: start and wait, with optional observation |
 | `agent.session(id, ...)` | `Session` | Unchanged: lazy definition-bound handle, no creation/read |
 | `agent.create_session(id, ...)` | `Session` | Unchanged: create then bind, retaining Agent derivations |
-| `runtime.sessions.start(id, prompt, principal=..., ...)` | No facade operation | `Execution`, strict existing-session admission without a display read |
+| `runtime.sessions.start_turn(id, prompt, agent=..., principal=..., idempotency_key=...)` | Turn ID | Turn handle for a native SQL session |
+| `runtime.executions.start_in_session(id, prompt, principal=..., ...)` | `Execution` through an overloaded Session entry | `Execution`, strict Agent-bound session admission without a display read |
 | `runtime.sessions.get(id, principal=...)` | `Session` | Unchanged: authorized lookup and handle |
 | `runtime.sessions.create(agent_id, request)` | `SessionView` | `Session`, bound to `request.principal` |
 | `runtime.sessions.fork(agent_id, id, request)` | `SessionView` | `Session`, bound to `request.principal` |
@@ -89,15 +90,16 @@ choose the Agent on every send, and use the returned turn ID for exact readback:
 
 ```python
 await runtime.sessions.create_turn_session(session_id, principal=actor)
-turn_id = await runtime.sessions.start_turn(
+turn = await runtime.sessions.start_turn(
     session_id, "Hello", agent="default", principal=actor, idempotency_key=request_id,
 )
 page = await runtime.history.turn_session(session_id, principal=actor, limit=20)
-turn = await runtime.history.turn_result(session_id, turn_id, principal=actor)
+result = await turn.result()
 ```
 
-The send is an admission receipt; exact readback can still report an active or
-waiting turn. Retained timeline pages contain committed turns and carry an
+Admission returns a Turn handle, not the final answer. Exact readback can
+still report an active or waiting turn. Pass `agent=` explicitly; it only
+selects the Agent. Retained timeline pages contain committed turns and carry an
 opaque `next_cursor`. Step selection belongs to the Agent's capabilities and
 does not select another session or timeline. The session does not store an
 Agent or application owner; the host policy authorizes the session.

@@ -59,7 +59,7 @@ async def test_native_session_loads_a_skill_and_persists_only_preload_reference(
         async with _open_runtime(tmp_path, features) as (state, runtime):
             actor = runtime.default_principal
             await runtime.sessions.create_turn_session("session", principal=actor, idempotency_key="create")
-            turn = await runtime.sessions.start("session", "Load the guide", agent="default", principal=actor, idempotency_key="first")
+            turn = await runtime.sessions.start_turn("session", "Load the guide", agent="default", principal=actor, idempotency_key="first")
             result = await turn.wait_final(timeout_seconds=10)
             assert result.status is ExecutionStatus.SUCCEEDED
             assert result.view["output"] == {"text": "done"}
@@ -81,10 +81,10 @@ async def test_native_session_executes_selected_mcp_tool_once(tmp_path, monkeypa
         async with _open_runtime(tmp_path, features) as (_state, runtime):
             actor = runtime.default_principal
             await runtime.sessions.create_turn_session("session", principal=actor, idempotency_key="create")
-            first = await runtime.sessions.start("session", "Echo", agent="default", principal=actor, idempotency_key="first")
+            first = await runtime.sessions.start_turn("session", "Echo", agent="default", principal=actor, idempotency_key="first")
             result = await first.wait_final(timeout_seconds=10)
             assert result.status is ExecutionStatus.SUCCEEDED
-            replay = await runtime.sessions.start("session", "Echo", agent="default", principal=actor, idempotency_key="first")
+            replay = await runtime.sessions.start_turn("session", "Echo", agent="default", principal=actor, idempotency_key="first")
             assert replay.key == first.key
             assert (await replay.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
             assert len(remote.effects) == 1
