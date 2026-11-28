@@ -255,6 +255,11 @@ application = ACPApplication.for_workspace(
 )
 ```
 
+With `SessionCapability(checkpoints=True)`, the Session owner selects its Step
+adapter from Persistence. The pre-existing split SQL profile remains limited to
+plain text or a single fixed approval tool; other tool profiles use one SQL storage
+group for Conversation, Step and tool receipts.
+
 Text-only sessions and supported read-only tool configurations do not require
 checkpoints. The optional Execution declaration controls independent Execution
 retention and commit behavior; by default ACP retains Execution history. To
@@ -302,9 +307,16 @@ omitted fields in declaration payloads. `RuntimeFeatures` supplies defaults of
 ```python
 features = RuntimeFeatures("application", defaults={
     "agent": {"tool_retries": 5, "output_retries": 2},
+    "execution": {"auto_recover": False},
+    "stream": {"output_preview_field": "message"},
     "custom.search": {"timeout": 10},
 })
 ```
+
+The `execution` namespace configures Execution, not Session or its history.
+An optional `stream.output_preview_field` selects a top-level string from structured
+output for live display; it does not change output validation or the stored
+Agent binding. Omit it to disable structured previews.
 
 Custom namespaces are retained for their owning consumers. Agent retry defaults
 are validated when the compiler consumes the `agent` namespace. Omitted keys

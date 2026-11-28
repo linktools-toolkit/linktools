@@ -160,7 +160,7 @@ async def test_session_checkpoints_do_not_enable_step_for_standalone_execution(t
 
 
 @pytest.mark.asyncio
-async def test_session_checkpoints_reject_split_sql_before_claiming_a_turn(tmp_path):
+async def test_session_checkpoints_use_the_configured_split_sql_for_plain_chat(tmp_path):
     execution = StorageRoute.sqlite(tmp_path / 'execution.db')
     conversation = StorageRoute.sqlite(tmp_path / 'conversation.db')
     storage = PersistenceStorage(PersistencePlan(conversation=conversation, execution=execution, checkpoint=execution))
@@ -169,15 +169,13 @@ async def test_session_checkpoints_reject_split_sql_before_claiming_a_turn(tmp_p
                             authorization=_HostAuthorization()) as runtime:
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session('session', principal=principal)
-        before = await runtime.history.turn_session('session', principal=principal)
-        assert before['session']['active_turn_id'] is None
-        assert before['timeline']['items'] == []
-        with pytest.raises(AIError) as unsupported:
-            await runtime.sessions.start_turn(
-                'session', 'question', agent='default', principal=principal, idempotency_key='send',
-            )
-        assert unsupported.value.code is ErrorCode.STORAGE_CAPABILITY_MISSING
-        assert await runtime.history.turn_session('session', principal=principal) == before
+        turn = await runtime.sessions.start(
+            'session', 'question', agent='default', principal=principal, idempotency_key='send',
+        )
+        assert (await turn.wait_final(timeout_seconds=5)).view["output"] == {"text": "answer"}
+        record = await runtime._state.session_turns.get_turn(turn.key)
+        assert record["request_json"]["split_step"] is True
+
 
 
 @pytest.mark.asyncio

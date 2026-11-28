@@ -24,8 +24,6 @@ class ExecutionCapability(AbstractCapability[AgentContext[object]]):
     All modes retain shared admission coordination and mandatory safety writes.
     retain_history selects terminal continuation retention independently of sessions;
     the effective policy is captured at admission and bound afresh for each run.
-    output_preview_field explicitly exposes a bounded top-level string from an output
-    tool as ephemeral display data. It is not validated output or durable history.
     """
 
     id = "runtime.execution"
@@ -34,7 +32,6 @@ class ExecutionCapability(AbstractCapability[AgentContext[object]]):
     def __init__(
         self, *, commit: CommitPolicy = CommitPolicy.sync(),
         retain_history: bool = False,
-        output_preview_field: str | None = None,
     ) -> None:
         if not isinstance(retain_history, bool):
             raise TypeError("retain_history must be bool")
@@ -43,9 +40,6 @@ class ExecutionCapability(AbstractCapability[AgentContext[object]]):
             "terminal",
         }:
             raise ValueError("Execution requires sync or terminal commit")
-        if output_preview_field is not None and (not isinstance(output_preview_field, str) or not output_preview_field):
-            raise ValueError("output_preview_field must be a non-empty field name")
-        self.output_preview_field = output_preview_field
         self._commit = commit
         self._retain_history = retain_history
 

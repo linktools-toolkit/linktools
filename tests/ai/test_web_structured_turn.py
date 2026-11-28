@@ -116,7 +116,6 @@ async def test_web_structured_turn_replays_the_validated_output_item(tmp_path, c
 async def test_native_structured_preview_is_live_selected_and_replaced_on_validation_retry(tmp_path, opted_in):
     from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
-    from linktools.ai.capability import ExecutionCapability
     from linktools.ai.web._app import _native_turn_event_wire
 
     class Policy(TenantAuthorizationPolicy):
@@ -145,8 +144,9 @@ async def test_native_structured_preview_is_live_selected_and_replaced_on_valida
                                     tool_call_id="valid")}
             yield {0: DeltaToolCall(json_args=' answer"}')}
 
-    features = _persistence_capabilities()
-    features.capability(ExecutionCapability(output_preview_field="message" if opted_in else None))
+    from linktools.ai.runtime import RuntimeFeatures
+
+    features = RuntimeFeatures("structured-preview", defaults={"stream": {"output_preview_field": "message"}} if opted_in else None)
     features.agent("default", allow_tools=(), allow_skills=(), allow_subagents=())
     model_features(_Models(FunctionModel(stream_function=respond)), features)
     storage = PersistenceStorage.sqlite(tmp_path / "structured-preview.db")

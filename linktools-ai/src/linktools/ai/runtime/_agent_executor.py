@@ -301,6 +301,7 @@ class AgentExecutor:
         workspace_factory: Callable[..., WorkspaceBackend] | None = None,
         tool_responses: ToolResponseFixture | None = None,
         canonical_memory_store: Callable[[str, str, str], MemoryStore] | None = None,
+        output_preview_field: str | None = None,
     ) -> None:
         if not isinstance(skill_sources, SkillSourceRegistry):
             raise TypeError("skill_sources must be SkillSourceRegistry")
@@ -313,6 +314,7 @@ class AgentExecutor:
         self._workspace_factory = workspace_factory
         self._tool_responses = tool_responses
         self._canonical_memory_store = canonical_memory_store
+        self._output_preview_field = output_preview_field
 
     async def capture_preload_skills(self, binding: AgentBinding) -> tuple[Mapping[str, JsonValue], ...]:
         """Capture preload roots inside the admitted Agent's configured scope.
@@ -972,6 +974,7 @@ class AgentExecutor:
                         runtime_capabilities=runtime_capabilities,
                         callbacks=callbacks,
                         model_journal=model_journal,
+                        output_preview_field=self._output_preview_field,
                     )
                     if scope.thinking is not None:
                         capabilities = (*capabilities, _thinking_capability(scope.thinking))
@@ -1265,6 +1268,7 @@ async def _materialize_agent(
     current_agent: Callable[[CompiledAgent], Awaitable[CompiledAgent]] | None = None,
     asset_sources: Mapping[str, AssetStoreReader] | None = None,
     collect_compaction: Callable[[AgentRunRecorder], None] | None = None,
+    output_preview_field: str | None = None,
 ) -> tuple[
     PydanticAgent[AgentContext[object], object],
     tuple[AbstractCapability[AgentContext[object]], ...],
@@ -1637,7 +1641,7 @@ async def _materialize_agent(
             streamed_output_bytes=scope.streamed_output_bytes,
             output_preview=None if scope.parent_agent_run_id is not None or scope.context.parent_execution_id is not None else OutputPreview.from_binding(
                 scope.binding.output_binding,
-                runtime_policy.execution,
+                output_preview_field,
             ),
         )
     )

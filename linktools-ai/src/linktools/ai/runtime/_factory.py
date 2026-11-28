@@ -229,6 +229,11 @@ async def compose_runtime_components(
     auto_recover = execution_defaults.get("auto_recover", False)
     if not isinstance(auto_recover, bool):
         raise TypeError("execution.auto_recover must be bool")
+    stream_defaults = {} if captured is None else captured.defaults.get("stream", {})
+    assert isinstance(stream_defaults, dict)  # Resolution validates defaults namespaces.
+    output_preview_field = stream_defaults.get("output_preview_field")
+    if output_preview_field is not None and (not isinstance(output_preview_field, str) or not output_preview_field):
+        raise ValueError("stream.output_preview_field must be a non-empty field name")
     selected_limits = PromptLimits() if captured is None else captured.limits
     workspace = None if captured is None else captured.workspace
     workspace_factory = LocalWorkspaceBackend if captured is None else captured.workspace_factory
@@ -463,6 +468,7 @@ async def compose_runtime_components(
             memory_scope=memory_scope,
             session_execution_ready=session_capability.enabled,
             auto_recover=auto_recover,
+            output_preview_field=output_preview_field,
             tool_responses=tool_responses,
             wake_graph=wake_graph,
         )
@@ -630,6 +636,7 @@ async def _build_local_components(
     memory_scope: str | None,
     session_execution_ready: bool,
     auto_recover: bool,
+    output_preview_field: str | None,
     tool_responses: ToolResponseFixture | None,
     wake_graph: Callable[[str, str], Awaitable[None]] | None,
 ) -> _RuntimeComponents:
@@ -786,6 +793,7 @@ async def _build_local_components(
             workspace_factory=workspace_factory,
             tool_responses=tool_responses,
             canonical_memory_store=canonical_memory_store,
+            output_preview_field=output_preview_field,
         )
     except BaseException:
         raise
@@ -912,12 +920,13 @@ async def _build_local_components(
 
             policy = _runtime_feature_policy(binding.compiled_agent.runtime_contributions)
             if policy.session.checkpoints:
-                if settled_split or any(member.storage_group is not conversation_group for member in (
+                coowned = all(member.storage_group is conversation_group for member in (
                     state.execution.executions.state_store, state.checkpoint.tools.state_store,
-                )):
+                ))
+                if not coowned and split_sql_source is None:
                     raise AIError(
                         ErrorCode.STORAGE_CAPABILITY_MISSING,
-                        "Session checkpoints require Session, Step and tool receipts in one SQL transaction",
+                        "Session checkpoints require coowned SQL storage or a supported split SQL topology",
                     )
                 native = await prepare_session_step()
             else:

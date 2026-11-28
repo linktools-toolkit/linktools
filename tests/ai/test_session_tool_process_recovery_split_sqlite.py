@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 
-from linktools.ai.capability import AgentContext, CapabilityContribution, StepPersistenceCapability
+from linktools.ai.capability import AgentContext, CapabilityContribution, SessionCapability
 from linktools.ai.core import ApprovalDecision, ApprovalStatus, ExecutionStatus, Principal, ToolOperationStatus
 from linktools.ai.execution import ApprovalDecisionRequest
 from linktools.ai.persistence import Persistence
@@ -48,7 +48,7 @@ def _features(root: Path) -> RuntimeFeatures:
     tool = features.tool(lookup, effect_policy="none")
     tool.requires_approval = True
     features._register(CapabilityContribution.from_opaque("tool", "lookup", tool))
-    features.capability(StepPersistenceCapability())
+    features.capability(SessionCapability(checkpoints=True))
     features.agent("default", model="default", allow_tools=("lookup",))
     return model_features(_Models(_UsageFunctionModel(reply)), features)
 
