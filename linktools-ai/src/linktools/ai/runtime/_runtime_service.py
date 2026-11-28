@@ -216,7 +216,7 @@ class Runtime(Generic[AppT]):
         writable persistence without namespace, storage or tenant overrides.
         Keep the returned Runtime before entering when cleanup may need retrying.
         Features opt into Agent; omitting them does not start an Agent producer.
-        Set auto_recover=True in RuntimeFeatures for startup Execution reconciliation.
+        RuntimeFeatures defaults can enable startup Execution reconciliation.
         """
         if persistence is not None:
             if namespace is not None or storage is not None or tenant_id is not None:

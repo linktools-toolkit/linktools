@@ -74,7 +74,7 @@ async def test_startup_recovery_runs_when_explicitly_enabled(
     before = await _admit_without_worker(tmp_path / "state", models, monkeypatch)
     assert calls == []
     storage = PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
-    features = model_features(models, _capabilities(RuntimeFeatures(_NAMESPACE, auto_recover=True)))
+    features = model_features(models, _capabilities(RuntimeFeatures(_NAMESPACE, defaults={"execution": {"auto_recover": True}})))
     async with (
         Persistence.open(_NAMESPACE, storage=storage) as persistence,
         Runtime.open(persistence=persistence, features=features.borrow()) as runtime,
@@ -103,7 +103,7 @@ async def test_startup_without_opt_in_preserves_admission_until_explicit_recover
     models = _Models(FunctionModel(stream_function=model))
     before = await _admit_without_worker(tmp_path / "state", models, monkeypatch)
     storage = PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
-    features = model_features(models, _capabilities(RuntimeFeatures(_NAMESPACE, **options)))
+    features = model_features(models, _capabilities(RuntimeFeatures(_NAMESPACE, defaults={"execution": options})))
     async with (
         Persistence.open(_NAMESPACE, storage=storage) as persistence,
         Runtime.open(persistence=persistence, features=features) as runtime,
@@ -245,6 +245,9 @@ async def test_explicit_graph_recovery_remains_available_when_startup_disabled(t
     assert not runtime._state.ready
 
 
-def test_startup_recovery_option_requires_a_boolean() -> None:
-    with pytest.raises(TypeError, match="auto_recover must be bool"):
-        RuntimeFeatures(auto_recover="false")
+@pytest.mark.asyncio
+async def test_startup_recovery_option_requires_a_boolean() -> None:
+    features = RuntimeFeatures(defaults={"execution": {"auto_recover": "false"}})
+    with pytest.raises(TypeError, match="execution.auto_recover must be bool"):
+        async with Runtime.open("invalid-option", storage=PersistenceStorage.in_memory(), features=features):
+            pytest.fail("a string must not enable recovery")

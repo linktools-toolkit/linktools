@@ -194,7 +194,7 @@ async def test_local_sqlite_process_exit_preserves_same_execution_recovery(tmp_p
     async with Persistence.open('startup-recovery', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as state:
         async with Runtime.open(persistence=state,
             features=model_features(_Models(FunctionModel(stream_function=recovered)), _capabilities(
-                RuntimeFeatures("startup-recovery", auto_recover=auto_recover),
+                RuntimeFeatures("startup-recovery", defaults={"execution": {"auto_recover": auto_recover}}),
             )),
         ) as runtime:
             if not auto_recover:

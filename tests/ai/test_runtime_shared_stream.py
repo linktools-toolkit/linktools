@@ -670,7 +670,7 @@ async def test_waiting_resume_opens_each_durable_admission_once(tmp_path) -> Non
     workspace = Workspace.load(tmp_path, policy=WorkspacePolicy(
         tool_permissions=ToolPermissionPolicy(default="ask"),
     ))
-    application = workspace_features("application", workspace=workspace, auto_recover=True)
+    application = workspace_features("application", workspace=workspace, defaults={"execution": {"auto_recover": True}})
     application.agent("default", model="default", allow_tools=("read_file",))
     backend = _CountingStreamBackend()
     application.capability(ExecutionCapability(), scope="runtime")

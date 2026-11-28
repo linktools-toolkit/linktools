@@ -52,7 +52,7 @@ class _TurnNoticeChannel:
 
 
 def _group(terminal: bool = True, *, auto_recover: bool = False):
-    group = RuntimeFeatures('shared-pending', auto_recover=auto_recover)
+    group = RuntimeFeatures('shared-pending', defaults={"execution": {"auto_recover": auto_recover}})
     group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync()), scope='runtime')
     group.agent('default', model='default', allow_tools=())
     if not terminal:

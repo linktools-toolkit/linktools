@@ -259,7 +259,7 @@ async def test_execution_payload_runtime_prepared_handoff_reuses_body_after_cold
         calls += 1
         return ModelResponse(parts=[TextPart(_OUTPUT)])
 
-    features = RuntimeFeatures("execution-payload-handoff", auto_recover=True)
+    features = RuntimeFeatures("execution-payload-handoff", defaults={"execution": {"auto_recover": True}})
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
@@ -309,7 +309,7 @@ async def test_execution_payload_runtime_native_checkpoint_retains_body_after_re
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     name = "execution-payload-checkpoint"
-    features = RuntimeFeatures(name, auto_recover=True)
+    features = RuntimeFeatures(name, defaults={"execution": {"auto_recover": True}})
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     step_database = tmp_path / "steps.db"
     features.capability(native_checkpoint(database=step_database), scope="runtime")

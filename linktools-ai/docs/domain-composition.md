@@ -41,7 +41,7 @@ That port preserves the Agent producer's execution authority.
 - `Runtime.open(namespace, *, storage, tenant_id="default", context=None,
   features=None, metrics=None, authorization=None)` returns
   the context-managed Runtime. Omitting features does not start an Agent
-  producer. Declare `RuntimeFeatures(..., auto_recover=True)` to opt into startup-wide
+  producer. Declare `RuntimeFeatures(..., defaults={"execution": {"auto_recover": True}})` to opt into startup-wide
   Execution reconciliation. This does not control explicit Session or Task Graph recovery. `Runtime.open(persistence=..., ...)` borrows an already-open,
   writable Persistence and inherits its namespace and tenant. Do not pass a
   namespace, tenant, or storage configuration in borrowing mode. Retain the returned Runtime when retrying

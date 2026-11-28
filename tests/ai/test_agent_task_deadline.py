@@ -196,7 +196,7 @@ def _recovery_group(
     async def marker(value: str) -> str:
         return value
 
-    group = RuntimeFeatures("deadline-recovery", auto_recover=auto_recover)
+    group = RuntimeFeatures("deadline-recovery", defaults={"execution": {"auto_recover": auto_recover}})
     group.capability(native_checkpoint(database=native_database), scope="runtime")
     group.tool(marker, effect_policy="non_replay_safe" if change == "tool" else "none")
     group.agent("default", model="default", allow_tools=(), allow_skills=(),

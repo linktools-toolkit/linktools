@@ -215,7 +215,7 @@ async def test_current_execution_record_retains_conversation_through_recovery(
 ) -> None:
     from linktools.ai.execution import ExecutionRequest
 
-    group: RuntimeFeatures[None] = RuntimeFeatures("application", auto_recover=True)
+    group: RuntimeFeatures[None] = RuntimeFeatures("application", defaults={"execution": {"auto_recover": True}})
     group.capability(native_checkpoint(), scope="runtime")
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     storage_path = tmp_path / "runtime"

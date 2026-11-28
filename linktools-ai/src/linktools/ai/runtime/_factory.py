@@ -224,6 +224,11 @@ async def compose_runtime_components(
         raise TypeError("features must be RuntimeFeatures or RuntimeFeaturesSource")
     source = features.borrow() if isinstance(features, RuntimeFeatures) else features
     captured = None if source is None else await source.resolve()
+    execution_defaults = {} if captured is None else captured.defaults.get("execution", {})
+    assert isinstance(execution_defaults, dict)  # Resolution validates defaults namespaces.
+    auto_recover = execution_defaults.get("auto_recover", False)
+    if not isinstance(auto_recover, bool):
+        raise TypeError("execution.auto_recover must be bool")
     selected_limits = PromptLimits() if captured is None else captured.limits
     workspace = None if captured is None else captured.workspace
     workspace_factory = LocalWorkspaceBackend if captured is None else captured.workspace_factory
@@ -457,7 +462,7 @@ async def compose_runtime_components(
             input_materializer=input_materializer,
             memory_scope=memory_scope,
             session_execution_ready=session_capability.enabled,
-            auto_recover=source is not None and source.declaration.auto_recover,
+            auto_recover=auto_recover,
             tool_responses=tool_responses,
             wake_graph=wake_graph,
         )

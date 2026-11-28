@@ -424,7 +424,7 @@ async def test_concurrent_sql_startup_converges_on_one_deferred_resume(
     workspace = Workspace.load(
         tmp_path, policy=WorkspacePolicy(tool_permissions=ToolPermissionPolicy(default="ask")),
     )
-    application = workspace_features("application", workspace=workspace, auto_recover=True)
+    application = workspace_features("application", workspace=workspace, defaults={"execution": {"auto_recover": True}})
     application.agent("default", model="default", allow_tools=("read_file",))
     original_state = PersistenceStorage.sqlite(tmp_path / "runtime.db")
     async with Persistence.open(_NAMESPACE, storage=original_state) as persistence_428, Runtime.open(persistence=persistence_428, features=model_features(_ToolModels(), application)) as original:

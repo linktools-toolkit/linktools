@@ -135,7 +135,6 @@ class RuntimeFeatures(Generic[AppT]):
         workspace_factory: "Callable[..., WorkspaceBackend] | None" = LocalWorkspaceBackend,
         limits: PromptLimits | None = None,
         defaults: Mapping[str, JsonValue] | None = None,
-        auto_recover: bool = False,
         filter: Callable[[AgentSpec, CapabilityContribution[object]], bool] | None = None,
     ) -> None:
         if not isinstance(group_id, str) or not group_id.strip():
@@ -145,9 +144,6 @@ class RuntimeFeatures(Generic[AppT]):
         self._limits = PromptLimits() if limits is None else limits
         if not isinstance(self._limits, PromptLimits):
             raise TypeError("limits must be PromptLimits")
-        if not isinstance(auto_recover, bool):
-            raise TypeError("auto_recover must be bool")
-        self._auto_recover = auto_recover
         self._filter = filter
         self._id = group_id
         self._workspace_factory = workspace_factory
@@ -157,11 +153,6 @@ class RuntimeFeatures(Generic[AppT]):
     @property
     def id(self) -> str:
         return self._id
-
-    @property
-    def auto_recover(self) -> bool:
-        """Whether startup reconciles durable Executions."""
-        return self._auto_recover
 
     @property
     def defaults(self) -> Mapping[str, JsonValue]:

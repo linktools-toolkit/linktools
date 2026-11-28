@@ -36,7 +36,7 @@ def _capabilities(
     *, conversation: bool = False, native_database: Path | None = None,
     retain_only: bool = False, auto_recover: bool = False,
 ) -> RuntimeFeatures:
-    group = RuntimeFeatures(_NAMESPACE, auto_recover=auto_recover)
+    group = RuntimeFeatures(_NAMESPACE, defaults={"execution": {"auto_recover": auto_recover}})
     if conversation or retain_only:
         group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     if not retain_only:
