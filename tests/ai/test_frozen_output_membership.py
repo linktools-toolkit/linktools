@@ -15,7 +15,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart, Tool
 from pydantic_ai.models.function import AgentInfo
 from pydantic_ai.tools import RunContext
 
-from linktools.ai.capability import AgentContext, StepPersistenceCapability
+from linktools.ai.capability import AgentContext
 from linktools.ai.core import ApprovalDecision, ExecutionStatus, Principal
 from linktools.ai.errors import ErrorCode
 from linktools.ai.execution import ApprovalDecisionRequest, ExecutionInputContext
@@ -59,7 +59,7 @@ def _features(model: Any, effects: list[str], *, retries: int = 1, approval: boo
     features = RuntimeFeatures("frozen-output-membership", defaults={"execution": {"retain_history": True}})
     features.capability(_Membership(approval=approval), revision=1, scope="agent")
     if checkpoints:
-        features.capability(StepPersistenceCapability(), scope="runtime")
+        features = features.with_defaults({"execution": {**features.defaults.get("execution", {}), "checkpoints": True}})
 
     def record_effect(context: AgentContext[None]) -> str:
         effects.append("recorded")

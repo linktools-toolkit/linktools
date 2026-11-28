@@ -93,7 +93,6 @@ from ..capability import (
     TraceCapability,
     MemoryCapability,
     ShellCapability,
-    StepPersistenceCapability,
     tool_effect_policy_from_metadata,
 )
 from ..core import (
@@ -120,6 +119,7 @@ from ..workspace import (
     Workspace,
 )
 
+from ._step_capability import _StepPersistenceCapability
 from ._budget import RunBudgetContext, RunBudgetCapability
 from ._current_toolsets import create_business_toolset, create_current_toolset
 from ._tool_metrics import ToolMetricContext
@@ -930,7 +930,7 @@ class AgentExecutor:
                         def select_session_capability(
                             capability: AbstractCapability[AgentContext[object]],
                         ) -> AbstractCapability[AgentContext[object]] | None:
-                            if isinstance(capability, (StepPersistence, StepPersistenceCapability, CapabilityPersistence)):
+                            if isinstance(capability, (StepPersistence, _StepPersistenceCapability, CapabilityPersistence)):
                                 # A native Session uses its own checkpoint and cannot lend an
                                 # independent Execution's durable capability-write authority.
                                 return None

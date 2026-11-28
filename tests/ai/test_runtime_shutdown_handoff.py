@@ -25,12 +25,11 @@ from .test_terminal_commit_shared_runtime import _HostAuthorization, _group
 
 
 def _checkpointed_execution_group():
-    from linktools.ai.capability import StepPersistenceCapability
     from linktools.ai.core import CommitPolicy
 
     features = _group(True)
     configure_execution(features, retain_history=True)
-    features.capability(StepPersistenceCapability())
+    features = features.with_defaults({"execution": {"retain_history": True, "checkpoints": True}})
     return features
 
 
@@ -149,7 +148,7 @@ async def test_handoff_recovers_same_execution_and_next_session_turn(handoff_sto
 @pytest.mark.parametrize("pending", [False, True])
 async def test_handoff_rejects_nonrecoverable_execution_without_closing_runtime(tmp_path: Path, pending: bool) -> None:
     from pydantic_ai.capabilities import CombinedCapability
-    from linktools.ai.capability import StepPersistenceCapability
+    from linktools.ai.runtime._step_capability import _StepPersistenceCapability
     from linktools.ai.core import CommitPolicy
     from linktools.ai.storage import InMemoryCacheBackend
 
@@ -161,7 +160,7 @@ async def test_handoff_rejects_nonrecoverable_execution_without_closing_runtime(
         yield "ready"
 
     features = _group(True)
-    features.capability(StepPersistenceCapability(), id="runtime.steps")
+    features.capability(_StepPersistenceCapability(), id="runtime.steps")
     configure_execution(
         features, retain_history=True, commit=CommitPolicy.terminal() if pending else CommitPolicy.sync(),
     )
@@ -172,7 +171,7 @@ async def test_handoff_rejects_nonrecoverable_execution_without_closing_runtime(
         features.capability(CombinedCapability([]), id="runtime.steps")
         active = await runtime.agents.get().start("Nonrecoverable", idempotency_key="first")
         await asyncio.wait_for(entered.wait(), 5)
-        features.capability(StepPersistenceCapability(), id="runtime.steps")
+        features.capability(_StepPersistenceCapability(), id="runtime.steps")
         with pytest.raises(AIError) as error:
             await runtime.handoff()
         assert error.value.code is ErrorCode.CAPABILITY_REQUIRED_MISSING
@@ -191,7 +190,7 @@ async def test_handoff_keeps_admitted_checkpoint_guarantee_across_policy_updates
     tmp_path: Path, late_checkpoint: bool,
 ) -> None:
     from pydantic_ai.capabilities import CombinedCapability
-    from linktools.ai.capability import StepPersistenceCapability
+    from linktools.ai.runtime._step_capability import _StepPersistenceCapability
     from linktools.ai.core import CommitPolicy
 
     entered = asyncio.Event()
@@ -204,12 +203,12 @@ async def test_handoff_keeps_admitted_checkpoint_guarantee_across_policy_updates
     features = _group(True)
     configure_execution(features, retain_history=True)
     if not late_checkpoint:
-        features.capability(StepPersistenceCapability(), id="runtime.steps")
+        features.capability(_StepPersistenceCapability(), id="runtime.steps")
     model_features(_Models(FunctionModel(stream_function=blocked)), features)
     storage = PersistenceStorage.from_root(tmp_path)
     async with Runtime.open("live-handoff", storage=storage, features=features) as runtime:
         if late_checkpoint:
-            features.capability(StepPersistenceCapability(), id="runtime.steps")
+            features.capability(_StepPersistenceCapability(), id="runtime.steps")
         execution = await runtime.agents.get().start("Resume me", idempotency_key="first")
         await asyncio.wait_for(entered.wait(), 5)
         features.capability(CombinedCapability([]), id="runtime.steps")
@@ -218,7 +217,7 @@ async def test_handoff_keeps_admitted_checkpoint_guarantee_across_policy_updates
     async def answer(messages, info):
         yield "recovered"
 
-    features.capability(StepPersistenceCapability(), id="runtime.steps")
+    features.capability(_StepPersistenceCapability(), id="runtime.steps")
     model_features(_Models(FunctionModel(stream_function=answer)), features)
     async with Runtime.open("live-handoff", storage=storage, features=features) as successor:
         recovered = await successor.executions.recover(execution.execution_id,

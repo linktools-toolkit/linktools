@@ -9,9 +9,11 @@ from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, Wra
 
 from ..errors import AIError, ErrorCode
 from ..core import CommitPolicy, validate_capability_id
-from ..capability import TraceCapability, StepPersistenceCapability
+from ..capability import TraceCapability
 from ..persistence import PersistenceDomain
 from ..persistence.capabilities import CapabilityPersistence
+
+from ._step_capability import _StepPersistenceCapability
 
 
 def validate_persistence_capabilities(
@@ -27,7 +29,7 @@ def validate_persistence_capabilities(
             for child in feature.capabilities:
                 collect(child)
             return
-        if isinstance(feature, (StepPersistence, StepPersistenceCapability)):
+        if isinstance(feature, (StepPersistence, _StepPersistenceCapability)):
             domain = PersistenceDomain.CHECKPOINT
         elif isinstance(feature, TraceCapability):
             domain = PersistenceDomain.TRACE

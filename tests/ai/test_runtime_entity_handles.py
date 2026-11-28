@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import StepPersistenceCapability
 from linktools.ai.core import (
     AuthorizationAction, ExecutionStatus, Principal, ResourceKind, ResourceRef,
     TaskStatus, TenantAuthorizationPolicy,
@@ -110,7 +109,7 @@ async def test_recovery_returns_handle_and_preserves_original_admitted_principal
         yield "unreachable"
 
     features = model_features(_Models(FunctionModel(stream_function=blocked)))
-    features.capability(StepPersistenceCapability())
+    features = features.with_defaults({"execution": {**features.defaults.get("execution", {}), "checkpoints": True}})
     storage = PersistenceStorage.from_root(tmp_path)
     original = Principal("caller", "default", "service")
     async with Runtime.open("recover-handle", storage=storage, features=features) as runtime:

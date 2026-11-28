@@ -13,7 +13,7 @@ from pydantic_ai.exceptions import ApprovalRequired
 from pydantic_ai.messages import ToolReturnPart
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
-from linktools.ai.capability import AgentContext, FileSystemCapability, StepPersistenceCapability
+from linktools.ai.capability import AgentContext, FileSystemCapability
 from linktools.ai.core import ApprovalDecision, service_principal
 from linktools.ai.execution import ApprovalDecisionRequest
 from linktools.ai.errors import AIError, ErrorCode
@@ -86,7 +86,7 @@ async def test_completed_file_return_survives_deferred_reopen(tmp_path: Path, ch
 
     def features() -> RuntimeFeatures[None]:
         result = RuntimeFeatures('deferred-file', defaults={"execution": {"retain_history": True}})
-        result.capability(StepPersistenceCapability())
+        result = result.with_defaults({"execution": {**result.defaults.get("execution", {}), "checkpoints": True}})
         result.capability(_Gate(), id='gate')
         result.capability(FileSystemCapability(Workspace.load(root)))
         result.model('default', _Binding(model))

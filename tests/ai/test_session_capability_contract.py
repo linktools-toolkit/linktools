@@ -8,7 +8,7 @@ from ._runtime_test_helpers import model_features
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import SessionCapability, StepPersistenceCapability, TraceCapability
+from linktools.ai.capability import SessionCapability, TraceCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import CommitPolicy, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
@@ -161,7 +161,7 @@ async def test_session_checkpoints_do_not_enable_step_for_standalone_execution(t
 
 @pytest.mark.asyncio
 async def test_standalone_step_does_not_enable_checkpoints_for_session(tmp_path):
-    features = model_features(_models(), _features(StepPersistenceCapability()))
+    features = model_features(_models(), RuntimeFeatures(defaults={"execution": {"checkpoints": True}}))
     async with (
         Persistence.open('owner-contract', storage=PersistenceStorage.sqlite(tmp_path / 'state.db')) as state,
         Runtime.open(persistence=state, features=features, authorization=_HostAuthorization()) as runtime,

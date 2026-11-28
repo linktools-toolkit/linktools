@@ -7,20 +7,18 @@ import secrets
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
-from copy import copy
 from pathlib import Path
 from typing import TypeVar
 
 from linktools.core import environ
 from pydantic_ai_harness.step_persistence import StepPersistence
-from pydantic_ai.capabilities import AbstractCapability, WrapperCapability
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.workspaces import WorkspaceBackend
 
 from ..asset import AssetStoreReader
 from ..agent import AgentBinding, AgentBindingContract, AgentCatalog, AgentCompiler, CompiledAgent
 from ..steps import NativeStepSource
 from ..capability import (
-    StepPersistenceCapability,
     AgentContext,
     AssetCapability,
     AssetSkillSource,
@@ -28,6 +26,7 @@ from ..capability import (
     SkillSourceRegistry,
     tool_class_from_metadata,
 )
+from ._step_capability import _StepPersistenceCapability
 from ._lifecycle import _RuntimeCloseCoordinator
 from ._native_session import _NativeTurnRead
 from ._feature_policy import _RuntimeFeaturePolicy, _runtime_feature_policy
@@ -229,6 +228,22 @@ async def compose_runtime_components(
     auto_recover = execution_defaults.get("auto_recover", False)
     if not isinstance(auto_recover, bool):
         raise TypeError("execution.auto_recover must be bool")
+    execution_checkpoints = execution_defaults.get("checkpoints", False)
+    if not isinstance(execution_checkpoints, bool):
+        raise TypeError("execution.checkpoints must be bool")
+    step_contribution = None
+    if execution_checkpoints:
+        declaration = _StepPersistenceCapability()
+        step_contribution = CapabilityContribution.from_opaque(
+            "capability", declaration.id, declaration, scope="runtime",
+        )
+
+    def runtime_candidates(
+        resolution: RuntimeFeaturesResolution[AppT] | None,
+    ) -> tuple[CapabilityContribution[AppT], ...]:
+        candidates = () if resolution is None else resolution.contributions
+        return candidates if step_contribution is None else (*candidates, step_contribution)
+
     stream_defaults = {} if captured is None else captured.defaults.get("stream", {})
     assert isinstance(stream_defaults, dict)  # Resolution validates defaults namespaces.
     output_preview_field = stream_defaults.get("output_preview_field")
@@ -247,10 +262,9 @@ async def compose_runtime_components(
     owns_lifecycle = lifecycle is None
     lifecycle = _AgentLifecycle() if lifecycle is None else lifecycle
     try:
-        candidates: list[CapabilityContribution[object]] = []
+        candidates = runtime_candidates(captured)
         asset_sources: dict[str, AssetStoreReader] = {}
         if captured is not None:
-            candidates.extend(captured.contributions)
             asset_sources.update(_resolution_asset_readers(captured))
         _validate_candidate_uniqueness(candidates)
         policy = _runtime_feature_policy(candidates)
@@ -265,7 +279,7 @@ async def compose_runtime_components(
         rules = RepositoryInstructions(() if captured is None else captured.instructions.documents)
 
         def build_compiler(resolution) -> AgentCompiler:
-            current = () if resolution is None else resolution.contributions
+            current = runtime_candidates(resolution)
             _validate_candidate_uniqueness(current)
             agents = {item.id: item.value for item in current if item.kind == "agent"}
             models = {} if resolution is None else resolution.models
@@ -299,12 +313,12 @@ async def compose_runtime_components(
 
         async def current_compiler() -> AgentCompiler:
             current = await current_resolution()
-            await prepare_runtime_policy(_runtime_feature_policy(() if current is None else current.contributions))
+            await prepare_runtime_policy(_runtime_feature_policy(runtime_candidates(current)))
             return build_compiler(current)
 
         async def current_policy():
             current = await current_resolution()
-            selected_policy = _runtime_feature_policy(() if current is None else current.contributions)
+            selected_policy = _runtime_feature_policy(runtime_candidates(current))
             await prepare_runtime_policy(selected_policy)
             return selected_policy
 
@@ -325,7 +339,7 @@ async def compose_runtime_components(
 
         async def prepare_session_step():
             async with resource_lock:
-                return StepPersistenceCapability().bind(await open_default_steps())
+                return _StepPersistenceCapability().bind(await open_default_steps())
 
         async def prepare_runtime_policy(selected_policy: _RuntimeFeaturePolicy):
             values = selected_policy.capabilities
@@ -336,24 +350,12 @@ async def compose_runtime_components(
                         run_store.capability_writes.register_store(
                             identity, store, durable=identity in persistence.durable_capability_ids,
                         )
-                declaration = next((leaf for feature in values for leaf in runtime_feature_leaves(feature)
-                                    if isinstance(leaf, StepPersistenceCapability)), None)
-                if declaration is not None:
-                    store = declaration.store
-                    if store is None:
-                        store = await open_default_steps()
-                    native = declaration.bind(store)
-
-                    def bind_steps(value):
-                        if value is declaration:
-                            return native
-                        if isinstance(value, WrapperCapability):
-                            bound = copy(value)
-                            bound.wrapped = value.wrapped.visit_and_replace(bind_steps)
-                            return bound
-                        return value
-
-                    values = tuple(value.visit_and_replace(bind_steps) for value in values)
+                if any(isinstance(value, _StepPersistenceCapability) for value in values):
+                    store = await open_default_steps()
+                    values = tuple(
+                        value.bind(store) if isinstance(value, _StepPersistenceCapability) else value
+                        for value in values
+                    )
                 if run_store is not None:
                     for feature in values:
                         for leaf in runtime_feature_leaves(feature):
@@ -971,7 +973,7 @@ async def _build_local_components(
                         or compiled.selected_subagents or compiled.selected_capabilities
                         or binding.output_binding.mode != "text"
                         or policy.durable_trace or policy.memory_scope is not None
-                        or any(type(leaf) not in (StepPersistence, StepPersistenceCapability)
+                        or any(type(leaf) not in (StepPersistence, _StepPersistenceCapability)
                                for item in policy.capabilities for leaf in runtime_feature_leaves(item))):
                     raise AIError(
                         ErrorCode.STORAGE_CAPABILITY_MISSING,

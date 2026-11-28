@@ -150,7 +150,7 @@ and provider retry boundaries.
 
 Context retention, interrupted-run recovery and detailed trace are independent
 Runtime-scoped opt-ins: `defaults["execution"]["retain_history"] = True`,
-`StepPersistenceCapability()`, and `TraceCapability()`. Durable storage alone enables
+`defaults["execution"]["checkpoints"] = True`, and `TraceCapability()`. Durable storage alone enables
 none of these optional guarantees. `Runtime.open(..., metrics=dataset)` independently enables automatic
 Agent observations and supplies the dataset to Runtime-bound Task engines for
 Task and evaluation execution observations. Each producer owns its recorder
@@ -1701,27 +1701,25 @@ async with Runtime.open("service-runtime", storage=storage,
 `PersistenceStorage` supports in-memory, filesystem, SQLite, and SQL backends. Repository domains keep their ownership, transaction, recovery, and retention rules; `Persistence.open()` owns the storage composition. Advanced callers can open Persistence independently, use `Runtime.open(persistence=...)`, and pass the same Persistence to TaskEngine, `History.open(persistence=...)` and `Snapshot.create(persistence=...)`; readers do not need Agent features or activate executors. Offline export requires a caller-owned `SnapshotExclusiveGuard` that quiesces related writers and object cleanup; a read-only `PersistenceStorage` handle alone is not that boundary. The supported archive flow is: quiesce writers and object cleanup, export through a read-only `PersistenceStorage`, restore into an empty staging root, verify required history and object references, then let the application publish that staging root. `restore_snapshot()` restores data but is not itself an atomic publication primitive. Snapshots include Persistence-owned objects only. Retained Rule, Skill and MCP resource bytes remain Asset-owned and are not copied into Persistence snapshots. Reopened executions resolve current declarations through the supplied AssetStore; retained tool results and effect receipts remain original. Keep the corresponding AssetStore available for resource reads.
 
 For native checkpoints in the same SQL resource as Runtime control state,
-register the project capability. Runtime creates and owns the adapter whether it owns or borrows Persistence; explicit `store=...` values remain caller-owned.
+enable Execution checkpoints. Runtime creates and owns the adapter whether it
+owns or borrows Persistence.
 
 ```python
-from linktools.ai.capability import StepPersistenceCapability
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 
-features = RuntimeFeatures("checkpointed-runtime")
-features.capability(StepPersistenceCapability())
+features = RuntimeFeatures("checkpointed-runtime", defaults={"execution": {"checkpoints": True}})
 # Add the application's model and Agent declarations to these features.
 storage = PersistenceStorage.from_root(runtime_root, exclusive_writer=True)
 async with Runtime.open("service-runtime", storage=storage, features=features) as runtime:
     ...
 ```
 
-`StepPersistenceCapability` binds the existing native step hooks and defaults to
-`capture_frontier=True`. Advanced hosts can still call
-`await persistence.create_step_store()` and supply that borrowed adapter through
-`StepPersistenceCapability(store=steps)` or native `StepPersistence(store=steps)`.
-Such hosts close their own adapters after Runtime exits. Native subclasses retain
-their custom hooks.
+Execution checkpoints capture accepted input and tool-call frontiers. Native SQL
+sessions opt in separately with `SessionCapability(checkpoints=True)`. Advanced
+hosts may instead register native Harness `StepPersistence(store=steps)` with an
+explicit store and close that store after Runtime exits. Do not combine it with
+the Runtime-owned Execution option.
 
 The borrowed native store exposes physical checkpoint records. Runtime writes a
 `linktools.ai.native-checkpoint` envelope under the last message's

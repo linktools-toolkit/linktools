@@ -11,11 +11,12 @@ from pydantic_ai_harness.step_persistence import StepPersistence
 
 from ..capability import (
     AgentContext, AssetCapability, CapabilityContribution,
-    MemoryCapability, SessionCapability, StepPersistenceCapability,
+    MemoryCapability, SessionCapability,
     ToolResponseFixture, ToolResponsesCapability, TraceCapability,
 )
 from ..errors import AIError, ErrorCode
 from ..persistence.capabilities import CapabilityPersistence
+from ._step_capability import _StepPersistenceCapability
 from ._capabilities import runtime_feature_leaves
 from ._persistence_configuration import validate_persistence_capabilities, capability_persistence_ids
 
@@ -31,7 +32,7 @@ class _RuntimeFeaturePolicy:
 
     @property
     def restart_checkpoints(self) -> bool:
-        return any(isinstance(leaf, (StepPersistence, StepPersistenceCapability))
+        return any(isinstance(leaf, (StepPersistence, _StepPersistenceCapability))
                    for item in self.capabilities for leaf in runtime_feature_leaves(item))
 
     @property
@@ -52,7 +53,6 @@ def _runtime_feature_policy(
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "Persistent capabilities require runtime scope")
         if isinstance(capability, (
             StepPersistence,
-            StepPersistenceCapability,
             TraceCapability,
             ToolResponsesCapability,
             SessionCapability,

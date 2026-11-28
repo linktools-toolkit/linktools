@@ -14,7 +14,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCall
 from pydantic_ai.models.function import AgentInfo
 from pydantic_ai_harness.memory import MemoryOperation, MemoryOperationConflictError
 
-from linktools.ai.capability import AgentContext, MemoryCapability, StepPersistenceCapability
+from linktools.ai.capability import AgentContext, MemoryCapability
 from linktools.ai.core import JsonValue, OperationKind, OperationLedgerInput, OperationLedgerRecord, OperationStatus, Principal, ResourceKind, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionInputContext, ExternalCallSucceeded, ExternalSupplyRequest
@@ -238,7 +238,7 @@ async def test_runtime_imported_memory_resumes_deferred_without_rollback(tmp_pat
 
     features = RuntimeFeatures(workspace_factory=None, defaults={"execution": {"retain_history": True}})
     features.model("default", _Models(_UsageFunctionModel(respond)))
-    features.capability(StepPersistenceCapability())
+    features = features.with_defaults({"execution": {**features.defaults.get("execution", {}), "checkpoints": True}})
     features.capability(MemoryCapability())
     features.tool(deferred)
     async with Runtime.open("memory-resume", storage=_storage("sqlite", tmp_path), features=features) as runtime:

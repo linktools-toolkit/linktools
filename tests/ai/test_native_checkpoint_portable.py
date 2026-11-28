@@ -149,7 +149,7 @@ async def test_native_tables_without_admitted_source_do_not_prove_backup(tmp_pat
 
 @pytest.mark.asyncio
 async def test_runtime_default_checkpoint_owner_remains_native_after_restore(tmp_path: Path) -> None:
-    from linktools.ai.capability import StepPersistenceCapability, TraceCapability
+    from linktools.ai.capability import TraceCapability
     from linktools.ai.core import ExecutionStatus
     from linktools.ai.runtime import Runtime, RuntimeFeatures
     from pydantic_ai.messages import ModelResponse, TextPart
@@ -160,7 +160,7 @@ async def test_runtime_default_checkpoint_owner_remains_native_after_restore(tmp
 
     features = RuntimeFeatures("portable-runtime", defaults={"execution": {"retain_history": True}})
     features.capability(TraceCapability())
-    features.capability(StepPersistenceCapability())
+    features = features.with_defaults({"execution": {**features.defaults.get("execution", {}), "checkpoints": True}})
     features.agent("default", model="default", allow_tools=())
     storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
     async with Persistence.open("portable-runtime", storage=storage) as state:
