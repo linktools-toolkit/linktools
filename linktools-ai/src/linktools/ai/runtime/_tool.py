@@ -427,6 +427,7 @@ class RuntimeToolOperationBridge:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         self._effect_receipts: dict[str, Observed[ToolOperationRecord]] = {}
         self._reported_interruptions: dict[str, ToolOperationRecord] = {}
+        self._missing_interruptions: dict[str, str] = {}
         self._decisions: dict[tuple[str, str], ToolOperationDecision] = {}
         self._decision_fingerprints: dict[tuple[str, str], tuple[str, str]] = {}
 
@@ -846,7 +847,7 @@ class RuntimeToolOperationBridge:
         fingerprint = (tool_def.name, arguments_digest)
         # A new call can run a verified replay-safe tool; the interrupted call
         # keeps its original receipt and is never re-dispatched here.
-        if any(
+        if call.tool_call_id in self._missing_interruptions or any(
             fingerprint == (record.tool_name, record.arguments_digest)
             and not (
                 call.tool_call_id != record.tool_call_id
@@ -1152,7 +1153,10 @@ class RuntimeToolOperationBridge:
                     value.tool_call_id, value.tool_name, value.capability_ref, value.arguments_payload)
                 != (self._execution_id, self._agent_run_id, self._binding_digest, generation,
                     pending.tool_call_id, pending.tool_name, pending.capability_ref, pending.arguments_payload)):
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={"recovery_stage": "approval", "reason": "approved_tool_receipt_unconfirmed"},
+            )
         self._operation_ids[pending.tool_call_id] = operation_id
         self._effect_receipts[pending.tool_call_id] = observed
 
@@ -1160,35 +1164,47 @@ class RuntimeToolOperationBridge:
         """Whether this recovery already showed the model this unresolved receipt."""
         return self._reported_interruptions.get(record.tool_operation_id) == record
 
-    @staticmethod
-    def _interruption_marker(record: ToolOperationRecord) -> list[JsonValue]:
+    def _interruption_marker(self, call_id: str, record: ToolOperationRecord | None = None) -> list[JsonValue]:
+        if record is None:
+            return [self._operation_id(self._agent_run_id, call_id), None, None]
         return [record.tool_operation_id, record.producer_generation, record.fence]
 
     def checkpoint_interruptions(self, messages: Sequence[ModelMessage]) -> Sequence[ModelMessage]:
         """Tag the SDK's supplied failure in the already-owned checkpoint suffix."""
-        if not self._reported_interruptions:
+        if not self._reported_interruptions and not self._missing_interruptions:
             return messages
-        records = {record.tool_call_id: record for record in self._reported_interruptions.values()}
+        markers = {
+            record.tool_call_id: (record.tool_name, self._interruption_marker(record.tool_call_id, record))
+            for record in self._reported_interruptions.values()
+        }
+        markers.update({
+            call_id: (tool_name, self._interruption_marker(call_id))
+            for call_id, tool_name in self._missing_interruptions.items()
+        })
         result = []
         for message in messages:
             if isinstance(message, ModelRequest):
                 parts = []
                 for part in message.parts:
-                    record = records.get(part.tool_call_id) if isinstance(part, ToolReturnPart) else None
-                    if record is not None and part.tool_name == record.tool_name and part.outcome == "failed":
+                    interrupted = markers.get(part.tool_call_id) if isinstance(part, ToolReturnPart) else None
+                    if interrupted is not None and part.tool_name == interrupted[0] and part.outcome == "failed":
                         metadata = dict(part.metadata) if isinstance(part.metadata, Mapping) else {}
-                        part = replace(part, metadata={**metadata, _INTERRUPTED_TOOL_RECEIPT: self._interruption_marker(record)})
+                        part = replace(part, metadata={**metadata, _INTERRUPTED_TOOL_RECEIPT: interrupted[1]})
                     parts.append(part)
                 message = replace(message, parts=parts)
             result.append(message)
         return result
 
     def has_checkpoint_interruption(self, part: ToolReturnPart) -> bool:
-        marker = part.metadata.get(_INTERRUPTED_TOOL_RECEIPT) if isinstance(part.metadata, Mapping) else None
+        if part.outcome != "failed" or not isinstance(part.metadata, Mapping):
+            return False
+        marker = part.metadata.get(_INTERRUPTED_TOOL_RECEIPT)
+        if self._missing_interruptions.get(part.tool_call_id) == part.tool_name:
+            return marker == self._interruption_marker(part.tool_call_id)
         identity = self._operation_ids.get(part.tool_call_id)
         record = None if identity is None else self._reported_interruptions.get(identity)
-        return (record is not None and part.tool_name == record.tool_name and part.outcome == "failed"
-                and marker == self._interruption_marker(record))
+        return (record is not None and part.tool_name == record.tool_name
+                and marker == self._interruption_marker(record.tool_call_id, record))
 
     async def resume_canonical_effects(
         self,
@@ -1219,7 +1235,15 @@ class RuntimeToolOperationBridge:
         for value in values:
             if (value.execution_id != self._execution_id or value.agent_run_id != self._agent_run_id
                     or value.tool_call_id in receipts):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(
+                    ErrorCode.STORAGE_INTEGRITY_ERROR,
+                    safe_details={"recovery_stage": "tool_receipts", "reason": "invalid_tool_receipt_identity"},
+                )
+            if value.tool_call_id in pending_calls and pending_calls[value.tool_call_id] != value.tool_name:
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"recovery_stage": "tool_receipts", "reason": "pending_tool_receipt_name_mismatch"},
+                )
             if checkpoint_completed_calls and value.tool_call_id in checkpoint_completed_calls:
                 tool_name = checkpoint_completed_calls[value.tool_call_id]
                 if (value.status is not ToolOperationStatus.COMPLETED
@@ -1252,7 +1276,7 @@ class RuntimeToolOperationBridge:
                         )
                     part = retained.get(value.tool_call_id)
                     if (part is not None and part.tool_name == value.tool_name
-                            and part.metadata[_INTERRUPTED_TOOL_RECEIPT] == self._interruption_marker(value)
+                            and part.metadata[_INTERRUPTED_TOOL_RECEIPT] == self._interruption_marker(value.tool_call_id, value)
                             and value.producer_generation is not None
                             and value.producer_generation < interrupted_generation
                             and value.tool_call_id not in pending_calls):
@@ -1266,32 +1290,47 @@ class RuntimeToolOperationBridge:
                         )
             receipts[value.tool_call_id] = value
         results = DeferredToolResults()
-        if any(call_id not in receipts or receipts[call_id].tool_name != tool_name
-               for call_id, tool_name in pending_calls.items()):
+        missing = {call_id: name for call_id, name in pending_calls.items() if call_id not in receipts}
+        if "delegate_task" in missing.values():
             raise AIError(
                 ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                safe_details={"recovery_stage": "tool_receipts", "reason": "pending_tool_receipt_missing_or_mismatched"},
+                safe_details={"recovery_stage": "tool_receipts", "reason": "pending_delegate_receipt_missing"},
             )
+        # A checkpoint call without an operation cannot prove either success or
+        # dispatch. Supply an interruption, never a new reservation or replay.
+        self._missing_interruptions.update({
+            call_id: part.tool_name for call_id, part in retained.items()
+            if call_id not in receipts and call_id not in pending_calls and part.tool_name != "delegate_task"
+            and part.metadata[_INTERRUPTED_TOOL_RECEIPT] == self._interruption_marker(call_id)
+        })
+        self._missing_interruptions.update(missing)
         for value in pending_recovery:
             assert recover_delegate is not None
+            invalid_arguments = {"recovery_stage": "tool_receipts", "reason": "delegate_receipt_arguments_invalid"}
             if value.arguments_payload is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, safe_details=invalid_arguments)
             payload = await self._payload_bytes(value.arguments_payload)
             try:
                 args = normalize_json_value(json.loads(payload))
             except ValueError as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, safe_details=invalid_arguments) from error
             if not isinstance(args, dict) or canonical_sha256(args) != value.arguments_digest:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, safe_details=invalid_arguments)
             terminal = await recover_delegate(value, args)
             if ((terminal.tool_operation_id, terminal.execution_id, terminal.agent_run_id, terminal.tool_call_id,
                  terminal.tool_name, terminal.binding_digest, terminal.arguments_digest)
                     != (value.tool_operation_id, value.execution_id, value.agent_run_id, value.tool_call_id,
                         value.tool_name, value.binding_digest, value.arguments_digest)
                     or terminal.status not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(
+                    ErrorCode.STORAGE_INTEGRITY_ERROR,
+                    safe_details={"recovery_stage": "tool_receipts", "reason": "delegate_terminal_receipt_mismatch"},
+                )
             receipts[value.tool_call_id] = terminal
         for call_id in pending_calls:
+            if call_id in missing:
+                results.calls[call_id] = PydanticToolControlCapability.build_tool_failed(_INTERRUPTED_TOOL_MESSAGE)
+                continue
             value = receipts[call_id]
             self._operation_ids[call_id] = value.tool_operation_id
             if value.status in {ToolOperationStatus.CLAIMED, ToolOperationStatus.EFFECT_UNKNOWN}:

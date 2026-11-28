@@ -958,6 +958,14 @@ class _RegenerableTurnRunner:
                     safe_details={"recovery_stage": "ownership", "reason": "graph_owner_recovery_required"},
                 )
             generation = row["generation"]
+
+            async def release_unresumable(error: AIError) -> AIError:
+                if not await self._store.expire_stopped_lease(key, generation=generation + 1):
+                    return error
+                self._gap(key)
+                return AIError(error.code, safe_details={
+                    **error.safe_details, "abandonable": True, "generation": generation + 1,
+                })
             mode = request.get("mode", "run")
             planning = request.get("planning", False)
             if mode not in ("run", "plan") or type(planning) is not bool or mode == "plan" and not planning:
@@ -1191,9 +1199,18 @@ class _RegenerableTurnRunner:
                     completed_checkpoint = True
                 else:
                     if ready is None:
-                        acquired, checkpoint, instruction_frontier = await self._store.take_over_with_checkpoint(
-                            key, generation=generation, lease_seconds=_LEASE_SECONDS, step_store=steps._store,
-                        )
+                        try:
+                            acquired, checkpoint, instruction_frontier = await self._store.take_over_with_checkpoint(
+                                key, generation=generation, lease_seconds=_LEASE_SECONDS, step_store=steps._store,
+                            )
+                        except AIError as error:
+                            if error.safe_details.get("reason") != "checkpoint_missing_before_takeover_commit":
+                                raise
+                            # The checkpoint read failed inside the takeover CAS, so the
+                            # transaction rolled back and the previous lease is expired.
+                            raise AIError(error.code, safe_details={
+                                **error.safe_details, "abandonable": True, "generation": generation,
+                            }) from error
                     else:
                         acquired, checkpoint, instruction_frontier = await self._store.take_over_ready_checkpoint(
                             ready, lease_seconds=_LEASE_SECONDS, step_store=steps._store,
@@ -1201,11 +1218,14 @@ class _RegenerableTurnRunner:
                     if not acquired:
                         return False
                     if checkpoint is None:
-                        self._gap(key)
-                        raise AIError(
+                        error = AIError(
                             ErrorCode.STORAGE_RECOVERY_REQUIRED,
                             safe_details={"recovery_stage": "checkpoint", "reason": "checkpoint_missing_after_takeover"},
                         )
+                        if ready is None:
+                            raise await release_unresumable(error)
+                        self._gap(key)
+                        raise error
                     await steps.bind_canonical_resume(checkpoint, key=key, generation=generation + 1)
                     from ..model.messages import native_checkpoint_messages
                     from ..persistence.runs import NativeCheckpoint
@@ -1233,6 +1253,8 @@ class _RegenerableTurnRunner:
                         if not pending and checkpoint.state == "complete":
                             events = await steps.list_events(run_id=key.turn_id)
                             completed_checkpoint = any(event.kind == "run_completed" for event in events)
+                        retained_returns = tuple(part for message in continuation if isinstance(message, ModelRequest)
+                                                 for part in message.parts if isinstance(part, ToolReturnPart))
                         delegate_pending = "delegate_task" in pending.values()
                         if settle_subagents and not completed_checkpoint and delegate_pending:
                             recover_subagent = self._recover_subagent
@@ -1245,10 +1267,11 @@ class _RegenerableTurnRunner:
                                                               mode, tools, original, args, start_reserved)
 
                             async def recover_native_results():
-                                return await tools.resume_canonical_effects(pending, recover_delegate=recover_delegate)
+                                return await tools.resume_canonical_effects(
+                                    pending, interrupted_generation=generation, retained_returns=retained_returns,
+                                    recover_delegate=recover_delegate,
+                                )
                         if recover_native_results is None:
-                            retained_returns = tuple(part for message in continuation if isinstance(message, ModelRequest)
-                                                     for part in message.parts if isinstance(part, ToolReturnPart))
                             checkpoint_completed_calls = None
                             if (not pending and not completed_checkpoint and latest_response >= 0
                                     and latest_response == len(continuation) - 2
@@ -1260,17 +1283,20 @@ class _RegenerableTurnRunner:
                                         and call_keys == [(part.tool_call_id, part.tool_name) for part in returns]
                                         and all(part.outcome == "success" for part in returns)):
                                     checkpoint_completed_calls = dict(call_keys)
-                            deferred_results = await tools.resume_canonical_effects(
-                                pending, interrupted_generation=generation, retained_returns=retained_returns,
-                                checkpoint_completed_calls=checkpoint_completed_calls,
-                            )
+                            try:
+                                deferred_results = await tools.resume_canonical_effects(
+                                    pending, interrupted_generation=generation, retained_returns=retained_returns,
+                                    checkpoint_completed_calls=checkpoint_completed_calls,
+                                )
+                            except AIError as error:
+                                if error.safe_details.get("recovery_stage") == "tool_receipts":
+                                    raise await release_unresumable(error)
+                                raise
                             if checkpoint_completed_calls is not None and deferred_results is None:
-                                await self._store.expire_stopped_lease(key, generation=generation + 1)
-                                self._gap(key)
-                                raise AIError(
+                                raise await release_unresumable(AIError(
                                     ErrorCode.STORAGE_RECOVERY_REQUIRED,
                                     safe_details={"recovery_stage": "tool_receipts", "reason": "completed_tool_receipt_unconfirmed"},
-                                )
+                                ))
                             if not pending and not completed_checkpoint:
                                 latest_ids = (frozenset(part.tool_call_id for part in continuation[latest_response].parts
                                                        if isinstance(part, ToolCallPart)) if latest_response >= 0 else frozenset())
@@ -1282,20 +1308,25 @@ class _RegenerableTurnRunner:
                                     # present in the retained last request.
                                     deferred_results = DeferredToolResults()
                                 elif checkpoint.state != "complete" and deferred_results is None:
-                                    self._gap(key)
-                                    raise AIError(
+                                    raise await release_unresumable(AIError(
                                         ErrorCode.STORAGE_RECOVERY_REQUIRED,
                                         safe_details={"recovery_stage": "checkpoint", "reason": "interrupted_checkpoint_has_no_continuation"},
-                                    )
+                                    ))
                     else:
                         if (checkpoint.state != "interrupted"
                                 or set(pending) != set(settled_results.approvals) | set(settled_results.calls)
                                 or set(settled_results.approvals) & set(settled_results.calls)):
                             self._gap(key)
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                            raise AIError(
+                                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                                safe_details={"recovery_stage": "approval", "reason": "settled_call_frontier_mismatch"},
+                            )
                         for operation in (*settled_continuation.approvals, *settled_continuation.calls):
                             if pending.get(operation.tool_call_id) != operation.tool_name:
-                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                                raise AIError(
+                                    ErrorCode.STORAGE_INTEGRITY_ERROR,
+                                    safe_details={"recovery_stage": "approval", "reason": "settled_call_name_mismatch"},
+                                )
                         for operation in settled_continuation.approvals:
                             if isinstance(settled_results.approvals.get(operation.tool_call_id), ToolApproved):
                                 await tools.resume_canonical_approval(operation, generation=generation)
@@ -1331,13 +1362,13 @@ class _RegenerableTurnRunner:
                     turn, binding=binding, context=context, limits=limits, event_sink=event_sink, thinking=request["thinking"],
                 )
             except Exception as error:
-                if (recover_native_results is not None and isinstance(error, AIError)
-                        and error.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
-                        and error.safe_details.get("reason") == "native_child_reservation_missing"
-                        and error.safe_details.get("generation") == turn.generation):
-                    # The producer has been joined and no original child could be started.
-                    await self._store.expire_stopped_lease(key, generation=turn.generation)
                 self._producer_stopped(turn)
+                if (recover_native_results is not None and isinstance(error, AIError)
+                        and (error.safe_details.get("recovery_stage") == "tool_receipts"
+                             or error.safe_details.get("reason") == "native_child_reservation_missing")):
+                    # The local producer has joined; abandon still checks for
+                    # non-terminal children in the parent settlement transaction.
+                    raise await release_unresumable(error)
                 raise
             return True
 
@@ -2164,13 +2195,14 @@ class _RegenerableTurnRunner:
                         except Exception as error:
                             # The child may have crossed its first-start fence.
                             # Missing proof cannot be projected as parent failure.
-                            if isinstance(error, AIError) and error.code is ErrorCode.STORAGE_RECOVERY_REQUIRED:
-                                if error.safe_details.get("reason") == "native_child_reservation_missing":
-                                    raise AIError(error.code, safe_details={
-                                        "reason": "native_child_reservation_missing", "generation": turn.generation,
-                                    }) from error
-                                raise
-                            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+                            if isinstance(error, AIError):
+                                if (error.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+                                        or error.safe_details.get("recovery_stage") == "tool_receipts"):
+                                    raise
+                            raise AIError(
+                                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                                safe_details={"recovery_stage": "subagent", "reason": "native_child_recovery_failed"},
+                            ) from error
                         native_subagent_leaf = None
                     dispatch_checked = False
 
@@ -2257,8 +2289,10 @@ class _RegenerableTurnRunner:
                 raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE)
         except Exception as error:
             if (turn.native_step is not None and isinstance(error, AIError)
-                    and error.code in {ErrorCode.STORAGE_RECOVERY_REQUIRED, ErrorCode.STORAGE_COMMIT_UNKNOWN,
-                                       ErrorCode.TOOL_EFFECT_UNKNOWN}):
+                    and (error.code in {ErrorCode.STORAGE_RECOVERY_REQUIRED, ErrorCode.STORAGE_COMMIT_UNKNOWN,
+                                        ErrorCode.TOOL_EFFECT_UNKNOWN}
+                         or (turn.recover_native_results is not None
+                             and error.safe_details.get("recovery_stage") == "tool_receipts"))):
                 raise
             code = error.code.value if isinstance(error, AIError) else ErrorCode.INTERNAL_ERROR.value
             if code == ErrorCode.INTERNAL_ERROR.value:

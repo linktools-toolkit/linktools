@@ -634,7 +634,9 @@ if(process.argv[3]==='session-published-turn') {
   const requestCount=calls.length;
   emitTurn(stopped);
   assert.equal(calls.length,requestCount,'a duplicate stopped notice does not read again');
-  const unable={code:'STORAGE_RECOVERY_REQUIRED',safe_details:{reason:'native_child_reservation_missing',generation:2}};
+  const unable={code:'STORAGE_RECOVERY_REQUIRED',safe_details:{
+    reason:'pending_tool_receipt_name_mismatch',abandonable:true,generation:2,
+  }};
   const refusedRecovery=deferred('POST /api/sessions/b/recover'),refusal=node('send').click();
   await refusedRecovery.requested;refusedRecovery(unable,503);await refusal;
   assert.equal(node('send').textContent,'Recover');

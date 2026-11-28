@@ -1225,7 +1225,9 @@ def _debug_error(request: Request, error: AIError) -> None:
 
 async def _error(request: Request, error: Exception) -> Response:
     if isinstance(error, AIError):
-        if request.url.path == "/api/session/recover" and error.code is ErrorCode.STORAGE_RECOVERY_REQUIRED:
+        if request.url.path == "/api/session/recover" and (
+            error.code is ErrorCode.STORAGE_RECOVERY_REQUIRED or "recovery_stage" in error.safe_details
+        ):
             _logger.warning(
                 "Session recover blocked: operation_id=%r code=%s recovery_stage=%r reason=%r",
                 _operation_id(request, error), error.code.value,

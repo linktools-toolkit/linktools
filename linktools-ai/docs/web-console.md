@@ -62,9 +62,11 @@ shows the tool status and public preview, not raw parameters or results.
 
 **Recover** continues an interrupted ordinary turn from its retained Step
 checkpoint when the turn and tool receipts share a store. An unfinished ordinary
-tool's outcome is reported to the model as unknown. The original tool call is not
-run again, and its receipt is kept unchanged. Already confirmed tool results keep
-their original meaning. The browser does not have to start a new turn for this
+tool's outcome is reported to the model as unknown, even if the checkpoint
+contains the call but the execution receipt was never recorded. The original
+call is not run again, and any existing receipt is kept unchanged. A receipt
+that refers to a different tool is not used. Confirmed tool results keep their
+original meaning. The browser does not have to start a new turn for this
 recovery.
 
 A turn without a retained Step checkpoint can instead regenerate from the

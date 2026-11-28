@@ -192,7 +192,10 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
         settled = await state.checkpoint.tools.get_operation(original.tool_operation_id, tenant_id=tenant_id)
         if missing:
             assert recovered.status_code == 503 and recovered.json()["code"] == "STORAGE_RECOVERY_REQUIRED", recovered.text
-            assert recovered.json()["safe_details"] == {"reason": "native_child_reservation_missing", "generation": 2}
+            assert recovered.json()["safe_details"] == {
+                "recovery_stage": "subagent", "reason": "native_child_reservation_missing",
+                "abandonable": True, "generation": 2,
+            }
             assert row["state"] == "accepted" and row["generation"] == 2 and settled == original
             assert not children and receipt is None
             ended = await http.post("/api/session/abandon", params=params, headers=_HEADERS, json={
@@ -212,13 +215,18 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
 
         if unknown_start:
             assert recovered.status_code == 503 and recovered.json()["code"] == "STORAGE_RECOVERY_REQUIRED", recovered.text
-            assert recovered.json()["safe_details"] == {"reason": "native_child_recovery_unconfirmed"}
+            assert recovered.json()["safe_details"] == {
+                "recovery_stage": "subagent", "reason": "native_child_recovery_unconfirmed",
+            }
             assert row["state"] == "accepted" and settled == original
             assert same_child.status is ExecutionStatus.STARTED and same_child.agent_run_seq == 0
             assert receipt.status is IdempotencyStatus.STARTED
             assert calls == ["parent dispatch"] and returned_children == []
         elif unknown_settlement:
             assert recovered.status_code == 503 and recovered.json()["code"] == "STORAGE_RECOVERY_REQUIRED", recovered.text
+            assert recovered.json()["safe_details"] == {
+                "recovery_stage": "subagent", "reason": "native_child_result_commit_unconfirmed",
+            }
             assert row["state"] == "accepted" and settled.status is ToolOperationStatus.COMPLETED
             assert same_child.status is ExecutionStatus.SUCCEEDED and not same_child.retention_closed
             assert calls == ["parent dispatch", "child dispatch"] and returned_children == []

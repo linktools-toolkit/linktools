@@ -278,8 +278,12 @@ async def test_two_session_streams_follow_same_turn_and_release(monkeypatch: pyt
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("code_name", "stage", "reason"), (
+    ("STORAGE_RECOVERY_REQUIRED", "tool_receipts", "pending_tool_receipt_name_mismatch"),
+    ("STORAGE_INTEGRITY_ERROR", "approval", "settled_call_frontier_mismatch"),
+))
 async def test_session_recover_logs_safe_blocking_reason_without_debug(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, code_name: str, stage: str, reason: str,
 ) -> None:
     from types import SimpleNamespace
 
@@ -290,12 +294,12 @@ async def test_session_recover_logs_safe_blocking_reason_without_debug(
     logged: list[str] = []
     monkeypatch.setattr(_app, "environ", SimpleNamespace(debug=False))
     monkeypatch.setattr(_app._logger, "warning", lambda message, *args: logged.append(message % args))
-    details = {"recovery_stage": "tool_receipts", "reason": "pending_tool_receipt_missing_or_mismatched"}
+    details = {"recovery_stage": stage, "reason": reason}
 
     async def recover_turn(session_id, turn_id, *, principal):
         assert (session_id, turn_id) == ("private-session-id", "private-turn-id")
         raise AIError(
-            ErrorCode.STORAGE_RECOVERY_REQUIRED,
+            ErrorCode[code_name],
             "private-exception-detail",
             safe_details=details,
             diagnostics=ErrorDiagnostics.from_exception(ValueError("private-cause")),
@@ -315,12 +319,12 @@ async def test_session_recover_logs_safe_blocking_reason_without_debug(
 
     assert response.status_code == 503
     payload = response.json()
-    assert payload["code"] == ErrorCode.STORAGE_RECOVERY_REQUIRED.value
+    assert payload["code"] == code_name
     assert payload["operation_id"] == "recover-request"
     assert payload["retryable"] is False
     assert payload["safe_details"] == details
     assert len(logged) == 1
-    for value in ("recover-request", "STORAGE_RECOVERY_REQUIRED", *details.values()):
+    for value in ("recover-request", code_name, *details.values()):
         assert value in logged[0]
     assert "private-" not in logged[0]
     assert "private-" not in response.text

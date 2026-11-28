@@ -223,6 +223,9 @@ async def test_split_cold_stop_requires_exact_source_owner(tmp_path: Path, monke
                 with pytest.raises(AIError) as failure:
                     await recover()
                 assert failure.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+                assert failure.value.safe_details == {
+                    "recovery_stage": "split_step", "reason": "split_unregistered_stop_unconfirmed",
+                }
                 assert (await turns.get_turn(key))["state"] == "cancelling"
                 if ordering == "lost-ack-unrelated":
                     return

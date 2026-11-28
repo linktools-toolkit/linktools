@@ -1083,7 +1083,10 @@ async def _build_local_components(
                 from ._tool import ToolOperationDecision
 
                 if original.owner is None:
-                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    raise AIError(
+                        ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                        safe_details={"recovery_stage": "subagent", "reason": "native_child_original_claim_unowned"},
+                    )
                 reserved = NativeSubagentAdmission(
                     state.session_turns, key, generation, state.checkpoint.tools,
                     ToolOperationDecision(original.tool_operation_id, original.owner, original.fence, False),
@@ -1094,10 +1097,18 @@ async def _build_local_components(
                 binding=binding.binding_contract, mode=mode, timeout_seconds=0.0, reserved=reserved,
             )
             result_payload, error_code, error_payload = await tools.native_delegate_payload(original, child, result)
-            receipt = await backend._runtime_commands.settle_native_subagent_result(
-                state.session_turns, key, generation=generation, principal=principal, original=original,
-                child=child, result_payload=result_payload, error_code=error_code, error_payload=error_payload,
-            )
+            try:
+                receipt = await backend._runtime_commands.settle_native_subagent_result(
+                    state.session_turns, key, generation=generation, principal=principal, original=original,
+                    child=child, result_payload=result_payload, error_code=error_code, error_payload=error_payload,
+                )
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                    raise
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"recovery_stage": "subagent", "reason": "native_child_result_commit_unconfirmed"},
+                ) from error
             await execution.request_terminal_handoff(
                 child.execution_id, tenant_id=principal.tenant_id, terminal_commit=child.conversation,
             )

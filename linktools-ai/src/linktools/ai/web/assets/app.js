@@ -2642,8 +2642,7 @@ async function ordinaryAction(action) {
       result=await mutate(sessionURL(id,action),{turn_id:turn,...(action==='abandon'?{expected_generation:blockedGeneration}:{})});
     } catch(error) {
       const details=error.details?.safe_details, failedGeneration=details?.generation;
-      const canOfferEnd=action==='recover' && error.code==='STORAGE_RECOVERY_REQUIRED'
-        && ['native_child_reservation_missing','native_subagent_trace_incomplete'].includes(details?.reason)
+      const canOfferEnd=action==='recover' && details?.abandonable===true
         && Number.isSafeInteger(failedGeneration) && failedGeneration>0;
       const row=state.turns.find(item=>item.turn_id===turn);
       if(!current() || row?.conversation_committed)return;

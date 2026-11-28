@@ -1024,7 +1024,7 @@ class DefaultExecutionService(TaskExecutionService):
         existing = await self._state.idempotency.get("execution.subagent", key, tenant_id=principal.tenant_id)
         if existing is None:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                          safe_details={"reason": "native_child_reservation_missing"})
+                          safe_details={"recovery_stage": "subagent", "reason": "native_child_reservation_missing"})
         return await self.load_authorized(existing.resource_id, principal, AuthorizationAction.EXECUTION_READ)
 
     async def _wait_native_child_result(
@@ -1045,25 +1045,37 @@ class DefaultExecutionService(TaskExecutionService):
             except Exception as error:
                 # An unconfirmed start or wait never authorizes retry or failure settlement.
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                              safe_details={"reason": "native_child_recovery_unconfirmed"}) from error
+                              safe_details={"recovery_stage": "subagent", "reason": "native_child_recovery_unconfirmed"}) from error
             if child.status not in terminal:
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"recovery_stage": "subagent", "reason": "native_child_recovery_not_terminal"},
+                )
         if child.status not in terminal:
             if (timeout_seconds <= 0 or child.status not in {
                     ExecutionStatus.PENDING_START, ExecutionStatus.STARTED,
                     ExecutionStatus.CANCELLING, ExecutionStatus.FINALIZING}
                     or backend is None
                     or not backend.owns_native_child(child.execution_id, key=key, principal=principal, original=original)):
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"recovery_stage": "subagent", "reason": "native_child_producer_unavailable"},
+                )
             try:
                 await asyncio.wait_for(
                     backend.wait_terminal(child.execution_id, tenant_id=principal.tenant_id), timeout_seconds,
                 )
             except asyncio.TimeoutError as error:
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"recovery_stage": "subagent", "reason": "native_child_recovery_timeout"},
+                ) from error
             child = await self.load_authorized(child.execution_id, principal, AuthorizationAction.EXECUTION_READ)
             if child.status not in terminal:
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={"recovery_stage": "subagent", "reason": "native_child_wait_not_terminal"},
+                )
         # The parent still needs the exact terminal child record to settle its
         # retained tool operation. Closing retention here invalidates that proof.
         result = await self._result_from_execution(child, tenant_id=principal.tenant_id)
