@@ -35,6 +35,14 @@ def test_site_waf_bypass_uses_private_origin_socket(fresh_manager):
     assert "proxy_pass http://172.22.223.254:8000;" in rendered
     assert "proxy_pass http://unix:/run/nginx-waf-123.sock:;" in rendered
     assert "listen unix:/run/nginx-waf-123.sock;" in rendered
+    ingress, _ = rendered.split("listen unix:", 1)
+    proxy_locations = re.findall(r"location [^\n]+ \{([^}]+proxy_pass[^}]+)\}", ingress)
+    assert len(proxy_locations) == 3
+    for location in proxy_locations:
+        assert re.findall(r"proxy_set_header (.+);", location) == [
+            "Host $original_host", "Upgrade $http_upgrade",
+            "Connection $connection_upgrade", "X-Forwarded-For $original_client_ip",
+        ]
     assert "@waf" not in rendered and "418" not in rendered
     assert rendered.count("location / { return 204; }") == 1
     assert "include sites/" not in rendered

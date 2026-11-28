@@ -337,6 +337,11 @@ class Container(BaseContainer):
             raise ContainerError("Invalid nginx complex value")
         return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
+    def ingress_header_items(self) -> "tuple[tuple[str, str], ...]":
+        """Select transport headers shared by the WAF and private bypass ingress."""
+        return tuple((name, value) for name, value in self.request_headers
+                     if name in ("Host", "Upgrade", "Connection", "X-Forwarded-For"))
+
     def header_items(self, site: "ResolvedSite | SimpleNamespace", overrides: "Mapping[str, str | None] | None" = None,
                      authentication: bool = False) -> "tuple[tuple[str, str], ...]":
         """Build a complete case-insensitive header set for one proxy location."""
