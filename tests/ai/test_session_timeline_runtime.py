@@ -123,7 +123,7 @@ def _native_timeline_features():
 
 
 async def _native_timeline_run(runtime, session_id, text, request):
-    turn = await runtime.agents.get().start(text, session_id=session_id, idempotency_key=request)
+    turn = await runtime.agents.get().session(session_id).start(text, idempotency_key=request)
     result = await turn.wait_final(timeout_seconds=10)
     assert result.status is ExecutionStatus.SUCCEEDED
     return result.view

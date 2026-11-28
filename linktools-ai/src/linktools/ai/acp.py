@@ -35,7 +35,7 @@ from .errors import AIError, ErrorCode
 from .execution import ExecutionTreeEvent
 from .session import ListSessionRequest
 from .runtime import Runtime
-from .runtime.turn_clients import TurnObserver, uses_turn_sessions
+from .runtime.turn_clients import TurnObserver, start_bound_execution, uses_turn_sessions
 from .session import ToolProcessItem, project_tool_process_event
 from .workspace import Workspace
 
@@ -397,8 +397,8 @@ class ACPAgent:
                         # complete answer would duplicate a partial one.
                         raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
             else:
-                execution = await self._runtime.executions.start_in_session(
-                    session_id, "".join(parts), principal=self._principal, idempotency_key=request_id,
+                execution = await start_bound_execution(
+                    self._runtime, session_id, "".join(parts), principal=self._principal, idempotency_key=request_id,
                 )
                 execution_id = execution.execution_id
                 admitted.set_result(execution)

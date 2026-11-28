@@ -302,14 +302,14 @@ async def test_native_history_reader_fork_prefix_and_cold_readonly_open(tmp_path
         agent = runtime.agents.get()
         principal = runtime.default_principal
         parent = await agent.create_session("parent")
-        first = await agent.start("prefix question", session_id="parent", idempotency_key="first")
+        first = await agent.session("parent").start("prefix question", idempotency_key="first")
         await first.wait_final(timeout_seconds=5)
         parent_state = await parent.inspect()
         child = await parent.fork("child", expected_revision=parent_state["revision"], idempotency_key="fork")
         assert child is not None
-        future = await agent.start("parent suffix", session_id="parent", idempotency_key="future")
+        future = await agent.session("parent").start("parent suffix", idempotency_key="future")
         await future.wait_final(timeout_seconds=5)
-        child_turn = await agent.start("child suffix", session_id="child", idempotency_key="child")
+        child_turn = await agent.session("child").start("child suffix", idempotency_key="child")
         await child_turn.wait_final(timeout_seconds=5)
 
     async def no_mutation(*args, **kwargs):

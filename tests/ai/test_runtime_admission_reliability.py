@@ -63,7 +63,7 @@ async def test_invalid_convenience_keys_never_activate_or_write(
             lambda: agent.start("prompt", idempotency_key=key),
             lambda: agent.run("prompt", idempotency_key=key),
             lambda: agent.plan("prompt", idempotency_key=key),
-            lambda: agent.start("prompt", session_id="session", idempotency_key=key),
+            lambda: agent.session("session").start("prompt", idempotency_key=key),
             lambda: session.start("prompt", idempotency_key=key),
             lambda: session.run("prompt", idempotency_key=key),
             lambda: session.plan("prompt", idempotency_key=key),

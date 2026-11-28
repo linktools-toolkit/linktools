@@ -16,6 +16,7 @@ from linktools.ai.session import CreateSessionRequest
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.persistence import PersistenceStorage, StateTurnResources
 from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.runtime.turn_clients import start_bound_execution
 from linktools.ai.session import SessionTurnNotice
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
@@ -106,9 +107,9 @@ async def test_observe_turns_follows_owned_boundaries(tmp_path: Path, backend: s
         unsubscribe_failed = runtime.sessions.observe_turns(fail)
         notices: list[SessionTurnNotice] = []
         unsubscribe = runtime.sessions.observe_turns(handler=notices.append)
-        turn = await runtime.executions.start_in_session("session", "ask", principal=principal, idempotency_key="turn")
+        turn = await start_bound_execution(runtime, "session", "ask", principal=principal, idempotency_key="turn")
         assert (await turn.wait(timeout_seconds=10)).result.output == {"text": "answer"}
-        replay = await runtime.executions.start_in_session("session", "ask", principal=principal, idempotency_key="turn")
+        replay = await start_bound_execution(runtime, "session", "ask", principal=principal, idempotency_key="turn")
         assert replay.execution_id == turn.execution_id
         assert [notice.kind for notice in notices] == ["admitted", "tool", "tool", "terminal"]
         assert {(notice.session_id, notice.execution_id) for notice in notices} == {("session", turn.execution_id)}

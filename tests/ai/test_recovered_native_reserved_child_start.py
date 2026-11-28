@@ -72,8 +72,8 @@ async def test_recovered_native_start_requires_retained_receipt_and_pristine_chi
     ):
         principal = Principal("owner", runtime.tenant_id)
         await runtime.sessions.create_turn_session("chat", principal=principal)
-        turn = await runtime.agents.get().start(
-            "Delegate once", session_id="chat", principal=principal, idempotency_key="original",
+        turn = await runtime.agents.get().session("chat").start(
+            "Delegate once", principal=principal, idempotency_key="original",
         )
         key = turn.key
         turns = state.session_turns

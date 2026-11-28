@@ -364,7 +364,7 @@ async def test_reopened_session_and_historical_retry_use_current_host_runtime_ca
         first = await agent.start("standalone", principal=principal)
         assert (await first.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         await agent.create_session("conversation", principal=principal)
-        session_first = await agent.start("first", session_id="conversation", principal=principal)
+        session_first = await agent.session("conversation").start("first", principal=principal)
         assert (await session_first.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
 
     current = _GlobalPolicy(next_backend)
@@ -376,7 +376,7 @@ async def test_reopened_session_and_historical_retry_use_current_host_runtime_ca
         historical = await runtime.executions.get(first.execution_id, principal=principal)
         retry = await historical.retry("retry")
         assert (await retry.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
-        second = await runtime.agents.get().start("second", session_id="conversation", principal=principal)
+        second = await runtime.agents.get().session("conversation").start("second", principal=principal)
         assert (await second.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
         assert first_backend.entered == [first.execution_id, session_first.key.turn_id]
         assert next_backend.entered == [retry.execution_id, second.key.turn_id]

@@ -73,7 +73,7 @@ async def test_sql_session_start_reads_one_authorized_session_row(tmp_path, entr
                     turn = await agent.session("session").start("question", idempotency_key="request")
                     assert len(selects) == 1
                 else:
-                    turn = await agent.start("question", session_id="session", idempotency_key="request")
+                    turn = await agent.session("session").start("question", idempotency_key="request")
                     assert len(selects) == 1
             finally:
                 event.remove(engine.sync_engine, "before_cursor_execute", capture)

@@ -21,12 +21,11 @@ manager for ordinary Agent calls.
 | --- | --- | --- |
 | `Runtime.open(namespace, storage=...)`, `Runtime.open(persistence=...)` | `Runtime` | Owned or borrowed composition through one entry point |
 | `runtime.agents.get(agent_id="default")`, `.restore(binding)` | `Agent` | Unchanged: live or captured definition handle |
-| `agent.start(prompt, ...)`, `session.start(prompt, ...)` | `Execution` | Unchanged: accepted execution handle |
-| `agent.run(...)`, `session.run(...)` | `WaitResult[ExecutionResult]` | Unchanged: start and wait, with optional observation |
+| `agent.start(prompt, ...)` | Depended on session storage when given a session ID | `Execution` for an independent run; there is no session argument |
+| `agent.run(...)` | Could wait for a session turn | `WaitResult[ExecutionResult]` for an independent run, with optional observation |
 | `agent.session(id, ...)` | `Session` | Unchanged: lazy definition-bound handle, no creation/read |
 | `agent.create_session(id, ...)` | `Session` | Unchanged: create then bind, retaining Agent derivations |
 | `runtime.sessions.start_turn(id, prompt, agent=..., principal=..., idempotency_key=...)` | Turn ID | Turn handle for a native SQL session |
-| `runtime.executions.start_in_session(id, prompt, principal=..., ...)` | `Execution` through an overloaded Session entry | `Execution`, strict Agent-bound session admission without a display read |
 | `runtime.sessions.get(id, principal=...)` | `Session` | Unchanged: authorized lookup and handle |
 | `runtime.sessions.create(agent_id, request)` | `SessionView` | `Session`, bound to `request.principal` |
 | `runtime.sessions.fork(agent_id, id, request)` | `SessionView` | `Session`, bound to `request.principal` |

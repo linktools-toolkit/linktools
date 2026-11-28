@@ -94,7 +94,7 @@ async def test_runtime_discovers_and_reloads_skills_in_one_native_run(tmp_path, 
             assert runtime.agents.get().derive(model="default").compiled.skill_definitions == ()
             agent = runtime.agents.get()
             await agent.create_session("session")
-            turn = await agent.start("Use the new skill", session_id="session", idempotency_key="input")
+            turn = await agent.session("session").start("Use the new skill", idempotency_key="input")
             result = await turn.wait_final(timeout_seconds=10)
             assert result.status is ExecutionStatus.SUCCEEDED, result
     assert stage == 7
@@ -186,7 +186,7 @@ async def test_next_run_materializes_current_local_skill_resources(tmp_path):
                 resource.write_text(expected)
                 agent = runtime.agents.get()
                 await agent.create_session(expected)
-                turn = await agent.start("Read the skill", session_id=expected, idempotency_key=expected)
+                turn = await agent.session(expected).start("Read the skill", idempotency_key=expected)
                 result = await turn.wait_final(timeout_seconds=10)
                 assert result.status is ExecutionStatus.SUCCEEDED, result
 

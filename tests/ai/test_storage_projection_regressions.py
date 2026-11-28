@@ -98,7 +98,7 @@ async def test_native_session_admission_reuses_verified_turn_history(tmp_path: P
         await agent.create_session("session")
         snapshots = {}
         for prompt in prompts:
-            turn = await agent.start(prompt, session_id="session", idempotency_key=prompt)
+            turn = await agent.session("session").start(prompt, idempotency_key=prompt)
             assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
             row = await state.session_turns.get_turn(turn.key)
             snapshots[turn.key] = canonical_json_bytes(dict(row)["result_json"])
@@ -151,7 +151,7 @@ async def test_session_admission_captures_current_rules_without_rewriting_histor
                     ),))
                 elif index == 2:
                     await assets.delete(rule)
-                turn = await agent.start(f"question {index}", session_id="session",
+                turn = await agent.session("session").start(f"question {index}",
                                          idempotency_key=f"question-{index}")
                 assert (await turn.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
                 row = await persistence.session_turns.get_turn(turn.key)
@@ -289,13 +289,13 @@ async def test_native_admission_does_not_stage_a_second_large_history_owner(tmp_
     ):
         agent = runtime.agents.get()
         await agent.create_session("session")
-        first = await agent.start("first", session_id="session", idempotency_key="first")
+        first = await agent.session("session").start("first", idempotency_key="first")
         assert (await first.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
         turns = state.session_turns
         first_row = await turns.get_turn(first.key)
         blocked = True
         try:
-            execution = await agent.start("second", session_id="session", idempotency_key="second")
+            execution = await agent.session("session").start("second", idempotency_key="second")
             await asyncio.wait_for(entered.wait(), 5)
             pending = await turns.get_turn(execution.key)
             assert (pending["context_from"], pending["context_through"]) == (1, 1)

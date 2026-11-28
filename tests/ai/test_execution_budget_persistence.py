@@ -70,7 +70,7 @@ async def test_sqlite_execution_without_shared_budget_keeps_public_history(tmp_p
             ) as runtime:
                 agent = runtime.agents.get()
                 await agent.create_session("session")
-                turn = await agent.start("retained older question", session_id="session", idempotency_key="start")
+                turn = await agent.session("session").start("retained older question", idempotency_key="start")
                 assert (await turn.wait_final(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
                 assert await runtime.sessions.budget_usage(
                     "session", turn.key.turn_id, principal=runtime.default_principal,

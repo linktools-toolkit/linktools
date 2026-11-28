@@ -224,7 +224,7 @@ async def test_fixture_session_rejection_leaves_no_admitted_turn(tmp_path: Path)
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=principal)
         with pytest.raises(AIError) as rejected:
-            await runtime.agents.get().start("question", session_id="session", idempotency_key="fixture")
+            await runtime.agents.get().session("session").start("question", idempotency_key="fixture")
         assert rejected.value.code is ErrorCode.REQUEST_FIELD_INVALID
         assert rejected.value.safe_details["reason"] == "turn_agent_features_unsupported"
         assert rejected.value.safe_details["features"] == ["tool_response_fixture"]

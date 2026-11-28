@@ -43,7 +43,7 @@ async def test_default_session_owner_and_explicit_replacement_work_without_conve
     declarations = (SessionCapability(),) if explicit else ()
     async with Persistence.open('owner-contract', storage=PersistenceStorage.sqlite(tmp_path / 'state.db')) as persistence_36, Runtime.open(authorization=_HostAuthorization(), persistence=persistence_36, features=model_features(_models(), _features(*declarations))) as runtime:
         session = await runtime.agents.get().create_session('session')
-        turn = await runtime.agents.get().start('question', session_id=session.session_id)
+        turn = await runtime.agents.get().session(session.session_id).start('question')
         result = await turn.wait_final(timeout_seconds=5)
         assert result.view['output'] == {'text': 'answer'}
         assert (await runtime.sessions.get("session", principal=runtime.default_principal)).session_id == 'session'
@@ -71,7 +71,7 @@ async def test_disabled_session_does_not_disable_independent_execution_or_cold_r
             await agent.create_session('session')
         assert disabled.value.code is ErrorCode.CAPABILITY_REQUIRED_MISSING
         with pytest.raises(AIError) as bound:
-            await agent.start('question', session_id='session')
+            await agent.session('session').start('question')
         assert bound.value.code is ErrorCode.CAPABILITY_REQUIRED_MISSING
         execution = await agent.start('question', idempotency_key='request')
         result = (await execution.wait(timeout_seconds=5)).result
@@ -141,7 +141,7 @@ async def test_session_checkpoints_do_not_enable_step_for_standalone_execution(t
     ):
         agent = runtime.agents.get()
         session = await agent.create_session('session')
-        turn = await agent.start('session question', session_id=session.session_id)
+        turn = await agent.session(session.session_id).start('session question')
         assert (await turn.wait_final(timeout_seconds=5)).view['output'] == {'text': 'answer'}
         row = await state.session_turn_reader.get_turn(turn.key)
         assert row['request_json']['session_checkpoints'] is True
@@ -168,7 +168,7 @@ async def test_standalone_step_does_not_enable_checkpoints_for_session(tmp_path)
     ):
         agent = runtime.agents.get()
         session = await agent.create_session('session')
-        turn = await agent.start('session question', session_id=session.session_id)
+        turn = await agent.session(session.session_id).start('session question')
         assert (await turn.wait_final(timeout_seconds=5)).view['output'] == {'text': 'answer'}
         row = await state.session_turn_reader.get_turn(turn.key)
         assert row['request_json']['session_checkpoints'] is False

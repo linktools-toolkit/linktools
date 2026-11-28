@@ -148,14 +148,14 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
             # This matrix enables arbitrary tools and structured output. The
             # narrower split Step profiles have their own round-trip tests.
             with pytest.raises(AIError) as unavailable:
-                await agent.start("first question", idempotency_key="first", output=_Answer, session_id="session")
+                await agent.session("session").start("first question", idempotency_key="first", output=_Answer)
             assert unavailable.value.code is ErrorCode.STORAGE_CAPABILITY_MISSING
             assert (await runtime.history.turn_session_state("session", principal=runtime.default_principal))[
                 "active_turn_id"
             ] is None
             assert model_calls == tool_calls == []
             return
-        turn = await agent.start("first question", idempotency_key="first", output=_Answer, session_id="session")
+        turn = await agent.session("session").start("first question", idempotency_key="first", output=_Answer)
         try:
             await asyncio.wait_for(ready.wait(), 10)
             assert (await runtime.history.turn_session_state("session", principal=runtime.default_principal))[
@@ -188,7 +188,7 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
         agent = runtime.agents.get()
         assert await runtime.history.turn_session("session", principal=runtime.default_principal) == history
         before_replay = list(model_calls)
-        replay = await agent.start("first question", idempotency_key="first", output=_Answer, session_id="session")
+        replay = await agent.session("session").start("first question", idempotency_key="first", output=_Answer)
         assert replay.key == turn.key
         assert (await replay.wait_final(timeout_seconds=10)).view == terminal.view
         assert model_calls == before_replay
@@ -197,7 +197,7 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
         assert bool(evidence.items) is trace
         restored_trace = {item.step_event_seq: item for item in evidence.items}
         assert all(restored_trace.get(item.step_event_seq) == item for item in observed_trace)
-        second = await agent.start("second question", idempotency_key="second", output=_Answer, session_id="session")
+        second = await agent.session("session").start("second question", idempotency_key="second", output=_Answer)
         following = await second.wait_final(timeout_seconds=10)
         assert following.status is ExecutionStatus.SUCCEEDED
         assert following.view["output"] == second_output

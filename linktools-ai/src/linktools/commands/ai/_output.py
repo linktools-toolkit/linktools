@@ -37,9 +37,10 @@ async def emit_result(
     native = uses_turn_sessions(runtime)
     if native and not planning:
         return await _emit_session_result(runtime, prompt, session_id, as_json, thinking)
-    execution = await runtime.agents.get().start(
+    agent = runtime.agents.get()
+    target = agent if native else agent.session(session_id)
+    execution = await target.start(
         prompt,
-        session_id=None if native else session_id,
         planning=planning,
         thinking=thinking,
     )

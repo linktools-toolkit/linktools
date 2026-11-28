@@ -72,8 +72,8 @@ async def test_native_parent_approves_exact_child_without_shadow_execution(
     ):
         actor = Principal("owner", runtime.tenant_id)
         await runtime.sessions.create_turn_session("chat", principal=actor)
-        turn = await runtime.agents.get().start(
-            "Delegate once", session_id="chat", principal=actor, idempotency_key="once",
+        turn = await runtime.agents.get().session("chat").start(
+            "Delegate once", principal=actor, idempotency_key="once",
         )
 
         async def child_parked():

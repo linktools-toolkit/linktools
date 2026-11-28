@@ -225,9 +225,8 @@ async def test_existing_workspace_cwd_requires_workspace_for_new_turn(
         features=model_features(RuntimeUsageModels(), features),
     ) as runtime:
         with pytest.raises(AIError) as error:
-            await runtime.agents.get("default").run(
+            await runtime.agents.get("default").session("cwd-session").run(
                 "continue",
-                session_id="cwd-session",
                 timeout_seconds=10,
             )
 

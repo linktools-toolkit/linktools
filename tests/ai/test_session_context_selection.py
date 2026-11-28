@@ -109,15 +109,15 @@ async def test_session_selects_context_before_prior_body_read_and_preserves_time
     async with Persistence.open("session-start-preparation", storage=storage) as state, open_runtime(state) as runtime:
         principal = runtime.default_principal
         await runtime.sessions.create_turn_session("session", principal=principal)
-        first = await runtime.agents.get().start("old question", session_id="session", idempotency_key="old")
+        first = await runtime.agents.get().session("session").start("old question", idempotency_key="old")
         assert (await first.wait_final(timeout_seconds=5)).view["output"] == {"text": "answer"}
 
     ranges.clear()
     async with Persistence.open("session-start-preparation", storage=storage) as state, open_runtime(state) as runtime:
         agent = runtime.agents.get()
         principal = runtime.default_principal
-        second = await agent.start(
-            "new question", session_id="session", session_context=selection, idempotency_key="new",
+        second = await agent.session("session").start(
+            "new question", session_context=selection, idempotency_key="new",
         )
         assert (await second.wait_final(timeout_seconds=5)).view["output"] == {"text": "answer"}
         assert len(seen[-1]) == expected_messages
@@ -126,13 +126,13 @@ async def test_session_selects_context_before_prior_body_read_and_preserves_time
         turns = page["timeline"]["items"]
         assert {turn["turn_id"] for turn in turns} == {first.key.turn_id, second.key.turn_id}
         assert {turn["user_input"]["prompt"] for turn in turns} == {"old question", "new question"}
-        again = await agent.start(
-            "new question", session_id="session", session_context=selection, idempotency_key="new",
+        again = await agent.session("session").start(
+            "new question", session_context=selection, idempotency_key="new",
         )
         assert again.key == second.key
         with pytest.raises(AIError) as error:
-            await agent.start(
-                "new question", session_id="session", idempotency_key="new",
+            await agent.session("session").start(
+                "new question", idempotency_key="new",
                 session_context="current_turn" if selection == "all" else "all",
             )
         assert error.value.code == ErrorCode.IDEMPOTENCY_CONFLICT

@@ -356,8 +356,8 @@ async def test_session_runtime_persists_and_reads_terminal_result(
         created = await agent.create_session("session")
         loaded = await runtime.sessions.get(created.session_id, principal=runtime.default_principal)
         assert loaded.session_id == created.session_id
-        result = (await agent.run(
-            "hello", output=_PersistenceNestedOutput, session_id=created.session_id, timeout_seconds=10,
+        result = (await agent.session(created.session_id).run(
+            "hello", output=_PersistenceNestedOutput, timeout_seconds=10,
         )).result
         assert result.status is ExecutionStatus.SUCCEEDED and result.view["output"] == expected
         assert (await loaded.inspect())["active_turn_id"] is None

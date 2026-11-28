@@ -45,7 +45,6 @@ from ..errors import AIError, ErrorCode
 
 if TYPE_CHECKING:
     from ._regenerable_turn import _RegenerableTurnRunner
-    from ..core import ThinkingValue
     from ..inputs import InputCaptures
     from ..history import History
     from ..asset import AssetStoreReader
@@ -59,8 +58,7 @@ from ._agent_binding_resolver import _AgentBindingResolver
 from ..observe.stream import ObservationSession, await_stream_cleanup
 from ._domains import RuntimeAgents, RuntimeExecutions, RuntimeMetrics, RuntimeSessions
 from ..core import ExecutionContext
-from ..storage import sql_observation_scope
-from ..model import UserPromptInput, normalize_input_files
+from ..model import normalize_input_files
 from ..inputs import CanonicalUserInput
 from ..observe import (MetricRecorderProvider, MetricRecorderStatus, MetricFlushResult, MetricsControl,
                        RuntimeMetricsStatus, RuntimeMetricsFlushResult)
@@ -408,7 +406,6 @@ class Runtime(Generic[AppT]):
         self._executions = RuntimeExecutions(
             execution, self._get_execution, input_captures,
             bind_execution=self._execution_handle, ensure_open=self._ensure_open,
-            start_in_session=self._start_existing_session,
         )
         self._session_service = session
         self._sessions = RuntimeSessions(
@@ -625,30 +622,6 @@ class Runtime(Generic[AppT]):
             principal=resolved_principal,
         )
         return self._session_handle(view, resolved_principal)
-
-    async def _start_existing_session(
-        self, session_id: str, user_prompt: UserPromptInput, *, principal: Principal,
-        idempotency_key: str | None = None, output: "type[BaseModel] | None" = None,
-        correlation: Mapping[str, object] | None = None, files: Sequence[str] = (),
-        planning: bool | None = None, thinking: "ThinkingValue | None" = None,
-    ) -> "Execution[AppT]":
-        from ..core import validate_idempotency_key
-        from ..model import validate_user_input
-
-        self._ensure_open()
-        validate_resource_id(session_id)
-        prompt = validate_user_input(user_prompt)
-        key = secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key
-        validate_idempotency_key(key)
-
-        async def start(agent_id, resume):
-            return await self._get_agent(agent_id).execution_port.start(
-                prompt, files=files, output=output, principal=principal, session_id=session_id,
-                idempotency_key=key, mode="run", planning=planning, thinking=thinking,
-                correlation=correlation, _resume=resume)
-
-        with sql_observation_scope("runtime.session.start"):
-            return await self.sessions._agent_session_service().start_existing(session_id, principal, key, start)
 
     def _session_handle(self, view: SessionView, principal: Principal) -> Session[AppT]:
         return Session(self, view.agent_id, None, view.session_id, principal)

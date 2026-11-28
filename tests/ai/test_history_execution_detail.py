@@ -371,8 +371,8 @@ async def test_sqlite_turn_detail_reads_authoritative_session_result(tmp_path: P
     ):
         await runtime.sessions.create_turn_session("session", principal=_OWNER)
         await runtime.sessions.create_turn_session("other", principal=_OWNER)
-        turn = await runtime.agents.get().start(
-            "question", session_id="session", principal=_OWNER, idempotency_key="request",
+        turn = await runtime.agents.get().session("session").start(
+            "question", principal=_OWNER, idempotency_key="request",
         )
         try:
             await asyncio.wait_for(entered.wait(), timeout=5)
@@ -445,8 +445,8 @@ async def test_native_turn_detail_rechecks_read_policies_and_does_not_freeze_act
                      authorization=policy) as runtime,
     ):
         await runtime.sessions.create_turn_session("session", principal=_OWNER)
-        turn = await runtime.agents.get().start(
-            "question", session_id="session", principal=_OWNER, idempotency_key="request",
+        turn = await runtime.agents.get().session("session").start(
+            "question", principal=_OWNER, idempotency_key="request",
         )
         try:
             await asyncio.wait_for(entered.wait(), timeout=5)

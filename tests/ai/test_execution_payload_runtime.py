@@ -207,9 +207,9 @@ async def test_native_session_retains_large_messages_without_execution_control_r
             agent = runtime.agents.get()
             await agent.create_session("session")
             with _execution_sql_bindings(state) as bindings:
-                first = await agent.start(prompts[0], session_id="session", idempotency_key="first")
+                first = await agent.session("session").start(prompts[0], idempotency_key="first")
                 assert (await first.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
-                large = await agent.start(prompts[1], session_id="session", idempotency_key="large")
+                large = await agent.session("session").start(prompts[1], idempotency_key="large")
                 try:
                     await asyncio.wait_for(entered.wait(), 5)
                     await runtime.sessions.inspect("session", principal=runtime.default_principal)
@@ -239,7 +239,7 @@ async def test_native_session_retains_large_messages_without_execution_control_r
         timeline = await agent.session("session").timeline()
         assert [item["user_input"]["prompt"] for item in timeline["items"]] == prompts
         assert [item["output"] for item in timeline["items"]] == [{"text": _OUTPUT}] * len(prompts)
-        replay = await agent.start(prompts[1], session_id="session", idempotency_key="large")
+        replay = await agent.session("session").start(prompts[1], idempotency_key="large")
         assert replay.key == large.key
         assert (await replay.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
         assert seen == prompts

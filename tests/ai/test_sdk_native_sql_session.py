@@ -58,8 +58,8 @@ async def test_public_sql_sdk_session_creates_and_replays_native_turn(tmp_path):
 
         agent = runtime.agents.get()
         with pytest.raises(AIError) as missing:
-            await agent.start("must not create a legacy session", principal=principal,
-                              session_id="absent", idempotency_key="missing")
+            await agent.session("absent").start("must not create a legacy session", principal=principal,
+                              idempotency_key="missing")
         assert missing.value.code is ErrorCode.AUTHORIZATION_DENIED
         assert state.conversation.sessions is None
         with pytest.raises(AIError) as missing:
@@ -92,8 +92,7 @@ async def test_public_sql_sdk_session_creates_and_replays_native_turn(tmp_path):
 
 
         async with asyncio.timeout(10):
-            plan = await agent.start_plan("Plan next", principal=principal, session_id=created.session_id,
-                                          idempotency_key="plan")
+            plan = await runtime.sessions.start_turn(created.session_id, "Plan next", agent=agent, principal=principal, idempotency_key="plan", mode="plan", planning=True)
             planned = await plan.wait()
         assert planned.key.session_id == created.session_id and planned.key != turn.key
         assert planned.status is ExecutionStatus.SUCCEEDED
@@ -101,12 +100,12 @@ async def test_public_sql_sdk_session_creates_and_replays_native_turn(tmp_path):
         assert await state.execution.executions.get(planned.key.turn_id, tenant_id=principal.tenant_id) is None
 
         async with asyncio.timeout(10):
-            started = await agent.start("third", principal=principal, session_id=created.session_id,
+            started = await agent.session(created.session_id).start("third", principal=principal,
                                         idempotency_key="start-native")
             assert (await started.wait_final()).status is ExecutionStatus.SUCCEEDED
-            run = await agent.run("fourth", principal=principal, session_id=created.session_id,
+            run = await agent.session(created.session_id).run("fourth", principal=principal,
                                   idempotency_key="run-native")
-            plan_run = await agent.plan("fifth", principal=principal, session_id=created.session_id,
+            plan_run = await agent.session(created.session_id).plan("fifth", principal=principal,
                                         idempotency_key="plan-native")
         assert run.cursor is plan_run.cursor is None
         assert run.result.key.session_id == plan_run.result.key.session_id == created.session_id
@@ -141,7 +140,7 @@ async def test_sql_host_without_session_authorization_does_not_fall_back(tmp_pat
             lambda: runtime.sessions.create(CreateSessionRequest(principal, "chat", "create")),
             lambda: runtime.sessions.get("chat", principal=principal),
             lambda: runtime.sessions.inspect("chat", principal=principal),
-            lambda: agent.start("must not create a legacy session", session_id="chat"),
+            lambda: agent.session("chat").start("must not create a legacy session"),
         ):
             with pytest.raises(AIError) as missing:
                 await operation()
@@ -185,7 +184,7 @@ async def test_native_sdk_freezes_effective_agent_planning_and_thinking(tmp_path
                 "session", "question", agent=selected, principal=principal, idempotency_key=key, **options,
             )
 
-        admitted = (await agent.start("question", session_id="session", idempotency_key="turn")
+        admitted = (await agent.session("session").start("question", idempotency_key="turn")
                     if role == "bound-sdk-agent" else await send("turn"))
         assert (await admitted.wait_final(timeout_seconds=5)).status is ExecutionStatus.SUCCEEDED
         row = await state.session_turns.get_turn(admitted.key)

@@ -33,7 +33,7 @@ from ..execution import ExecutionTreeEvent, ListExecutionRequest, TaskModelProje
 from ..session import CreateSessionRequest, ListSessionRequest
 from ..execution.stream import local_execution_stream
 from ..runtime import Runtime
-from ..runtime.turn_clients import uses_turn_sessions
+from ..runtime.turn_clients import start_bound_execution, uses_turn_sessions
 from ..session import SessionTurn, ToolProcessItem, project_tool_process_event
 
 if TYPE_CHECKING:
@@ -726,8 +726,8 @@ class _Console:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={
                     "field": "attachments", "reason": "sql_turn_required",
                 })
-            execution = await runtime.executions.start_in_session(
-                session_id, _text(payload, "prompt"), principal=self.principal,
+            execution = await start_bound_execution(
+                runtime, session_id, _text(payload, "prompt"), principal=self.principal,
                 idempotency_key=request_id,
                 planning=payload.get("planning", False), thinking=payload.get("thinking"),
             )

@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from linktools.ai.core import CommitPolicy, ExecutionDeltaType, ExecutionStatus
 from linktools.ai.persistence import Persistence, PersistenceStorage, StateTurnResources
 from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.runtime.turn_clients import start_bound_execution
 from linktools.ai.storage import InMemoryCacheBackend, current_sql_observation, sql_observation_scope
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
@@ -75,7 +76,7 @@ async def measure(args: argparse.Namespace) -> dict:
             owner, reader = runtimes
             await owner.agents.get().create_session("session")
             backend = owner._execution_service.runtime_backend()
-            warm = await owner.executions.start_in_session("session", "warm", principal=owner.default_principal)
+            warm = await start_bound_execution(owner, "session", "warm", principal=owner.default_principal)
             warm_owner = backend._turn_owners[warm.execution_id]
             assert (await warm.wait(timeout_seconds=8)).result.status is ExecutionStatus.SUCCEEDED
             await warm_owner.closed.wait()
@@ -131,7 +132,7 @@ async def measure(args: argparse.Namespace) -> dict:
                 if args.producer == "invalidation":
                     unsub = owner.sessions.observe_changes("session", invalidate)
                 send_ns = perf_counter_ns()
-                execution = await owner.executions.start_in_session("session", "question", principal=owner.default_principal)
+                execution = await start_bound_execution(owner, "session", "question", principal=owner.default_principal)
                 active_owner = backend._turn_owners[execution.execution_id]
                 capture = (owner.sessions.capture_published_turn("session", execution.execution_id, principal=owner.default_principal)
                            if args.terminal == "publication" else nullcontext())

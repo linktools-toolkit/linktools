@@ -60,8 +60,8 @@ async def test_current_turn_keeps_tool_results_across_runtime_recovery(tmp_path:
             "session", "old question", agent="reader", principal=principal, idempotency_key="old",
         )
         assert (await old.wait_final(timeout_seconds=5)).view["output"] == {"text": "old answer"}
-        turn = await runtime.agents.get("reader").start(
-            "read the file", session_id="session", principal=principal, idempotency_key="read",
+        turn = await runtime.agents.get("reader").session("session").start(
+            "read the file", principal=principal, idempotency_key="read",
             session_context="current_turn",
         )
         assert (await turn.wait()).status is ExecutionStatus.WAITING_DEFERRED
@@ -73,8 +73,8 @@ async def test_current_turn_keeps_tool_results_across_runtime_recovery(tmp_path:
         await runtime.approvals.decide(turn.key, ApprovalDecisionRequest(
             principal, persisted.approval_id, "approve", ApprovalDecision.APPROVE,
         ))
-        resumed = await runtime.agents.get("reader").start(
-            "read the file", session_id="session", principal=principal, idempotency_key="read",
+        resumed = await runtime.agents.get("reader").session("session").start(
+            "read the file", principal=principal, idempotency_key="read",
             session_context="current_turn",
         )
         assert resumed.key == turn.key

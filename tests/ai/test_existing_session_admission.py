@@ -11,6 +11,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.session import CreateSessionRequest
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime import Runtime
+from linktools.ai.runtime.turn_clients import start_bound_execution
 
 from ._runtime_test_helpers import configure_execution
 from ._runtime_test_helpers import RuntimeUsageModels, model_features
@@ -26,10 +27,10 @@ async def test_existing_session_start_uses_session_agent_without_display(monkeyp
     async with Runtime.open("strict-start", storage=PersistenceStorage.in_memory(), features=features) as runtime:
         await runtime.sessions.create("other", CreateSessionRequest(actor, "session", "create"))
         monkeypatch.setattr(runtime._session_service, "get", AsyncMock(side_effect=AssertionError("no display read")))
-        run = await runtime.executions.start_in_session("session", "hello", principal=actor, idempotency_key="first")
+        run = await start_bound_execution(runtime, "session", "hello", principal=actor, idempotency_key="first")
         await run.wait(timeout_seconds=10)
         assert (await run.inspect()).agent_id == "other"
-        replay = await runtime.executions.start_in_session("session", "hello", principal=actor, idempotency_key="first")
+        replay = await start_bound_execution(runtime, "session", "hello", principal=actor, idempotency_key="first")
         assert replay.execution_id == run.execution_id
 
 
@@ -43,7 +44,7 @@ async def test_existing_session_start_does_not_create_missing_or_unauthorized(mo
         monkeypatch.setattr(runtime._session_service, "create", create)
         for identity in ("missing", "private"):
             with pytest.raises(AIError) as caught:
-                await runtime.executions.start_in_session(identity, "hello", principal=actor, idempotency_key=identity)
+                await start_bound_execution(runtime, identity, "hello", principal=actor, idempotency_key=identity)
             assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED
         create.assert_not_awaited()
 
@@ -61,7 +62,7 @@ async def test_existing_session_close_during_binding_still_fails_cas(monkeypatch
 
         monkeypatch.setattr(runtime._binding_resolver, "resolve_agent", close_before_resolve)
         with pytest.raises(AIError) as caught:
-            await runtime.executions.start_in_session("session", "hello", principal=actor, idempotency_key="turn")
+            await start_bound_execution(runtime, "session", "hello", principal=actor, idempotency_key="turn")
         assert caught.value.code in {ErrorCode.SESSION_CONFLICT, ErrorCode.STORAGE_CONFLICT}
         assert str((await session.inspect()).status) == "CLOSED"
 
@@ -102,7 +103,7 @@ async def test_existing_session_explicit_output_and_correlation():
     async with Runtime.open("strict-output", storage=PersistenceStorage.in_memory(),
                             features=model_features(_Models(_UsageFunctionModel(model)))) as runtime:
         await runtime.sessions.create("default", CreateSessionRequest(actor, "session", "create"))
-        execution = await runtime.executions.start_in_session("session", "count", principal=actor,
+        execution = await start_bound_execution(runtime, "session", "count", principal=actor,
             idempotency_key="turn", output=Answer, correlation={"feature": "qa"})
         await execution.wait(timeout_seconds=10)
         assert (await execution.result()).output == {"count": 7}
@@ -129,12 +130,12 @@ async def test_existing_session_uses_binding_policy_and_reads_live_source_next_t
 
         monkeypatch.setattr(features, "resolve", current)
         with pytest.raises(AIError) as caught:
-            await runtime.executions.start_in_session("session", "hello", principal=actor, idempotency_key="turn")
+            await start_bound_execution(runtime, "session", "hello", principal=actor, idempotency_key="turn")
         assert caught.value.code is ErrorCode.CAPABILITY_REQUIRED_MISSING
         assert calls == [False]
         enabled = True
         calls.clear()
-        execution = await runtime.executions.start_in_session("session", "hello", principal=actor, idempotency_key="turn")
+        execution = await start_bound_execution(runtime, "session", "hello", principal=actor, idempotency_key="turn")
         assert calls == [True]
         await execution.wait(timeout_seconds=10)
 
@@ -158,7 +159,7 @@ async def test_existing_session_pins_rules_from_same_declaration(monkeypatch):
                 RepositoryInstructionDocument("rule:current", ".", text),)))
 
         monkeypatch.setattr(features, "resolve", current)
-        execution = await runtime.executions.start_in_session("session", "hello", principal=actor, idempotency_key="turn")
+        execution = await start_bound_execution(runtime, "session", "hello", principal=actor, idempotency_key="turn")
         assert captures == ["declaration-1"]
         await execution.wait(timeout_seconds=10)
         backend = runtime._execution_service.runtime_backend()
@@ -187,7 +188,7 @@ async def test_existing_session_still_reads_workspace_at_admission(tmp_path, mon
             return binding
 
         monkeypatch.setattr(runtime._binding_resolver, "resolve_agent", change_workspace)
-        execution = await runtime.executions.start_in_session("session", "hello", principal=actor, idempotency_key="turn")
+        execution = await start_bound_execution(runtime, "session", "hello", principal=actor, idempotency_key="turn")
         await execution.wait(timeout_seconds=10)
         backend = runtime._execution_service.runtime_backend()
         record = await backend.load_execution(execution.execution_id, tenant_id=runtime.tenant_id)
@@ -217,13 +218,13 @@ async def test_existing_session_custom_adapter_uses_authoritative_record_reader(
         monkeypatch.setattr(service, "_execution", _SessionExecutionAdapter(custom))
         read = AsyncMock(wraps=service._read_session)
         monkeypatch.setattr(service, "_read_session", read)
-        execution = await runtime.executions.start_in_session("session", "hello", principal=actor, idempotency_key="turn")
+        execution = await start_bound_execution(runtime, "session", "hello", principal=actor, idempotency_key="turn")
         read.assert_awaited_once_with("session", tenant_id=actor.tenant_id)
         assert len(calls) == 1
         assert "_start_read" not in calls[0][1]
         await execution.wait(timeout_seconds=10)
         with pytest.raises(AIError) as caught:
-            await runtime.executions.start_in_session("missing", "hello", principal=actor, idempotency_key="missing")
+            await start_bound_execution(runtime, "missing", "hello", principal=actor, idempotency_key="missing")
         assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED
         assert len(calls) == 1
 
@@ -250,7 +251,7 @@ async def test_existing_session_concurrent_same_key_converges(monkeypatch):
 
         monkeypatch.setattr(runtime._binding_resolver, "resolve_agent", together)
         first, second = await asyncio.wait_for(asyncio.gather(*(
-            runtime.executions.start_in_session("session", "hello", principal=actor, idempotency_key="same")
+            start_bound_execution(runtime, "session", "hello", principal=actor, idempotency_key="same")
             for _ in range(2)
         )), 10)
         assert first.execution_id == second.execution_id
@@ -282,6 +283,6 @@ async def test_existing_session_rechecks_execution_permission_after_binding(monk
 
         monkeypatch.setattr(runtime._binding_resolver, "resolve_agent", revoke)
         with pytest.raises(AIError) as caught:
-            await runtime.executions.start_in_session("session", "hello", principal=actor, idempotency_key="turn")
+            await start_bound_execution(runtime, "session", "hello", principal=actor, idempotency_key="turn")
         assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED
         assert (await runtime.sessions.inspect("session", principal=actor)).active_execution_id is None

@@ -26,7 +26,7 @@ from ..session import CloseSessionRequest, CreateSessionRequest, ForkSessionRequ
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
-    from ..core import ExecutionMode, RunBudget, ThinkingValue
+    from ..core import ExecutionMode, RunBudget
     from ..model import UserPromptInput
     from pydantic import BaseModel
     from ._agent import Agent, Session
@@ -76,13 +76,11 @@ class RuntimeExecutions(Generic[AppT]):
         input_captures: InputCaptures | None = None,
         *,
         bind_execution: Callable[[str, Principal], "Execution[AppT]"],
-        start_in_session: Callable[..., Awaitable["Execution[AppT]"]] | None = None,
         ensure_open: Callable[[], None] = lambda: None,
     ) -> None:
         self._service = service
         self._get_execution = get_execution
         self._bind_execution = bind_execution
-        self._start_in_session = start_in_session
         self._input_captures = input_captures
         self._ensure_open = ensure_open
 
@@ -93,21 +91,6 @@ class RuntimeExecutions(Generic[AppT]):
         principal: Principal | None = None,
     ) -> "Execution[AppT]":
         return await self._get_execution(execution_id, principal)
-
-    async def start_in_session(
-        self, session_id: str, prompt: "UserPromptInput", *, principal: Principal,
-        idempotency_key: str | None = None, output: "type[BaseModel] | None" = None,
-        correlation: "Mapping[str, object] | None" = None, files: "Sequence[str]" = (),
-        planning: bool | None = None, thinking: "ThinkingValue | None" = None,
-    ) -> "Execution[AppT]":
-        """Start an execution in an existing Agent-bound session, not a SQL turn."""
-        self._ensure_open()
-        if self._start_in_session is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        return await self._start_in_session(
-            session_id, prompt, principal=principal, idempotency_key=idempotency_key,
-            output=output, correlation=correlation, files=files, planning=planning, thinking=thinking,
-        )
 
     async def capture_input(self, execution_id: str, request: CaptureInputRequest) -> ExecutionInputCaptureRef:
         self._ensure_open()
