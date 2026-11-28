@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """MCP failures without a known execution outcome retain effect uncertainty."""
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
@@ -19,6 +20,23 @@ from linktools.ai.spec import MCPServerSpec
 
 from ._runtime_test_helpers import is_tool_retry, tool_run_context
 from .test_tool_effect_semantics import _Bridge, _call
+
+
+class _Client:
+    initialize_result = InitializeResult(
+        protocolVersion="2025-03-26", capabilities=ServerCapabilities(),
+        serverInfo=Implementation(name="test-server", version="1"),
+    )
+
+    def __init__(self, transport: StdioTransport, call_tool: Callable[..., Awaitable[object]]) -> None:
+        self.transport = transport
+        self.call_tool = call_tool
+
+    async def __aenter__(self) -> "_Client":
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
 
 
 def _protocol_error(code: int, message: str) -> McpError:
@@ -53,22 +71,7 @@ async def test_mcp_client_failures_do_not_claim_known_no_effect(
         calls += 1
         raise error
 
-    class Client:
-        initialize_result = InitializeResult(
-            protocolVersion="2025-03-26", capabilities=ServerCapabilities(),
-            serverInfo=Implementation(name="effect-boundary", version="1"),
-        )
-
-        async def __aenter__(self) -> "Client":
-            return self
-
-        async def __aexit__(self, *args: object) -> None:
-            return None
-
-        async def call_tool(self, **kwargs: Any) -> None:
-            return await reject(**kwargs)
-
-    monkeypatch.setattr(toolset, "client", Client())
+    monkeypatch.setattr(toolset, "client", _Client(toolset.client.transport, reject))
     context = tool_run_context()
     task = failure == "task_invalid_params"
     tool = toolset.tool_for_tool_def(
@@ -194,24 +197,12 @@ async def test_mcp_schema_feedback_precedes_dispatch_and_obeys_retry_budget(
     requests = 0
     dispatched: list[dict[str, Any]] = []
 
-    class Client:
-        initialize_result = InitializeResult(
-            protocolVersion="2025-03-26", capabilities=ServerCapabilities(),
-            serverInfo=Implementation(name="schema-agent", version="1"),
+    async def call_tool(**kwargs: Any) -> object:
+        dispatched.append(kwargs["arguments"])
+        return SimpleNamespace(
+            content=[TextContent(type="text", text="effect complete")],
+            structured_content=None, is_error=False,
         )
-
-        async def __aenter__(self) -> "Client":
-            return self
-
-        async def __aexit__(self, *args: object) -> None:
-            return None
-
-        async def call_tool(self, **kwargs: Any) -> object:
-            dispatched.append(kwargs["arguments"])
-            return SimpleNamespace(
-                content=[TextContent(type="text", text="effect complete")],
-                structured_content=None, is_error=False,
-            )
 
     async def get_tools(ctx: Any) -> dict[str, Any]:
         return {"mutate": toolset.tool_for_tool_def(ToolDefinition(
@@ -220,7 +211,7 @@ async def test_mcp_schema_feedback_precedes_dispatch_and_obeys_retry_budget(
             },
         ), ctx=ctx)}
 
-    monkeypatch.setattr(toolset, "client", Client())
+    monkeypatch.setattr(toolset, "client", _Client(toolset.client.transport, call_tool))
     monkeypatch.setattr(toolset, "get_tools", get_tools)
 
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
