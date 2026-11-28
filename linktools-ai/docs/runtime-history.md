@@ -697,7 +697,7 @@ requires a new graph recovery key.
 
 Startup-wide execution reconciliation is disabled by default. To opt into
 automatically recovering admitted checkpoint-enabled executions on a local
-SQLite source, pass `auto_recover=True` and use
+SQLite source, declare `RuntimeFeatures(..., auto_recover=True)` and use
 `PersistenceStorage.from_root(root, exclusive_writer=True)` so the live writer
 lock supplies exclusive ownership. The flag or file path alone does not grant
 restart recovery. With the flag enabled, shared SQL startup can still finish

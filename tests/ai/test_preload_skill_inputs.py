@@ -254,7 +254,7 @@ async def test_preload_rules_recover_from_sql_history_after_source_changes(tmp_p
             await store.put(key, _declaration("guide", "ORIGINAL_RULE"))
         features = _features(store, model, allowed=())
         async with Persistence.open("preload-recovery", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db")) as persistence:
-            async with Runtime.open(persistence=persistence, features=features.borrow(), auto_recover=False) as runtime:
+            async with Runtime.open(persistence=persistence, features=features.borrow()) as runtime:
                 yield runtime, store
         await store.close()
 

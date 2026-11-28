@@ -51,8 +51,8 @@ class _TurnNoticeChannel:
                 asyncio.get_running_loop().call_soon(receive, notice)
 
 
-def _group(terminal: bool = True):
-    group = RuntimeFeatures('shared-pending')
+def _group(terminal: bool = True, *, auto_recover: bool = False):
+    group = RuntimeFeatures('shared-pending', auto_recover=auto_recover)
     group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync()), scope='runtime')
     group.agent('default', model='default', allow_tools=())
     if not terminal:

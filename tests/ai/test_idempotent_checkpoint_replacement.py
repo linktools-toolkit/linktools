@@ -72,7 +72,7 @@ def checkpoint_recovery_sources(tmp_path_factory: pytest.TempPathFactory) -> tup
                 storage = PersistenceStorage.sqlite(root / "source.db")
                 async with Persistence.open("checkpoint-replacement", storage=storage) as state, Runtime.open(
                     persistence=state, features=model_features(_Models(_UsageFunctionModel(model)), group),
-                    auto_recover=False, metrics=None,
+                    metrics=None,
                 ) as runtime:
                     if mode == "create":
                         handle = await runtime.agents.get().start("original", idempotency_key="one",
@@ -348,7 +348,7 @@ async def test_parallel_idempotent_rich_results_commit_and_reopen(tmp_path: Path
         database, cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024),
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024),
     )) as state, Runtime.open(
-        persistence=state, features=features, auto_recover=False, metrics=None,
+        persistence=state, features=features, metrics=None,
     ) as runtime:
         handle = await runtime.agents.get().start("save", idempotency_key="one")
 
@@ -404,7 +404,7 @@ async def test_parallel_idempotent_rich_results_commit_and_reopen(tmp_path: Path
         database, cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024),
         coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024),
     )) as state, Runtime.open(
-        persistence=state, features=features, auto_recover=False, metrics=None,
+        persistence=state, features=features, metrics=None,
     ) as runtime:
         reopened = assert_results(await state.checkpoint.tools.list_by_execution(original_id, tenant_id=runtime.tenant_id))
         assert reopened == completed

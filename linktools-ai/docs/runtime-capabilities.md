@@ -329,8 +329,9 @@ These boundaries do not enable arbitrary restart after a process crash.
 `recover()` continues interrupted execution only when its admitted guarantee
 includes restart checkpoints. Otherwise it raises `CAPABILITY_REQUIRED_MISSING`;
 unresolved tool effects retain their stronger recovery diagnostic. It does not
-silently convert recovery into cancellation. `auto_recover=True` opts into
-startup reconciliation; it does not grant a missing execution guarantee.
+silently convert recovery into cancellation. `RuntimeFeatures(..., auto_recover=True)`
+opts into startup Execution reconciliation; it does not grant a missing execution
+guarantee or change explicit Session and Task Graph recovery.
 
 `Runtime.handoff()` requires durable Execution and Checkpoint routes. Every active
 producer must have been durably admitted with native restart checkpoints; current

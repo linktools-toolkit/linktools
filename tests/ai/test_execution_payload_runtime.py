@@ -259,7 +259,7 @@ async def test_execution_payload_runtime_prepared_handoff_reuses_body_after_cold
         calls += 1
         return ModelResponse(parts=[TextPart(_OUTPUT)])
 
-    features = RuntimeFeatures("execution-payload-handoff")
+    features = RuntimeFeatures("execution-payload-handoff", auto_recover=True)
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
@@ -289,7 +289,7 @@ async def test_execution_payload_runtime_prepared_handoff_reuses_body_after_cold
                     assert stored.recovery.terminal_handoff.outcome.output.decode() == {"text": _OUTPUT}
                     async with Persistence.open("execution-payload-handoff", storage=storage) as reader_state:
                         async with Runtime.open(persistence=reader_state,
-                            features=model_features(models, features), metrics=None, auto_recover=True) as reader:
+                            features=model_features(models, features), metrics=None) as reader:
                             result = await reader.executions.result(execution.execution_id, principal=reader.default_principal)
                             assert result.status is ExecutionStatus.SUCCEEDED
                             assert result.output == {"text": _OUTPUT}
@@ -309,7 +309,7 @@ async def test_execution_payload_runtime_native_checkpoint_retains_body_after_re
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     name = "execution-payload-checkpoint"
-    features = RuntimeFeatures(name)
+    features = RuntimeFeatures(name, auto_recover=True)
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     step_database = tmp_path / "steps.db"
     features.capability(native_checkpoint(database=step_database), scope="runtime")
@@ -342,8 +342,7 @@ async def test_execution_payload_runtime_native_checkpoint_retains_body_after_re
     assert [part.content for message in transcript for part in message.parts
             if isinstance(part, (UserPromptPart, TextPart))] == [_INPUT, _OUTPUT]
 
-    async with Runtime.open(name, storage=storage, features=model_features(models, features), metrics=None,
-                            auto_recover=True) as reopened:
+    async with Runtime.open(name, storage=storage, features=model_features(models, features), metrics=None) as reopened:
         await _inspect_without_payload_reads(reopened, execution.execution_id, monkeypatch)
         replay = await reopened.agents.get().start(_INPUT, idempotency_key="checkpoint")
         assert replay.execution_id == execution.execution_id

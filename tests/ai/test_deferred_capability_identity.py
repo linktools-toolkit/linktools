@@ -82,7 +82,7 @@ async def _runtime(database: Path, store, declarations, model, *, validation_sho
     model_features(_Models(_UsageFunctionModel(model)), features)
     try:
         async with Persistence.open("deferred-identity", storage=PersistenceStorage.sql(engine)) as persistence:
-            async with Runtime.open(persistence=persistence, features=features.borrow(), auto_recover=False) as runtime:
+            async with Runtime.open(persistence=persistence, features=features.borrow()) as runtime:
                 yield runtime, persistence
     finally:
         await engine.dispose()

@@ -244,7 +244,7 @@ async def test_rule_overlay_handoff_recovers_original_sql_asset_and_workspace_by
             features.agent("reader", allow_tools=("read_file",), allow_skills=(), allow_subagents=())
             model_features(_Models(_UsageFunctionModel(model)), features)
             async with Persistence.open("overlay-handoff", storage=PersistenceStorage.sqlite(tmp_path / "runtime-handoff.db")) as state:
-                async with Runtime.open(persistence=state, features=features.borrow(), auto_recover=False) as runtime:
+                async with Runtime.open(persistence=state, features=features.borrow()) as runtime:
                     yield runtime, state, assets
         finally:
             await assets.close()

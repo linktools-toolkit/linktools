@@ -351,7 +351,7 @@ async def test_default_steps_recover_after_runtime_handoff_and_reopen(tmp_path: 
     assert declaration.store is None
 
     features.model("default", RuntimeUsageModels())
-    async with Runtime.open("handoff", storage=storage, features=features, auto_recover=False) as successor:
+    async with Runtime.open("handoff", storage=storage, features=features) as successor:
         recovered = await successor.executions.recover(
             execution.execution_id, principal=successor.default_principal, idempotency_key="recover",
         )

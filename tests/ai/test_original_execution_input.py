@@ -151,7 +151,7 @@ async def test_original_input_reopens_while_session_metadata_remains_live(tmp_pa
     storage = (PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True)
                if backend == "local_sqlite" else PersistenceStorage.sqlite(tmp_path / "state.db"))
     async with Persistence.open("original-input-reopen", storage=storage) as persistence:
-        async with Runtime.open(persistence=persistence, features=features(), auto_recover=False,
+        async with Runtime.open(persistence=persistence, features=features(),
                                 authorization=HostAuthorization()) as runtime:
             await runtime.agents.get().create_session(
                 "session", principal=principal, metadata={"selected": ["original"]},
@@ -165,7 +165,7 @@ async def test_original_input_reopens_while_session_metadata_remains_live(tmp_pa
             await runtime.handoff()
 
     async with Persistence.open("original-input-reopen", storage=storage) as persistence:
-        async with Runtime.open(persistence=persistence, features=features(), auto_recover=False,
+        async with Runtime.open(persistence=persistence, features=features(),
                                 authorization=HostAuthorization()) as runtime:
             session = await runtime.sessions.get("session", principal=principal)
             current = await session.inspect()

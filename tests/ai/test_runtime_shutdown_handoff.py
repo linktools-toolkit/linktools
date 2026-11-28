@@ -110,7 +110,7 @@ async def test_handoff_recovers_same_execution_and_next_session_turn(handoff_sto
         Persistence.open("shutdown-handoff", storage=storage()) as state,
         Runtime.open(
             persistence=state, features=model_features(_Models(FunctionModel(stream_function=answer)), _group(False)),
-            auto_recover=False, authorization=_HostAuthorization(),
+            authorization=_HostAuthorization(),
         ) as successor,
     ):
         retained = await state.session_turns.get_turn(turn.key)
@@ -221,7 +221,7 @@ async def test_handoff_keeps_admitted_checkpoint_guarantee_across_policy_updates
     features.capability(StepPersistenceCapability(), id="runtime.steps")
     features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
     model_features(_Models(FunctionModel(stream_function=answer)), features)
-    async with Runtime.open("live-handoff", storage=storage, features=features, auto_recover=False) as successor:
+    async with Runtime.open("live-handoff", storage=storage, features=features) as successor:
         recovered = await successor.executions.recover(execution.execution_id,
             principal=successor.default_principal, idempotency_key="recover")
         assert recovered.execution_id == execution.execution_id
@@ -263,7 +263,7 @@ async def test_handoff_rejects_recovery_admission_without_stopping_runtime(
 
     monkeypatch.setattr(LocalExecutionBackend, "launch", blocked_launch)
     model_features(_Models(FunctionModel(stream_function=answer)), features)
-    async with Runtime.open("handoff-recovery", storage=storage, features=features, auto_recover=False) as runtime:
+    async with Runtime.open("handoff-recovery", storage=storage, features=features) as runtime:
         recovery = asyncio.create_task(runtime.executions.recover(execution.execution_id,
             principal=runtime.default_principal, idempotency_key="recover"))
         await asyncio.wait_for(entered.wait(), 5)
@@ -345,7 +345,7 @@ async def test_handoff_settles_tool_effect_once_before_recovery(handoff_storage,
         release.set()
         await asyncio.wait_for(handoff, 10)
         assert effects == ["written"]
-    async with Persistence.open('handoff-tool', storage=handoff_storage()) as persistence_165, Runtime.open(persistence=persistence_165, features=model_features(_TaskTestModels(), features()), auto_recover=False) as successor:
+    async with Persistence.open('handoff-tool', storage=handoff_storage()) as persistence_165, Runtime.open(persistence=persistence_165, features=model_features(_TaskTestModels(), features())) as successor:
         if unknown:
             view = await successor.executions.inspect(execution.execution_id,
                 principal=successor.default_principal)
@@ -442,7 +442,7 @@ async def test_handoff_does_not_claim_success_after_default_close(handoff_storag
         with pytest.raises(AIError) as error:
             await runtime.handoff()
         assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
-    async with Persistence.open('handoff-close', storage=handoff_storage()) as persistence_265, Runtime.open(persistence=persistence_265, features=model_features(models, _group(False)), auto_recover=False) as reader:
+    async with Persistence.open('handoff-close', storage=handoff_storage()) as persistence_265, Runtime.open(persistence=persistence_265, features=model_features(models, _group(False))) as reader:
         view = await reader.executions.inspect(execution.execution_id, principal=reader.default_principal)
         assert view.status is ExecutionStatus.CANCELLED
 
@@ -520,7 +520,7 @@ async def test_pending_user_cancel_interrupts_tool_during_handoff(tmp_path: Path
         await asyncio.wait_for(tool_cancelled.wait(), 5)
         await asyncio.wait_for(cancellation, 10)
         await asyncio.wait_for(handoff, 10)
-    async with Persistence.open('cancel-handoff', storage=PersistenceStorage.sqlite(tmp_path / 'cancel.db')) as persistence_343, Runtime.open(persistence=persistence_343, features=model_features(_TaskTestModels(), group), auto_recover=False) as successor:
+    async with Persistence.open('cancel-handoff', storage=PersistenceStorage.sqlite(tmp_path / 'cancel.db')) as persistence_343, Runtime.open(persistence=persistence_343, features=model_features(_TaskTestModels(), group)) as successor:
         view = await successor.executions.inspect(execution.execution_id,
             principal=successor.default_principal)
         assert view.status in {ExecutionStatus.CANCELLED, ExecutionStatus.RECOVERY_REQUIRED}
@@ -562,7 +562,7 @@ async def test_handoff_retry_retains_admitted_execution_identity(tmp_path: Path,
         await asyncio.wait_for(owner.handoff(), 10)
     async def answer(messages, info):
         yield "recovered"
-    async with Persistence.open('handoff-admission', storage=PersistenceStorage.sqlite(database)) as persistence_383, Runtime.open(persistence=persistence_383, features=model_features(_Models(FunctionModel(stream_function=answer)), _checkpointed_execution_group()), auto_recover=False) as successor:
+    async with Persistence.open('handoff-admission', storage=PersistenceStorage.sqlite(database)) as persistence_383, Runtime.open(persistence=persistence_383, features=model_features(_Models(FunctionModel(stream_function=answer)), _checkpointed_execution_group())) as successor:
         await successor.executions.recover(execution.execution_id,
             principal=successor.default_principal, idempotency_key="recover-admitted")
         await successor.executions.wait(execution.execution_id,

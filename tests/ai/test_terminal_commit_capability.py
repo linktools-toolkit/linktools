@@ -215,7 +215,7 @@ async def test_current_execution_record_retains_conversation_through_recovery(
 ) -> None:
     from linktools.ai.execution import ExecutionRequest
 
-    group: RuntimeFeatures[None] = RuntimeFeatures("application")
+    group: RuntimeFeatures[None] = RuntimeFeatures("application", auto_recover=True)
     group.capability(native_checkpoint(), scope="runtime")
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     storage_path = tmp_path / "runtime"
@@ -245,7 +245,7 @@ async def test_current_execution_record_retains_conversation_through_recovery(
         assert await repository._execution_content.decode(written) == before
 
     reopened = PersistenceStorage.from_root(storage_path, exclusive_writer=True)
-    async with Persistence.open('conversation-feature', storage=reopened) as persistence_260, Runtime.open(persistence=persistence_260, features=model_features(RuntimeUsageModels(), group), auto_recover=True) as runtime:
+    async with Persistence.open('conversation-feature', storage=reopened) as persistence_260, Runtime.open(persistence=persistence_260, features=model_features(RuntimeUsageModels(), group)) as runtime:
         recovered = await runtime.executions.get(execution.execution_id)
         assert (await recovered.wait(timeout_seconds=10)).result.output == {"text": "done"}
         after = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)

@@ -67,7 +67,7 @@ async def test_native_parent_approves_exact_child_without_shadow_execution(
     storage = PersistenceStorage.from_root(tmp_path)
     async with (
         Persistence.open("native-child-approval", storage=storage) as state,
-        Runtime.open(persistence=state, features=features, authorization=_HostAuthorization(), auto_recover=False) as runtime,
+        Runtime.open(persistence=state, features=features, authorization=_HostAuthorization()) as runtime,
     ):
         actor = Principal("owner", runtime.tenant_id)
         await runtime.sessions.create_turn_session("chat", principal=actor)

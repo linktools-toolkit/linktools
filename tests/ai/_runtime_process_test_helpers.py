@@ -34,9 +34,9 @@ _NAMESPACE = "recovery-ownership"
 
 def _capabilities(
     *, conversation: bool = False, native_database: Path | None = None,
-    retain_only: bool = False,
+    retain_only: bool = False, auto_recover: bool = False,
 ) -> RuntimeFeatures:
-    group = RuntimeFeatures(_NAMESPACE)
+    group = RuntimeFeatures(_NAMESPACE, auto_recover=auto_recover)
     if conversation or retain_only:
         group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     if not retain_only:
@@ -91,11 +91,11 @@ def _runtime_process(
         features = _capabilities(
             conversation=mode == "session", native_database=native_database,
             retain_only=mode == "standalone" and phase in {"handoff", "finalizing"},
+            auto_recover=auto_recover,
         )
         async with (
             Persistence.open(_NAMESPACE, storage=state) as persistence,
-            Runtime.open(persistence=persistence, features=model_features(_Models(FunctionModel(stream_function=model)), features),
-                         auto_recover=auto_recover) as runtime,
+            Runtime.open(persistence=persistence, features=model_features(_Models(FunctionModel(stream_function=model)), features)) as runtime,
         ):
             async def snapshot() -> dict[str, object]:
                 assert execution_id is not None

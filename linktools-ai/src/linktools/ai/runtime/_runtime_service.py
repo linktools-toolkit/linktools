@@ -157,7 +157,6 @@ class Runtime(Generic[AppT]):
         owns_persistence: bool, context: ExecutionContext[AppT] | None = None,
         features: RuntimeFeatures[AppT] | RuntimeFeaturesSource[AppT] | None = None,
         metrics: MetricRecorderProvider | None = None, authorization: AuthorizationPolicy | None = None,
-        auto_recover: bool = False,
     ) -> None:
         if not isinstance(persistence, Persistence):
             raise TypeError("persistence must be Persistence")
@@ -167,8 +166,6 @@ class Runtime(Generic[AppT]):
             raise TypeError("features must be RuntimeFeatures or RuntimeFeaturesSource")
         if metrics is not None and not isinstance(metrics, MetricRecorderProvider):
             raise TypeError("metrics must be MetricRecorderProvider or None")
-        if not isinstance(auto_recover, bool):
-            raise TypeError("auto_recover must be bool")
         self._namespace = validate_persistence_namespace(namespace)
         self._tenant_id = validate_tenant_id(tenant_id)
         self._state = persistence
@@ -181,7 +178,6 @@ class Runtime(Generic[AppT]):
         self._owned_assets: AssetCapability[AppT] | None = None
         self._metrics_dataset = metrics
         self._authorization = TenantAuthorizationPolicy(self._tenant_id) if authorization is None else authorization
-        self._auto_recover = auto_recover
         self._default_principal = Principal("runtime", self._tenant_id, PrincipalKind.LOCAL_TRUSTED.value)
         self._entered = False
         self._ready = False
@@ -213,7 +209,6 @@ class Runtime(Generic[AppT]):
         context: ExecutionContext[AppT] | None = None,
         features: RuntimeFeatures[AppT] | RuntimeFeaturesSource[AppT] | None = None,
         metrics: MetricRecorderProvider | None = None, authorization: AuthorizationPolicy | None = None,
-        auto_recover: bool = False,
     ) -> "Runtime[AppT]":
         """Open selected producer domains, owning storage or borrowing persistence.
 
@@ -221,7 +216,7 @@ class Runtime(Generic[AppT]):
         writable persistence without namespace, storage or tenant overrides.
         Keep the returned Runtime before entering when cleanup may need retrying.
         Features opt into Agent; omitting them does not start an Agent producer.
-        Pass auto_recover=True to opt into startup reconciliation.
+        Set auto_recover=True in RuntimeFeatures for startup Execution reconciliation.
         """
         if persistence is not None:
             if namespace is not None or storage is not None or tenant_id is not None:
@@ -231,14 +226,14 @@ class Runtime(Generic[AppT]):
             return cls(
                 persistence=persistence, namespace=persistence.namespace, tenant_id=persistence.tenant_id,
                 owns_persistence=False, context=context, features=features, metrics=metrics,
-                authorization=authorization, auto_recover=auto_recover,
+                authorization=authorization,
             )
         if namespace is None or storage is None:
             raise ValueError("namespace and storage are required without persistence")
         return cls(
             persistence=Persistence(storage), namespace=namespace, tenant_id="default" if tenant_id is None else tenant_id,
             owns_persistence=True, context=context, features=features, metrics=metrics,
-            authorization=authorization, auto_recover=auto_recover,
+            authorization=authorization,
         )
 
     @property
@@ -283,7 +278,7 @@ class Runtime(Generic[AppT]):
                     components = await compose_runtime_components(
                         persistence=self._state, app=self.app, features=self._feature_source,
                         metrics=self._metrics_dataset, authorization=self._authorization,
-                        auto_recover=self._auto_recover, lifecycle=self._agent_lifecycle,
+                        lifecycle=self._agent_lifecycle,
                         wake_graph=self._wake_owned_graph,
                     )
                     self._asset_sources = MappingProxyType(dict(components.asset_sources))

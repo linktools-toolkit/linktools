@@ -142,7 +142,7 @@ async def main():
     features.capability(native_checkpoint(),scope='runtime')
     features.tool(inspect_call,effect_policy='none')
     features.agent('default',allow_tools=('inspect_call',))
-    async with Persistence.open('crash-identity',storage=PersistenceStorage.sqlite(root/'state.sqlite'),tenant_id='tenant') as state, Runtime.open(persistence=state,features=model_features(_Models(_UsageFunctionModel(model)),features),metrics=None,auto_recover=False) as runtime:
+    async with Persistence.open('crash-identity',storage=PersistenceStorage.sqlite(root/'state.sqlite'),tenant_id='tenant') as state, Runtime.open(persistence=state,features=model_features(_Models(_UsageFunctionModel(model)),features),metrics=None) as runtime:
         if stage=='create':
             execution=await runtime.agents.get().start('inspect',principal=principal,idempotency_key='start')
             (root/'execution').write_text(execution.execution_id)

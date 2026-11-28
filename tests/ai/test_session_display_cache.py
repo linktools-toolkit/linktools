@@ -1168,7 +1168,7 @@ async def test_persistence_owns_record_cache_publication_beyond_runtime_close(tm
     cache = BlockingRecordCache()
     async with Persistence.open("display", storage=PersistenceStorage.sqlite(tmp_path / "record.db", cache=cache),
                                 tenant_id="tenant") as persistence:
-        async with Runtime.open(features=RuntimeFeatures(), persistence=persistence, auto_recover=False):
+        async with Runtime.open(features=RuntimeFeatures(), persistence=persistence):
             await persistence.execution.executions.create_execution(replace(
                 _execution("independent", status=ExecutionStatus.PENDING_START, prompt="record cache owner"),
                 session_id=None, lineage_kind=ExecutionLineageKind.RUN,

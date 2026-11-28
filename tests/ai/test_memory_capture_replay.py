@@ -242,7 +242,7 @@ async def test_runtime_imported_memory_resumes_deferred_without_rollback(tmp_pat
     features.capability(StepPersistenceCapability())
     features.capability(MemoryCapability())
     features.tool(deferred)
-    async with Runtime.open("memory-resume", storage=_storage("sqlite", tmp_path), features=features, auto_recover=False) as runtime:
+    async with Runtime.open("memory-resume", storage=_storage("sqlite", tmp_path), features=features) as runtime:
         execution = await runtime.agents.get().start("begin", input_context=ExecutionInputContext.from_messages((), memory=snapshot))
         principal = runtime.default_principal
         async with asyncio.timeout(5):

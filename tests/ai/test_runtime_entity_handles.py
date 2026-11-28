@@ -131,7 +131,7 @@ async def test_recovery_returns_handle_and_preserves_original_admitted_principal
             await super().authorize(principal, action, resource)
 
     async with Runtime.open("recover-handle", storage=storage, features=features,
-                            authorization=RecoveryAuthorization(), auto_recover=False) as runtime:
+                            authorization=RecoveryAuthorization()) as runtime:
         recovered = await runtime.executions.recover(execution.execution_id, principal=actor, idempotency_key="recover")
         assert isinstance(recovered, Execution) and recovered.principal is actor
         assert recovered.execution_id == execution.execution_id

@@ -209,7 +209,6 @@ async def compose_runtime_components(
     app: "AppT | None" = None,
     metrics: MetricRecorderProvider | None = None,
     features: "RuntimeFeatures[AppT] | RuntimeFeaturesSource[AppT] | None" = None,
-    auto_recover: bool = False,
     authorization: AuthorizationPolicy | None = None,
     lifecycle: "_AgentLifecycle | None" = None,
     wake_graph: Callable[[str, str], Awaitable[None]] | None = None,
@@ -458,7 +457,7 @@ async def compose_runtime_components(
             input_materializer=input_materializer,
             memory_scope=memory_scope,
             session_execution_ready=session_capability.enabled,
-            auto_recover=auto_recover,
+            auto_recover=source is not None and source.declaration.auto_recover,
             tool_responses=tool_responses,
             wake_graph=wake_graph,
         )

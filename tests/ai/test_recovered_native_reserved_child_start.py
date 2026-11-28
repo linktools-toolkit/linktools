@@ -67,7 +67,7 @@ async def test_recovered_native_start_requires_retained_receipt_and_pristine_chi
 
     async with (
         Persistence.open(name, storage=PersistenceStorage.from_root(tmp_path)) as state,
-        Runtime.open(persistence=state, features=features, authorization=_HostAuthorization(), auto_recover=False) as runtime,
+        Runtime.open(persistence=state, features=features, authorization=_HostAuthorization()) as runtime,
     ):
         principal = Principal("owner", runtime.tenant_id)
         await runtime.sessions.create_turn_session("chat", principal=principal)

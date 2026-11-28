@@ -23,7 +23,7 @@ async def test_local_sqlite_persistence_rejects_second_agent_producer_before_com
     async with Persistence.open("producer", storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence:
         first = Runtime.open(persistence=persistence, features=model_features(_FeatureModels()))
         second = Runtime.open(
-            persistence=persistence, features=model_features(_FeatureModels()), auto_recover=auto_recover,
+            persistence=persistence, features=model_features(_FeatureModels(), RuntimeFeatures(auto_recover=auto_recover)),
         )
         calls = 0
         original = persistence.create_agent_run_store

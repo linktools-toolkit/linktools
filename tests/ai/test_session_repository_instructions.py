@@ -756,7 +756,7 @@ async def test_native_and_custom_approvals_restore_validated_arguments(
         assert not any(is_tool_retry(part) for part in messages[-1].parts)
         return ModelResponse(parts=[TextPart("done")])
 
-    features = workspace_features("native-approval", workspace=Workspace.load(tmp_path))
+    features = workspace_features("native-approval", workspace=Workspace.load(tmp_path), auto_recover=True)
     source = features.tool(checked, effect_policy="none")
     source.requires_approval = kind == "native"
     features.agent("reader", model="default", allow_tools=("checked",), tool_retries=0, output_retries=0)
@@ -787,7 +787,7 @@ async def test_native_and_custom_approvals_restore_validated_arguments(
             decided_at=datetime.now(timezone.utc),
             resolution_metadata={"operator_note": "approved exact tool call"},
         )
-        async with Runtime.open(persistence=persistence, features=features, auto_recover=True) as runtime:
+        async with Runtime.open(persistence=persistence, features=features) as runtime:
             finished = await runtime.executions.wait(
                 execution.execution_id, principal=runtime.default_principal, timeout_seconds=10,
             )

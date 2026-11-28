@@ -310,7 +310,7 @@ async def test_local_native_handoff_backup_recovers_same_execution(tmp_path: Pat
     async with Persistence.open("native-handoff", storage=PersistenceStorage.from_root(target, exclusive_writer=True)) as persistence:
         native = await persistence.create_step_store()
         try:
-            async with Runtime.open(persistence=persistence, features=features(native, answer), auto_recover=False) as successor:
+            async with Runtime.open(persistence=persistence, features=features(native, answer)) as successor:
                 principal = successor.default_principal
                 before = await successor.executions.inspect(execution.execution_id, principal=principal)
                 assert before.status is ExecutionStatus.STARTED

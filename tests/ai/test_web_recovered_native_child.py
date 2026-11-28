@@ -97,7 +97,7 @@ async def test_web_recovery_first_starts_only_the_original_reserved_child(
         async with (
             Persistence.open(name, storage=storage) as state,
             Runtime.open(persistence=state, features=features,
-                         authorization=_HostAuthorization(), auto_recover=False) as runtime,
+                         authorization=_HostAuthorization()) as runtime,
         ):
             app = create_app(runtime=runtime, local_workspace=True)
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8765") as http:

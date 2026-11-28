@@ -103,8 +103,7 @@ async def test_revoked_failed_owner_retries_exact_cleanup_without_replaying_effe
             values.agent("default", model="default", allow_tools=("effect",))
             return model_features(_Models(_UsageFunctionModel(model)), values)
 
-        async with Runtime.open(persistence=state, features=features(), metrics=None,
-                                  auto_recover=False) as original:
+        async with Runtime.open(persistence=state, features=features(), metrics=None) as original:
             execution = await original.agents.get().start("first turn", idempotency_key="first")
             with pytest.raises(AIError) as failure:
                 await execution.wait(timeout_seconds=10)
@@ -118,8 +117,7 @@ async def test_revoked_failed_owner_retries_exact_cleanup_without_replaying_effe
                 assert failure.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
                 assert set(buffer.pending) == pending
 
-            async with Runtime.open(persistence=state, features=features(), metrics=None,
-                                      auto_recover=False) as successor:
+            async with Runtime.open(persistence=state, features=features(), metrics=None) as successor:
                 principal = successor.default_principal
                 repeated = await successor.agents.get().start(
                     "first turn", idempotency_key="first",
@@ -235,8 +233,7 @@ async def test_terminal_handoff_cleans_only_revoked_failed_execution_while_peer_
             values.agent("default", model="default", allow_tools=("effect",))
             return model_features(_Models(_UsageFunctionModel(model)), values)
 
-        async with Runtime.open(persistence=state, features=features(), metrics=None,
-                                  auto_recover=False) as original:
+        async with Runtime.open(persistence=state, features=features(), metrics=None) as original:
             agent = original.agents.get()
             peer = await agent.start("healthy peer", idempotency_key="peer")
             await asyncio.wait_for(peer_entered.wait(), 5)
@@ -247,8 +244,7 @@ async def test_terminal_handoff_cleans_only_revoked_failed_execution_while_peer_
                     await failed.wait(timeout_seconds=10)
                 assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
                 assert receipt is not None
-                async with Runtime.open(persistence=state, features=features(), metrics=None,
-                                          auto_recover=False) as control:
+                async with Runtime.open(persistence=state, features=features(), metrics=None) as control:
                     cancelled = await control.executions.cancel(failed.execution_id,
                         CancelExecutionRequest(control.default_principal, "revoke", force=True))
                     assert cancelled.cancelled

@@ -40,7 +40,7 @@ async def _runtime(database: Path, model, tool, *, restart_checkpoints: bool = T
         async with Persistence.open("native-recovery", storage=PersistenceStorage.sql(engine)) as persistence:
             async with Runtime.open(persistence=persistence,
                 features=model_features(_Models(_UsageFunctionModel(model)), features),
-                auto_recover=False, authorization=authorization) as runtime:
+                authorization=authorization) as runtime:
                 yield runtime, persistence, steps
     finally:
         await engine.dispose()

@@ -107,12 +107,12 @@ async def test_local_root_keeps_one_agent_producer_while_allowing_task_only_view
         await release.wait()
         yield 'one producer'
 
-    features = model_features(_Models(FunctionModel(stream_function=answer)), _group(False))
+    features = model_features(_Models(FunctionModel(stream_function=answer)), _group(False, auto_recover=auto_recover))
     async with Persistence.open('local-runtime', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as state:
         async with Runtime.open(persistence=state, features=features) as first, Runtime.open(persistence=state):
             execution = await first.agents.get().start('only one owner', idempotency_key='same')
             await asyncio.wait_for(entered.wait(), 5)
-            second = Runtime.open(persistence=state, features=features, auto_recover=auto_recover)
+            second = Runtime.open(persistence=state, features=features)
             try:
                 with pytest.raises(AIError) as rejected:
                     await second.__aenter__()
@@ -133,7 +133,7 @@ async def test_local_sqlite_process_exit_preserves_same_execution_recovery(tmp_p
     import textwrap
     from pydantic_ai.models.function import FunctionModel
     from linktools.ai.core import ExecutionStatus
-    from linktools.ai.runtime import Runtime
+    from linktools.ai.runtime import Runtime, RuntimeFeatures
     from ._runtime_test_helpers import model_features
     from .test_live_history_readback_integration import _Models
     from .test_runtime_auto_recovery import _capabilities
@@ -193,8 +193,10 @@ async def test_local_sqlite_process_exit_preserves_same_execution_recovery(tmp_p
 
     async with Persistence.open('startup-recovery', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as state:
         async with Runtime.open(persistence=state,
-            features=model_features(_Models(FunctionModel(stream_function=recovered)), _capabilities()),
-            auto_recover=auto_recover) as runtime:
+            features=model_features(_Models(FunctionModel(stream_function=recovered)), _capabilities(
+                RuntimeFeatures("startup-recovery", auto_recover=auto_recover),
+            )),
+        ) as runtime:
             if not auto_recover:
                 assert not calls
                 assert (await runtime.executions.inspect(execution_id, principal=runtime.default_principal)).status is ExecutionStatus.STARTED

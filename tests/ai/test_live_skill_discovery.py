@@ -217,7 +217,7 @@ async def test_recovery_keeps_committed_skill_observation_and_reads_current_with
         features.model("default", _Models(_UsageFunctionModel(model)))
         features.agent("default", allow_tools=(), allow_skills=("*",), metadata={"role": role})
         async with Persistence.open("skill-recovery", storage=PersistenceStorage.sqlite(tmp_path / "recovery.db")) as persistence:
-            async with Runtime.open(persistence=persistence, features=features, auto_recover=False) as runtime:
+            async with Runtime.open(persistence=persistence, features=features) as runtime:
                 yield runtime, persistence, checkpoints.store
 
     async def interrupted(messages, info):

@@ -258,7 +258,7 @@ async def test_pending_reference_reopens_from_checkpoint_with_original_principal
         loaded.append((agent_context.principal, content))
         return _TEXT_BODY
 
-    async with Persistence.open(_RECOVERY_NAMESPACE, storage=PersistenceStorage.from_root(path, exclusive_writer=True)) as persistence_260, Runtime.open(persistence=persistence_260, authorization=_RecoveryAuthorization(), features=_recovery_features(authorized_load, authorized_text if multiple_sources else None), auto_recover=False) as runtime:
+    async with Persistence.open(_RECOVERY_NAMESPACE, storage=PersistenceStorage.from_root(path, exclusive_writer=True)) as persistence_260, Runtime.open(persistence=persistence_260, authorization=_RecoveryAuthorization(), features=_recovery_features(authorized_load, authorized_text if multiple_sources else None)) as runtime:
         checkpoint = await runtime._state.execution.executions.get(
             execution_id, tenant_id=_ADMITTED.tenant_id,
         )
@@ -272,7 +272,7 @@ async def test_pending_reference_reopens_from_checkpoint_with_original_principal
         )).result
         assert result.status is ExecutionStatus.SUCCEEDED, result.error_diagnostics
         assert result.output == {"text": "recovered reference"}
-    async with Persistence.open(_RECOVERY_NAMESPACE, storage=PersistenceStorage.from_root(path, exclusive_writer=True)) as persistence_277, Runtime.open(persistence=persistence_277, authorization=_RecoveryAuthorization(), features=_recovery_features(authorized_load, authorized_text if multiple_sources else None), auto_recover=False) as reopened:
+    async with Persistence.open(_RECOVERY_NAMESPACE, storage=PersistenceStorage.from_root(path, exclusive_writer=True)) as persistence_277, Runtime.open(persistence=persistence_277, authorization=_RecoveryAuthorization(), features=_recovery_features(authorized_load, authorized_text if multiple_sources else None)) as reopened:
         history = await reopened.executions.history(
             execution_id, principal=_ADMITTED, include_content=True,
         )

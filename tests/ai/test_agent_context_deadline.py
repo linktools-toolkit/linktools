@@ -152,7 +152,7 @@ async def test_cold_recovery_restores_absolute_deadline_once(tmp_path: Path, mon
         execution_id = run.execution_id
     assert not contexts
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
-    async with Persistence.open('deadline-recovery', storage=storage) as persistence_125, Runtime.open(persistence=persistence_125, features=model_features(RuntimeUsageModels(), features), auto_recover=False) as runtime:
+    async with Persistence.open('deadline-recovery', storage=storage) as persistence_125, Runtime.open(persistence=persistence_125, features=model_features(RuntimeUsageModels(), features)) as runtime:
         reads: list[str] = []
         read = runtime._state.execution.budgets.read
 
